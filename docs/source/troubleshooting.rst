@@ -65,6 +65,27 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 - Increase exploration (higher epsilon in ``exploration_config.py``)
 - Verify reference line covers the entire track
 
+**Cars stop moving during training (Window Focus Issue)** 🆕
+
+*Symptoms:* Cars "twitch" at start but don't move forward. Clicking on a window makes it work again.
+
+*Cause:* TMInterface requires window focus to process inputs, even with ``unfocused_fps_limit false``.
+
+*Solution:* This is now **automatically fixed** in the code. The game window receives focus once per map load, which is sufficient. No manual intervention needed.
+
+*Technical details:*
+
+- Window focus is set automatically when loading a new map
+- For multiple instances (8+), focus is managed to avoid "focus war"
+- Minimal performance impact (<0.01%)
+- Works correctly with map cycling
+
+*If issue persists:*
+
+1. Check that windows are not minimized (game pauses when minimized)
+2. Verify ``force_window_focus_on_input = False`` in ``performance_config.py``
+3. With multiple maps, ensure smooth transitions between maps in logs
+
 **Game crashes on startup**
 
 - Check TMLoader profile is correctly configured

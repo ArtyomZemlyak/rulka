@@ -14,7 +14,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh  # Linux/macOS
 irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
 # 2. Clone and install
-git clone <your-repo-url>
+git clone https://github.com/ArtyomZemlyak/rulka.git
 cd rulka
 uv sync
 
@@ -74,8 +74,18 @@ Compared to original Linesight:
 
 **Build HTML docs:**
 ```bash
-cd docs && pip install -e ".[doc]" && make html
+# Install documentation dependencies
+uv sync --extra docs
+
+# Build documentation
+cd docs
+python -m sphinx -b html source build/html
+
+# View locally (Windows)
+start build/html/index.html
 ```
+
+**Note:** `docs/build/` is git-ignored. Documentation builds automatically on GitHub Pages.
 
 ## Requirements
 

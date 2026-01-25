@@ -64,7 +64,16 @@ We are ready to start training.
 
 Upon running this command, it is expected that a :doc:`wall of text appears in your terminal <wall_text>`. *Don't worry, this is normal.*
 
-A few seconds after running this command, two instances of the game will be launched in windowed mode. Be aware that if these windows are minimized, the game will pause and that game instance will no longer generate experiences. You may hide game instances by placing other windows on top.
+A few seconds after running this command, two instances of the game will be launched in windowed mode. 
+
+.. note::
+   **Window Management (Automatic):**
+   
+   - **Don't minimize** game windows - the game pauses when minimized
+   - You can place other windows on top instead
+   - Window focus is **automatically managed** by the code
+   - Each window gets focus once per map load (no manual intervention needed)
+   - With multiple instances, focus is intelligently coordinated
 
 A few seconds after launching the game, the script will load the map automatically. There is no need for the user to interact with the game menu when launching the training script.
 
@@ -82,6 +91,14 @@ Start the tensorboard local server to monitor training.
 The tensorboard interface can be accessed with a web browser at `http://localhost:6006/ <http://localhost:6006/>`_.
 
 The tab "Custom Scalars" at the top is preconfigured with a default layout. Graphs are plotted with *number of interaction steps between the agent and the game* on the X axis. The explanations below are intended for a general audience and may omit nuances that would stand out to a RL researcher.
+
+**Metric Organization**: All metrics are organized into groups using prefixes (e.g., ``Training/``, ``RL/``, ``Gradients/``, ``Race/``, ``Performance/``, ``Buffer/``, ``Network/``, ``IQN/``). This makes it easier to navigate the many metrics in TensorBoard. You can filter metrics by group in the "SCALARS" tab or view pre-configured groups in "Custom Scalars".
+
+**Key Metrics to Monitor**:
+- **Training/learning_rate**: Should decay according to schedule
+- **Gradients/norm_before_clip_max**: Watch for gradient explosions (>100 indicates potential issues)
+- **RL/avg_Q**: Expected future reward (key indicator of learning progress)
+- **Race/eval_race_time_robust**: Best evaluation times (primary performance metric)
 
 Early training
 ..............

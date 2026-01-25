@@ -32,3 +32,7 @@ Nadeo.ini
 *.lnk
 .stignore*
 config_files/config_copy.py
+
+# Documentation build artifacts
+/docs/build/
+/docs/source/_build/

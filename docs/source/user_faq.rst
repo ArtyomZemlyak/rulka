@@ -48,6 +48,33 @@ A: Start with 2-4 and monitor:
 - CPU usage: should be 70-90% (not maxed)
 - RAM usage: ~2GB per instance
 - GPU usage: 80-95% is optimal
+
+**Q: What about window focus with multiple instances?** 🆕
+
+A: **Automatically handled!** The code manages window focus intelligently:
+
+- Each game window gets focus once when loading a new map
+- No "focus war" between instances (they work in background)
+- Works correctly with 8+ parallel instances
+- Minimal performance impact (<0.01%)
+
+**Important:** Don't minimize game windows - the game pauses when minimized. You can place other windows on top instead.
+
+**Q: Why are my cars not moving during training?**
+
+A: Most likely causes:
+
+1. **Windows minimized:** Game pauses when minimized (unminimize them)
+2. **First-time setup:** Window focus is set automatically on first map load
+3. **Map cycling:** With multiple maps, focus resets on each map change (automatic)
+
+If cars suddenly stop after working fine:
+
+- Check windows aren't minimized
+- Look for timeout messages in logs
+- Verify all instances show similar frame generation rates
+
+**Q: How many game instances should I use (specific numbers)?**
 - Training throughput: batches per minute
 
 Increase instances until you hit a bottleneck (usually CPU or RAM).
@@ -102,7 +129,7 @@ A: Yes! Edit ``map_cycle_config.py`` to alternate between maps:
 A: Checkpoints are saved automatically in ``save/{run_name}/``. To resume:
 
 1. Ensure ``.torch`` files exist in ``save/{run_name}/``
-2. Keep the same ``run_name`` in ``map_cycle_config.py``
+2. Keep the same ``run_name`` in ``training_config.py``
 3. Run ``python scripts/train.py``
 
 Training will load the checkpoint automatically.
@@ -207,12 +234,38 @@ Monitoring
 
 **Q: What metrics should I watch in TensorBoard?**
 
-A: Key graphs in "Custom Scalars" tab:
+A: Metrics are organized into groups for easier navigation. Key metrics to monitor:
 
-- **avg_Q**: Expected reward (should increase after initial drop)
-- **single_zones_reached**: How far agent drives (% of track completed)
-- **eval_race_time_robust**: Best evaluation times
-- **loss**: Training loss (can increase early - normal for RL)
+**Training/** group:
+- **Training/loss**: Training loss (can increase early - normal for RL)
+- **Training/loss_test**: Test loss on held-out buffer
+- **Training/learning_rate**: Current learning rate (decays over time)
+
+**RL/** group:
+- **RL/avg_Q**: Expected reward (should increase after initial drop)
+- **RL/single_zone_reached**: How far agent drives (% of track completed)
+- **RL/gamma**: Discount factor (typically 0.999 → 1.0)
+- **RL/epsilon**: Exploration rate (decays from 1.0 to ~0.03)
+
+**Race/** group:
+- **Race/eval_race_time_robust**: Best evaluation times (most important performance metric)
+- **Race/explo_race_time_finished**: Exploration run times (more variable, includes exploration)
+
+**Gradients/** group:
+- **Gradients/norm_median**: Median gradient norm after clipping (should be stable)
+- **Gradients/norm_before_clip_max**: Maximum gradient norm BEFORE clipping (watch for explosions >100)
+- **Gradients/by_layer/**: Per-layer gradient norms (useful for debugging)
+
+**Performance/** group:
+- **Performance/transitions_learned_per_second**: Training throughput
+- **Performance/learner_percentage_training**: % time spent training (should be high)
+
+**Buffer/** group:
+- **Buffer/size**: Current replay buffer size
+- **Buffer/priorities_median**: Median priority (if using prioritized replay)
+
+**IQN/** group (IQN-specific):
+- **IQN/quantile_std_action_X**: Standard deviation of quantile predictions per action (measures uncertainty)
 
 **Q: Why is my loss increasing?**
 
@@ -232,6 +285,66 @@ A: This is the "optimization phase" (after ~3-5M frames):
 - Agent is refining strategy details
 - Continue training for 10-20M more frames
 - Consider enabling shaped rewards for faster progress
+
+**Q: How are TensorBoard metrics organized?**
+
+A: All metrics are grouped into categories using prefixes. This makes navigation easier:
+
+**Training/** - Training process metrics:
+- ``Training/loss`` - Training loss (can increase early - normal in RL)
+- ``Training/loss_test`` - Test loss on held-out buffer
+- ``Training/learning_rate`` - Current learning rate (decays according to schedule)
+- ``Training/weight_decay`` - L2 regularization strength
+- ``Training/batch_size`` - Batch size used for training
+- ``Training/n_steps`` - N-step return horizon
+- ``Training/train_on_batch_duration`` - Time per training batch
+
+**Gradients/** - Gradient monitoring (critical for stability):
+- ``Gradients/norm_median``, ``Gradients/norm_d9``, ``Gradients/norm_max`` - Gradient norms AFTER clipping (should be stable, typically <30)
+- ``Gradients/norm_before_clip_max`` - **Watch this!** Maximum gradient norm BEFORE clipping. Values >100 indicate gradient explosions. Should typically be <50.
+- ``Gradients/by_layer/{layer_name}/L2_*`` - Per-layer gradient L2 norms (useful for debugging which layers have issues)
+- ``Gradients/by_layer/{layer_name}/Linf_*`` - Per-layer gradient max norms
+
+**RL/** - Reinforcement learning hyperparameters and metrics:
+- ``RL/avg_Q`` - Expected future reward (key learning indicator, should increase after initial drop)
+- ``RL/single_zone_reached`` - How far agent drives (% of track completed)
+- ``RL/gamma`` - Discount factor (typically 0.999 → 1.0)
+- ``RL/epsilon`` - Epsilon-greedy exploration rate (decays from 1.0 to ~0.03)
+- ``RL/epsilon_boltzmann`` - Boltzmann exploration temperature
+- ``RL/tau_epsilon_boltzmann`` - Boltzmann tau parameter
+
+**Race/** - Race performance metrics:
+- ``Race/eval_race_time_robust`` - **Most important!** Best evaluation times (greedy policy, no exploration)
+- ``Race/explo_race_time_finished`` - Exploration run times (includes exploration, more variable)
+- ``Race/race_time_ratio_*`` - Race time relative to rollout duration
+- ``Race/split_*`` - Split times between checkpoints
+
+**Performance/** - System performance metrics:
+- ``Performance/transitions_learned_per_second`` - Training throughput
+- ``Performance/learner_percentage_training`` - % time spent training (should be high, >70%)
+- ``Performance/learner_percentage_waiting_for_workers`` - % time waiting for data (should be low, <20%)
+- ``Performance/learner_percentage_testing`` - % time spent on test batches
+
+**Buffer/** - Replay buffer statistics:
+- ``Buffer/size`` - Current buffer size
+- ``Buffer/max_size`` - Maximum buffer capacity
+- ``Buffer/priorities_*`` - Priority statistics (if using prioritized replay)
+
+**Network/** - Neural network weights and optimizer state:
+- ``Network/weights/{layer_name}/L2`` - L2 norm of layer weights
+- ``Network/optimizer/{layer_name}/adaptive_lr_L2`` - Per-parameter adaptive learning rates (Adam/RAdam)
+- ``Network/optimizer/{layer_name}/exp_avg_L2`` - First moment estimate (Adam/RAdam)
+- ``Network/optimizer/{layer_name}/exp_avg_sq_L2`` - Second moment estimate (Adam/RAdam)
+
+**IQN/** - IQN-specific metrics (Implicit Quantile Network):
+- ``IQN/quantile_std_action_{i}`` - Standard deviation of quantile predictions per action. Higher values indicate more uncertainty in Q-value estimates. Useful for understanding model confidence.
+
+**Tips for using TensorBoard:**
+- Use the "SCALARS" tab to filter by group prefix (e.g., type "Gradients/" to see all gradient metrics)
+- The "Custom Scalars" tab has pre-configured layouts for key metrics
+- Watch ``Gradients/norm_before_clip_max`` closely - sudden spikes indicate gradient explosions
+- ``RL/avg_Q`` should generally trend upward after initial exploration phase
+- ``Race/eval_race_time_robust`` is your primary performance metric - lower is better
 
 Technical Issues
 ----------------
