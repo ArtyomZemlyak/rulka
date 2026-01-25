@@ -91,10 +91,12 @@ def launch_game(tmi_port):
 
         tmi_process_id = int(subprocess.check_output(launch_string).decode().split("\r\n")[1])
         while tm_process_id is None:
+            # Use PowerShell instead of deprecated wmic
+            ps_command = 'powershell -command "Get-CimInstance Win32_Process | Select-Object Name, ParentProcessId, ProcessId | ForEach-Object { \\"$($_.Name) $($_.ParentProcessId) $($_.ProcessId)\\" }"'
             tm_processes = list(
                 filter(
                     lambda s: s.startswith("TmForever"),
-                    subprocess.check_output("wmic process get Caption,ParentProcessId,ProcessId").decode().split("\r\n"),
+                    subprocess.check_output(ps_command, shell=True).decode().split("\r\n"),
                 )
             )
             for process in tm_processes:

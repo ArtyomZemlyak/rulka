@@ -1,4 +1,81 @@
+[project]
+name = "trackmania-rl"
+version = "1.0.0"
+description = "Trackmania AI with reinforcement learning - Rulka fork"
+license = {text = "MIT"}
+requires-python = ">=3.10,<3.12"
+readme = "README.md"
+authors = [
+    {name = "artyo"},
+]
+
+dependencies = [
+    # Core ML (PyTorch устанавливается через [tool.uv.sources])
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+    "torchaudio>=2.7.0",
+    "torchrl>=0.6.0",
+    
+    # Scientific computing
+    "numpy>=1.26.4,<2.0",  # numpy 2.0 ломает numba
+    "scipy>=1.14.0",
+    "numba>=0.60.0",
+    
+    # Visualization & monitoring
+    "matplotlib>=3.9.0",
+    "tensorboard>=2.18.0",
+    "prettytable>=3.11.0",
+    "art>=6.3",
+    
+    # Image processing
+    "opencv-python>=4.10.0",
+    
+    # Utilities
+    "joblib>=1.4.0",
+    "psutil>=6.0.0",
+    "setuptools",
+    
+    # TrackMania specific
+    "readwritememory",
+    "tminterface",
+    "pygbx",
+    
+    # Windows specific
+    "pywin32>=306 ; sys_platform == 'win32'",
+    
+    # Linux specific
+    "python-libxdo>=0.1.0 ; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+]
+doc = [
+    "sphinx>=8.0.0",
+    "sphinx_rtd_theme>=3.0.0",
+    "sphinxcontrib-youtube>=1.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["trackmania_rl", "config_files"]
+
 [tool.ruff]
-include = ["pyproject.toml", "trackmania_rl/*.py", "scripts/*.py", "config_files/*.py"]
+include = ["pyproject.toml", "trackmania_rl/**/*.py", "scripts/**/*.py", "config_files/**/*.py"]
 line-length = 140
 
+[tool.uv]
+# Используем PyTorch с CUDA 12.x (compatible with most modern GPUs)
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }

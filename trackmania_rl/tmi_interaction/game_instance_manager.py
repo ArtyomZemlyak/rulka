@@ -210,19 +210,15 @@ class GameInstanceManager:
 
             tmi_process_id = int(subprocess.check_output(launch_string).decode().split("\r\n")[1])
             while self.tm_process_id is None:
-                tm_processes = list(
-                    filter(
-                        lambda s: s.startswith("TmForever"),
-                        subprocess.check_output("wmic process get Caption,ParentProcessId,ProcessId").decode().split("\r\n"),
-                    )
-                )
-                for process in tm_processes:
-                    name, parent_id, process_id = process.split()
-                    parent_id = int(parent_id)
-                    process_id = int(process_id)
-                    if parent_id == tmi_process_id:
-                        self.tm_process_id = process_id
-                        break
+                # Use psutil instead of wmic (which is deprecated in modern Windows)
+                for process in psutil.process_iter(['pid', 'ppid', 'name']):
+                    try:
+                        process_info = process.info
+                        if process_info['name'].startswith("TmForever") and process_info['ppid'] == tmi_process_id:
+                            self.tm_process_id = process_info['pid']
+                            break
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
 
         print(f"Found Trackmania process id: {self.tm_process_id=}")
         self.last_game_reboot = time.perf_counter()
@@ -251,6 +247,10 @@ class GameInstanceManager:
         if not self.is_game_running():
             print("Game not found. Restarting TMInterface.")
             self.launch_game()
+            # Wait for game to finish startup before Python connects
+            # Otherwise AngelScript plugin queues OnConnect and Python times out
+            print("Waiting for game to finish loading...")
+            time.sleep(1)
 
     def grab_screen(self):
         return self.iface.get_frame(config_copy.W_downsized, config_copy.H_downsized)
@@ -263,18 +263,28 @@ class GameInstanceManager:
         self.iface.set_input_state(**config_copy.inputs[action_idx])
 
     def request_map(self, map_path: str, zone_centers: npt.NDArray):
+        # Normalize map path and remove quotes so TMInterface can parse "map"
+        map_path_clean = map_path.strip("'\"")
         self.latest_map_path_requested = map_path
         if user_config.is_linux:
-            map_path = map_path.replace("\\", "/")
+            map_path_clean = map_path_clean.replace("\\", "/")
         else:
-            map_path = map_path.replace("/", "\\")
-        map_loader.hide_personal_record_replay(map_path, True)
-        self.iface.execute_command(f"map {map_path}")
+            map_path_clean = map_path_clean.replace("/", "\\")
+
+        map_loader.hide_personal_record_replay(map_path_clean, True)
+
+        # Use unquoted path unless it contains spaces
+        if " " in map_path_clean:
+            map_command = f'map "{map_path_clean}"'
+        else:
+            map_command = f"map {map_path_clean}"
+
+        self.iface.execute_command(map_command)
         self.UI_disabled = False
         (
             self.next_real_checkpoint_positions,
             self.max_allowable_distance_to_real_checkpoint,
-        ) = map_loader.sync_virtual_and_real_checkpoints(zone_centers, map_path)
+        ) = map_loader.sync_virtual_and_real_checkpoints(zone_centers, map_path_clean)
 
     def rollout(self, exploration_policy: Callable, map_path: str, zone_centers: npt.NDArray, update_network: Callable):
         (
@@ -520,6 +530,8 @@ class GameInstanceManager:
 
                     if _time == 0 and (map_path not in self.start_states):
                         self.start_states[map_path] = self.iface.get_simulation_state()
+                        map_name = map_path.split('/')[-1].strip('"')
+                        print(f"[OK] Start state saved for {map_name} - future runs will be automatic!")
 
                     if (not give_up_signal_has_been_sent) and (map_path != self.latest_map_path_requested):
                         self.request_map(map_path, zone_centers)

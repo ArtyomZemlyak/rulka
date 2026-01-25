@@ -7,9 +7,46 @@ In this page, we run the code with default training hyperparameters. At the end 
 Setup
 -----
 
-The code is set up to train on `ESL-Hockolicious <https://tmnf.exchange/trackshow/414041>`_. Download the map and place it at the location: ``%%documents%%/TrackMania/Tracks/Challenges/ESL-Hockolicious.Challenge.Gbx``
+**1. Download the map**
 
-These instructions assume that no modifications were made to the files since cloning the Linesight repository, except for ``config_files/user_config.py``. If needed, the repository can be restored to its original unconfigured condition with the following command:
+The code is preconfigured to train on `ESL-Hockolicious <https://tmnf.exchange/trackshow/414041>`_. 
+
+Download the map and place it at: ``%%documents%%/TrackMania/Tracks/Challenges/ESL-Hockolicious.Challenge.Gbx``
+
+.. warning::
+   **Do NOT place maps in OneDrive or cloud storage folders.** Cloud synchronization interferes with map loading.
+
+**2. Create virtual checkpoints (reference line)**
+
+Virtual checkpoints (VCP) provide dense progress tracking for the agent. You need a reference replay to generate them.
+
+Option A: Use existing reference line
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If a reference line already exists in ``maps/`` folder (e.g., ``map5_0.5m_cl.npy``), you can use it directly by configuring ``map_cycle_config.py``.
+
+Option B: Generate from replay
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To create a new reference line:
+
+1. Drive the track manually and save a replay (or download a reference replay)
+2. Place replay in: ``%%documents%%/TrackMania/Tracks/Replays/``
+3. Convert replay to virtual checkpoints:
+
+.. code-block:: bash
+
+    python scripts/tools/gbx_to_vcp.py "path/to/your/replay.Replay.Gbx"
+
+This generates a ``.npy`` file in ``maps/`` folder with virtual checkpoints spaced at ``distance_between_checkpoints`` (default 0.5m).
+
+4. Update ``map_cycle_config.py`` to reference your new ``.npy`` file
+
+**3. Verify configuration**
+
+These instructions assume that no modifications were made to the files since cloning the repository, except for ``config_files/user_config.py``. 
+
+If needed, the repository can be restored to its original condition with:
 
 .. code-block:: bash
 

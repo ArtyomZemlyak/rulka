@@ -6,7 +6,7 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'Linesight'
+project = 'Rulka'
 copyright = '2024, pb4 and Agade'
 author = 'pb4 and Agade'
 release = '3.0.1'

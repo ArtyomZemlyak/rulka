@@ -92,7 +92,13 @@ def densify_raw_pos_list_n_times(raw_pos_list: List[npt.NDArray], n: int):
 def map_name_from_map_path(map_path):
     gbx = Gbx(str(config_copy.trackmania_base_path / "Tracks" / "Challenges" / Path(map_path.strip("'\""))))
     gbx_challenge = gbx.get_class_by_id(GbxType.CHALLENGE)
-    return gbx_challenge.map_name
+    
+    # If map_name is None, use the filename without extension as fallback
+    if gbx_challenge and gbx_challenge.map_name:
+        return gbx_challenge.map_name
+    else:
+        # Fallback: use the filename without extension
+        return Path(map_path.strip("'\"")).stem
 
 
 def replay_personal_record(map_path):

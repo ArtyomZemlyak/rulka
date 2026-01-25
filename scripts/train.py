@@ -96,12 +96,15 @@ if __name__ == "__main__":
         config_copy.target_python_link_path,
     )
 
-    print("Run:\n\n")
-    tprint(config_copy.run_name, font="tarty4")
-    print("\n" * 2)
-    tprint("Linesight", font="tarty1")
-    print("\n" * 2)
-    print("Training is starting!")
+    print("\n" + "="*80)
+    tprint("Rulka", font="tarty1")
+    print("="*80)
+    print(f"  Run name: {config_copy.run_name}")
+    print(f"  GPU collectors: {config_copy.gpu_collectors_count}")
+    print(f"  Base TMI port: {config_copy.base_tmi_port}")
+    print(f"  Save directory: {save_dir}")
+    print("="*80)
+    print("\n[INFO] Starting training...\n")
 
     if config_copy.is_linux:
         os.system(f"chmod +x {config_copy.linux_launch_game_path}")

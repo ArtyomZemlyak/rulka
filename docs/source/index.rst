@@ -1,14 +1,21 @@
 =====================================
-Linesight Trackmania AI Documentation
+TrackMania RL - Documentation
 =====================================
 
-Welcome to the `Linesight <https://github.com/pb4git/linesight>`_ Trackmania AI project!
+Welcome to the TrackMania RL project documentation!
 
-Our goal is to create an AI that can learn to play *Trackmania Nations Forever* at a world-class level using reinforcement learning. We've already obtained significant results as showcased in the video below. Our AI was able to beat ten out of twelve prestigious world records in the official Trackmania campaign.
+This is a fork and extension of the original `Linesight <https://github.com/pb4git/linesight>`_ project, adapted for reinforcement learning experiments in *Trackmania Nations Forever*.
 
-We're excited to open-source our code. Whether you are a Trackmania enthusiast or a seasoned AI researcher, you may use the project to train your own AI. We welcome contributions to help push the boundaries of what AI can achieve in Trackmania.
+The project uses distributional reinforcement learning (IQN - Implicit Quantile Networks) to train an AI agent to drive in TrackMania. The goal is to explore RL algorithms, reward shaping, and training techniques in a complex racing environment.
 
-.. youtube:: cUojVsCJ51I
+**Key Features:**
+
+- Distributional RL with IQN (Implicit Quantile Network)
+- Modular configuration system for easy experimentation
+- Support for multiple parallel game instances
+- Hot-reloadable training parameters
+- TensorBoard integration for monitoring
+- Virtual checkpoint system for dense progress tracking
 
 **All runs produced by this project are Tool Assisted. They must not be submitted to the Official Leaderboards.**
 
@@ -19,6 +26,7 @@ We're excited to open-source our code. Whether you are a Trackmania enthusiast o
    installation
    first_training
    second_training
+   configuration_guide
    user_faq
    troubleshooting
 

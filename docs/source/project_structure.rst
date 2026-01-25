@@ -2,7 +2,7 @@
 Project Structure
 =================
 
-This page provides a high-level overview of the structure of the Linesight repository.
+This page provides a high-level overview of the structure of the Rulka repository.
 
 Repository Overview
 -------------------
@@ -19,13 +19,31 @@ The repository is organized into the following directories:
 config_files
 ------------
 
-The ``config_files/`` folder contains four files that are used to configure the project:
+The ``config_files/`` folder contains configuration files organized by category for better maintainability:
 
-    - ``config.py``: This file contains the configuration for a training run. It includes parameters such as the size of the replay buffer, the learning rate, and the reward function.
-    - ``config_copy.py``: This file is a copy of ``config.py`` created at the beginning of each training run. See the docstring at the top of the file for explanations on how/why this file exists.
-    - ``inputs_list.py``: This file defines the set of valid inputs that the agent can take. Each input is a dictionary that specifies the state of the agent's keys (left, right, accelerate, brake).
-    - ``state_normalization.py``: This file defines the normalization parameters for the agent's state. The state is normalized by subtracting the mean and dividing by the standard deviation, using the values defined in this file.
-    - ``user_config.py``: This file contains user-level configuration. It is expected that the user fills this file once when setting up the project, and does not need to modify it after. It includes parameters such as the username of the TMNF account and the path to the TMInterface plugin.
+**Core Configuration Files:**
+
+    - ``config.py``: Main configuration file that re-exports all settings from modular config files. Provides backward compatibility.
+    - ``config_copy.py``: Created at training start as a copy of config.py. Can be modified during training to hot-reload parameters without restart. See docstring for details.
+    - ``user_config.py``: User-specific settings (paths, usernames). Set once during initial setup.
+
+**Modular Configuration Files:**
+
+    - ``environment_config.py``: Game environment settings (image size, timing, spatial parameters, timeouts)
+    - ``neural_network_config.py``: Network architecture (layer sizes, IQN parameters, gradient clipping)
+    - ``training_config.py``: Training hyperparameters (learning rate, gamma, n-step, batch size, schedules)
+    - ``memory_config.py``: Replay buffer settings (buffer size, prioritization, sampling)
+    - ``exploration_config.py``: Exploration strategies (epsilon-greedy, Boltzmann)
+    - ``rewards_config.py``: Reward shaping (progress rewards, time penalties)
+    - ``map_cycle_config.py``: Map training cycle (which maps to train on, in what order)
+    - ``performance_config.py``: System performance (parallelization, visualization, augmentation)
+
+**Supporting Files:**
+
+    - ``inputs_list.py``: Defines discrete action space (forward, brake, steering combinations)
+    - ``state_normalization.py``: Normalization parameters for state features (mean and std deviation)
+
+All settings can be imported from ``config.py`` for backward compatibility, or from specific modules for clarity.
 
 
 maps

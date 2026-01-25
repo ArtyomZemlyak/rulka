@@ -2,12 +2,75 @@
 Troubleshooting
 ===============
 
+Common Issues
+-------------
+
 **Game stuck on login screen:**
 
 The TMNF account must be an **online account**. If your account is offline:
 
 - Start the game without TMInterface and create an online account
-- Set your `username` to that account in `user_config.py`
+- Set your `username` to that online account in `user_config.py`
+
+**FileNotFoundError: Python_Link.as**
+
+The plugin wasn't copied to the correct location. Run:
+
+.. code-block:: powershell
+
+    # Windows
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\Documents\TMInterface\Plugins"
+    Copy-Item "trackmania_rl\tmi_interaction\Python_Link.as" "$env:USERPROFILE\Documents\TMInterface\Plugins\"
+
+.. code-block:: bash
+
+    # Linux
+    mkdir -p ~/Documents/TMInterface/Plugins
+    cp trackmania_rl/tmi_interaction/Python_Link.as ~/Documents/TMInterface/Plugins/
+
+**CUDA not available**
+
+1. Ensure NVIDIA driver 525+ is installed: ``nvidia-smi``
+2. Check PyTorch installation: ``python -c "import torch; print(torch.cuda.is_available())"``
+3. Reinstall PyTorch: ``uv sync --reinstall`` or follow `PyTorch installation guide <https://pytorch.org/get-started/locally/>`_
+
+**TorchRL warning about C++ binaries**
+
+Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` command installs compatible versions automatically.
+
+**Map not loading**
+
+- Ensure map files are NOT in OneDrive or cloud storage directories
+- Verify map path in `map_cycle_config.py` matches actual location
+- Check that map file exists in ``~/Documents/TrackMania/Tracks/Challenges/``
+
+**Low FPS / Slow training**
+
+- Increase ``gpu_collectors_count`` in ``performance_config.py``
+- Increase ``running_speed`` (up to 200x real-time)
+- Lower game graphics settings and resolution
+- Close unnecessary background applications
+
+**Memory issues**
+
+- Reduce ``memory_size_schedule`` in ``memory_config.py``
+- Reduce ``gpu_collectors_count`` in ``performance_config.py``
+- Reduce ``batch_size`` in ``training_config.py``
+- Check RAM usage with Task Manager / htop
+
+**Agent gets stuck or doesn't progress**
+
+- Verify virtual checkpoint file (`.npy`) is correctly generated
+- Check ``cutoff_rollout_if_no_vcp_passed_within_duration_ms`` timeout
+- Increase exploration (higher epsilon in ``exploration_config.py``)
+- Verify reference line covers the entire track
+
+**Game crashes on startup**
+
+- Check TMLoader profile is correctly configured
+- Verify TMInterface 2.1.0 is installed
+- Try launching game manually first to verify it works
+- Check Windows firewall isn't blocking TMLoader/TMInterface
 
 Linux-specific:
 ---------------

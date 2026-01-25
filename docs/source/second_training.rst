@@ -54,46 +54,53 @@ Run the following command:
 Edit the configuration file
 ---------------------------
 
-Open ``config_files/config.py`` in a text editor. This file contains the hyperparameters that define a training run.
+Configuration is now organized in separate modules for better maintainability. To train on a new map:
 
-Find where the variable ``map_cycle`` is defined, near the bottom of the page. Read the comment that describes how a map_cycle is defined. Edit the map_cycle so that the AI only trains on A02-Race.
+**1. Edit map_cycle_config.py**
+
+Open ``config_files/map_cycle_config.py`` in a text editor. This file contains the map training cycle.
+
+Find where the variable ``map_cycle`` is defined. Read the comment that describes how a map_cycle is defined. Edit the map_cycle so that the AI trains on A02-Race.
 
 .. code-block:: python
 
     """
-    In this section we define the map cycle.
-
-    It is a list of iterators, each iterator must return tuples with the following information:
+    Map cycle defines the training sequence.
+    
+    Each iterator returns tuples with:
         - short map name        (string):     for logging purposes
         - map path              (string):     to automatically load the map in game.
                                               This is the same map name as the "map" command in the TMInterface console.
-        - reference line path   (string):     where to find the reference line for this map
-        - is_explo              (boolean):    whether the policy when running on this map should be exploratory
-        - fill_buffer           (boolean):    whether the memories generated during this run should be placed in the buffer
-
-    The map cycle may seem complex at first glance, but it provides a large amount of flexibility:
-        - can train on some maps, test blindly on others
-        - can train more on some maps, less on others
-        - can define multiple reference lines for a given map
-        - etc...
-
-    The example below defines a simple cycle where the agent alternates between four exploratory runs on map5, and one
-    evaluation run on the same map.
-
+        - reference line path   (string):     where to find the reference line for this map (in maps/ folder)
+        - is_explo              (boolean):    whether the policy should be exploratory on this map
+        - fill_buffer           (boolean):    whether the memories should be placed in the replay buffer
+    
+    Example: Simple cycle with 4 exploration runs + 1 evaluation run
+    
     map_cycle = [
-        repeat(("map5", '"My Challenges/Map5.Challenge.Gbx"', "map5_0.5m_cl.npy", True, True), 4),
-        repeat(("map5", '"My Challenges/Map5.Challenge.Gbx"', "map5_0.5m_cl.npy", False, True), 1),
+        repeat(("A02", '"A02-Race.Challenge.Gbx"', "A02_0.5m_cl.npy", True, True), 4),
+        repeat(("A02", '"A02-Race.Challenge.Gbx"', "A02_0.5m_cl.npy", False, True), 1),
     ]
     """
 
-.. note::
+**2. Adjust training schedule (optional)**
 
-    For those who wish to dive deeper into the project, there are many similar comments spread within the codebase explaining how the AI is trained.
+Open ``config_files/training_config.py``.
 
-Locate the variable ``global_schedule_speed``. We expect A02-Race to be slightly easier to train than ESL-Hockolicious: we can define a faster annealing for training hyperparameters.
+Locate the variable ``global_schedule_speed``. For easier maps like A02-Race, you can use a faster annealing schedule:
 
 .. code-block:: python
 
     global_schedule_speed = 0.8
 
-For maps like `map5 <https://tmnf.exchange/trackshow/10460245>`_ or E03-Endurance we would typically use a global_schedule_speed close to 1.5.
+For harder maps like `map5 <https://tmnf.exchange/trackshow/10460245>`_ or E03-Endurance, use a slower schedule (e.g., 1.5).
+
+**3. Update run name (optional)**
+
+In ``config_files/map_cycle_config.py``, change the run name to identify this experiment:
+
+.. code-block:: python
+
+    run_name = "A02_training"
+
+This affects tensorboard logs and save file locations.

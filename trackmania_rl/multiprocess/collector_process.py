@@ -2,6 +2,7 @@
 This file implements a single multithreaded worker that handles a Trackmania game instance and provides rollout results to the learner process.
 """
 
+import copy
 import importlib
 import time
 from itertools import chain, count, cycle
@@ -46,7 +47,7 @@ def collector_process_fn(
     try:
         inference_network.load_state_dict(torch.load(f=save_dir / "weights1.torch", weights_only=False))
     except Exception as e:
-        print("Worker could not load weights, exception:", e)
+        print(f"[INFO] Worker {process_number} starting with fresh weights")
 
     inferer = iqn.Inferer(inference_network, config_copy.iqn_k, config_copy.tau_epsilon_boltzmann)
 
@@ -60,9 +61,23 @@ def collector_process_fn(
     # ========================================================
     inference_network.train()
 
+    # Initialize map cycle
+    print(f"[Collector {process_number}] Initializing map cycle...")
+    print(f"[Collector {process_number}] map_cycle length: {len(config_copy.map_cycle)}")
+    
+    if not config_copy.map_cycle:
+        print(f"[Collector {process_number}] ERROR: map_cycle is EMPTY at initialization!")
+        print(f"[Collector {process_number}] Please configure maps in config_files/map_cycle_config.py")
+        raise ValueError("map_cycle cannot be empty. Configure at least one map.")
+    
     map_cycle_str = str(config_copy.map_cycle)
     set_maps_trained, set_maps_blind = analyze_map_cycle(config_copy.map_cycle)
-    map_cycle_iter = cycle(chain(*config_copy.map_cycle))
+    # IMPORTANT: Use deepcopy because analyze_map_cycle consumes repeat iterators
+    map_cycle_iter = cycle(chain(*copy.deepcopy(config_copy.map_cycle)))
+    
+    print(f"[Collector {process_number}] Map cycle initialized successfully")
+    print(f"[Collector {process_number}] Training maps: {set_maps_trained}")
+    print(f"[Collector {process_number}] Blind test maps: {set_maps_blind}")
 
     zone_centers_filename = None
 
@@ -87,13 +102,31 @@ def collector_process_fn(
         # ===============================================
         if str(config_copy.map_cycle) != map_cycle_str:
             map_cycle_str = str(config_copy.map_cycle)
+            
+            # Validate map_cycle is not empty
+            if not config_copy.map_cycle:
+                print(f"[Collector {process_number}] ERROR: map_cycle is EMPTY!")
+                print(f"[Collector {process_number}] Check config_files/map_cycle_config.py")
+                print(f"[Collector {process_number}] Example: repeat(('map5', '\"My Challenges/Map5.Challenge.Gbx\"', 'map5_0.5m_cl.npy', True, True), 4)")
+                raise ValueError("map_cycle cannot be empty. Please configure at least one map in map_cycle_config.py")
+            
+            print(f"[Collector {process_number}] Map cycle updated. Number of cycle elements: {len(config_copy.map_cycle)}")
             set_maps_trained, set_maps_blind = analyze_map_cycle(config_copy.map_cycle)
-            map_cycle_iter = cycle(chain(*config_copy.map_cycle))
+            # IMPORTANT: Use deepcopy because analyze_map_cycle consumes repeat iterators
+            map_cycle_iter = cycle(chain(*copy.deepcopy(config_copy.map_cycle)))
+            print(f"[Collector {process_number}] Maps for training: {set_maps_trained}")
+            print(f"[Collector {process_number}] Maps for blind testing: {set_maps_blind}")
 
         # ===============================================
         #   GET NEXT MAP FROM CYCLE
         # ===============================================
-        next_map_tuple = next(map_cycle_iter)
+        try:
+            next_map_tuple = next(map_cycle_iter)
+        except StopIteration:
+            print(f"[Collector {process_number}] ERROR: StopIteration in map_cycle!")
+            print(f"[Collector {process_number}] map_cycle length: {len(config_copy.map_cycle)}")
+            print(f"[Collector {process_number}] map_cycle contents: {config_copy.map_cycle}")
+            raise RuntimeError(f"map_cycle iterator exhausted unexpectedly. This should not happen with cycle().")
         if next_map_tuple[2] != zone_centers_filename:
             zone_centers = load_next_map_zone_centers(next_map_tuple[2], base_dir)
         map_name, map_path, zone_centers_filename, is_explo, fill_buffer = next_map_tuple
@@ -128,7 +161,6 @@ def collector_process_fn(
         rollout_duration = rollout_end_time - rollout_start_time
         rollout_results["worker_time_in_rollout_percentage"] = rollout_duration / (time.perf_counter() - time_since_last_queue_push)
         time_since_last_queue_push = time.perf_counter()
-        print("", flush=True)
 
         if not tmi.last_rollout_crashed:
             rollout_queue.put(

@@ -115,8 +115,11 @@ def learner_process_fn(
     online_network, uncompiled_online_network = make_untrained_iqn_network(config_copy.use_jit, is_inference=False)
     target_network, _ = make_untrained_iqn_network(config_copy.use_jit, is_inference=False)
 
-    print(online_network)
+    print("\n" + "="*80)
+    print("  NETWORK ARCHITECTURE")
+    print("="*80)
     utilities.count_parameters(online_network)
+    print("="*80 + "\n")
 
     accumulated_stats: defaultdict[str, typing.Any] = defaultdict(int)
     accumulated_stats["alltime_min_ms"] = {}
@@ -136,9 +139,9 @@ def learner_process_fn(
     try:
         online_network.load_state_dict(torch.load(f=save_dir / "weights1.torch", weights_only=False))
         target_network.load_state_dict(torch.load(f=save_dir / "weights2.torch", weights_only=False))
-        print(" =====================     Learner weights loaded !     ============================")
+        print("[OK] Weights loaded successfully")
     except:
-        print(" Learner could not load weights")
+        print("[INFO] Starting with fresh weights (no checkpoint found)")
 
     with shared_network_lock:
         uncompiled_shared_network.load_state_dict(uncompiled_online_network.state_dict())
@@ -147,9 +150,9 @@ def learner_process_fn(
     try:
         accumulated_stats = joblib.load(save_dir / "accumulated_stats.joblib")
         shared_steps.value = accumulated_stats["cumul_number_frames_played"]
-        print(" =====================      Learner stats loaded !      ============================")
+        print(f"[OK] Stats loaded - resuming from {accumulated_stats['cumul_number_frames_played']:,} frames")
     except:
-        print(" Learner could not load stats")
+        print("[INFO] Starting fresh training session")
 
     if "rolling_mean_ms" not in accumulated_stats.keys():
         # Temporary to preserve compatibility with old runs that doesn't have this feature. To be removed later.
@@ -179,9 +182,9 @@ def learner_process_fn(
     try:
         optimizer1.load_state_dict(torch.load(f=save_dir / "optimizer1.torch", weights_only=False))
         scaler.load_state_dict(torch.load(f=save_dir / "scaler.torch", weights_only=False))
-        print(" =========================     Optimizer loaded !     ================================")
+        print("[OK] Optimizer loaded")
     except:
-        print(" Could not load optimizer")
+        print("[INFO] Starting with fresh optimizer")
 
     tensorboard_suffix = utilities.from_staircase_schedule(
         config_copy.tensorboard_suffix_schedule,
@@ -217,8 +220,8 @@ def learner_process_fn(
         before_wait_time = time.perf_counter()
         wait(rollout_queue_readers)
         time_waited = time.perf_counter() - before_wait_time
-        if time_waited > 1:
-            print(f"Warning: learner waited {time_waited:.2f} seconds for workers to provide memories")
+        if time_waited > 5:  # Only warn if waited more than 5 seconds
+            print(f"[WARNING] Learner waited {time_waited:.1f}s for workers (workers might be slow)")
         time_waited_for_workers_since_last_tensorboard_write += time_waited
         for idx in queue_check_order:
             if not rollout_queues[idx].empty():
@@ -332,7 +335,8 @@ def learner_process_fn(
             "tmi_protection_cutoff": end_race_stats["tmi_protection_cutoff"],
             "worker_time_in_rollout_percentage": rollout_results["worker_time_in_rollout_percentage"],
         }
-        print("Race time ratio  ", race_stats_to_write[f"race_time_ratio_{map_name}"])
+        
+        # Don't print every race - only NEW RECORDS and periodic summaries (every 5 minutes)
 
         if not is_explo:
             race_stats_to_write[f"avg_Q_{map_status}_{map_name}"] = np.mean(rollout_results["q_values"])
@@ -391,9 +395,22 @@ def learner_process_fn(
         #   SAVE STUFF IF THIS WAS A GOOD RACE
         # ===============================================
 
-        if end_race_stats["race_time"] < accumulated_stats["alltime_min_ms"].get(map_name, 99999999999):
+        # Check for NEW RECORD!
+        is_new_record = end_race_stats["race_time"] < accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
+        if is_new_record:
             # This is a new alltime_minimum
+            old_best = accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
             accumulated_stats["alltime_min_ms"][map_name] = end_race_stats["race_time"]
+            improvement = (old_best - end_race_stats["race_time"]) / 1000
+            race_time_s = end_race_stats["race_time"] / 1000
+            race_finished_str = "FINISH" if end_race_stats["race_finished"] else "DNF"
+            explo_str = "EXPLO" if is_explo else "EVAL"
+            
+            if old_best < 99999999:
+                print(f"\n>>> NEW RECORD! [{explo_str}] [{race_finished_str}] {map_name:15} {race_time_s:6.2f}s (improved by {improvement:.3f}s) <<<\n")
+            else:
+                print(f"\n>>> FIRST FINISH! [{explo_str}] {map_name:15} {race_time_s:6.2f}s <<<\n")
+            
             if accumulated_stats["cumul_number_frames_played"] > config_copy.frames_before_save_best_runs:
                 name = f"{map_name}_{end_race_stats['race_time']}"
                 utilities.save_run(
@@ -449,7 +466,7 @@ def learner_process_fn(
             accumulated_stats["cumul_number_single_memories_should_have_been_used"] += (
                 config_copy.number_times_single_memory_is_used_before_discard * number_memories_added_train
             )
-            print(f" NMG={accumulated_stats['cumul_number_memories_generated']:<8}")
+            # Removed noisy memory generation log
 
             # ===============================================
             #   PERIODIC RESET ?
@@ -502,7 +519,7 @@ def learner_process_fn(
                     loss, _ = trainer.train_on_batch(buffer_test, do_learn=False)
                     time_testing_since_last_tensorboard_write += time.perf_counter() - test_start_time
                     loss_test_history.append(loss)
-                    print(f"BT   {loss=:<8.2e}")
+                    # Removed noisy test batch log
                 else:
                     train_start_time = time.perf_counter()
                     loss, grad_norm = trainer.train_on_batch(buffer, do_learn=True)
@@ -519,7 +536,7 @@ def learner_process_fn(
                         # utilities.log_gradient_norms(online_network, layer_grad_norm_history) #~1ms overhead per batch
 
                     accumulated_stats["cumul_number_batches_done"] += 1
-                    print(f"B    {loss=:<8.2e} {grad_norm=:<8.2e} {train_on_batch_duration_history[-1]*1000:<8.1f}")
+                    # Removed noisy training batch log - use TensorBoard for detailed metrics
 
                     utilities.custom_weight_decay(online_network, 1 - weight_decay)
                     if accumulated_stats["cumul_number_batches_done"] % config_copy.send_shared_network_every_n_batches == 0:
@@ -715,18 +732,26 @@ def learner_process_fn(
             mean_in_buffer = state_floats.mean(axis=0)
             std_in_buffer = state_floats.std(axis=0)
 
-            print("Raw mean in buffer  :", mean_in_buffer.round(1))
-            print("Raw std in buffer   :", std_in_buffer.round(1))
-            print("")
-            print(
-                "Corr mean in buffer :",
-                ((mean_in_buffer - config_copy.float_inputs_mean) / config_copy.float_inputs_std).round(1),
-            )
-            print(
-                "Corr std in buffer  :",
-                (std_in_buffer / config_copy.float_inputs_std).round(1),
-            )
-            print("")
+            # ===============================================
+            #   BEAUTIFUL SUMMARY EVERY 5 MINUTES
+            # ===============================================
+            print("\n" + "="*80)
+            print(f"  TRAINING SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("="*80)
+            print(f"  Frames played: {accumulated_stats['cumul_number_frames_played']:,}")
+            print(f"  Training hours: {accumulated_stats['cumul_training_hours']:.1f}h")
+            print(f"  Buffer size: {len(buffer):,} / {buffer._storage.max_size:,}")
+            if len(loss_history) > 0:
+                print(f"  Avg loss: {np.mean(loss_history):.3e}  |  Grad norm: {np.median(grad_norm_history):.3e}")
+            print(f"  Learning rate: {learning_rate:.2e}")
+            print(f"  Transitions/sec: {transitions_learned_per_second:.1f}")
+            print("-"*80)
+            print("  BEST TIMES:")
+            for map_name_iter, best_time_ms in sorted(accumulated_stats["alltime_min_ms"].items()):
+                best_time_s = best_time_ms / 1000
+                rolling_mean_s = accumulated_stats["rolling_mean_ms"].get(map_name_iter, best_time_ms) / 1000
+                print(f"    {map_name_iter:15} {best_time_s:6.2f}s  (rolling avg: {rolling_mean_s:6.2f}s)")
+            print("="*80 + "\n")
 
             # ===============================================
             #   HIGH PRIORITY TRANSITIONS

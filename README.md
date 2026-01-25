@@ -1,37 +1,111 @@
-<div align="center">
+# TrackMania RL
 
-  <h3>Linesight</h3>
+Reinforcement Learning for training AI in TrackMania Nations Forever using IQN (Implicit Quantile Networks).
 
-  Trackmania AI
-  <br>
-  <strong>[Linesight documentation][doc-link]</strong>
-  <br>
-  <br>
-  [![Discord][doc-badge]][doc-link]
-  [![Discord][discord-badge]][discord-link]
+> Personal fork of [Linesight](https://github.com/pb4git/linesight) adapted for RL experimentation.
 
-</div>
+## Quick Start
 
-## Linesight
+### Installation
 
-Linesight is a reinforcement learning project seeking to push what can be done with AI in Trackmania as far as possible. 
+```bash
+# 1. Install uv (recommended)
+curl -LsSf https://astral.sh/uv/install.sh | sh  # Linux/macOS
+irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
-## Trackmania
+# 2. Clone and install
+git clone <your-repo-url>
+cd rulka
+uv sync
 
-Trackmania is a racing game that sacrifices some of the realism of sim-racers for a wide variety of track types with all kinds of tricks like wall riding, stunt jumps and wallbangs. Furthermore, Trackmania was designed for equality of input devices which means that keyboard inputs are a viable way to play and therefore that discrete input algorithms like DQN can be applied. In other words, Trackmania is a deep game which can serve as a benchmark to work on any RL algorithm.
+# 3. Activate environment
+source .venv/bin/activate  # Linux/macOS
+.\.venv\Scripts\activate   # Windows
+```
 
-## Trackmania Interface
+### Game Setup
 
-Our work, combined with the efforts of [donadigo](https://github.com/donadigo) and [Kim](https://github.com/koyaanis) of the [Trackmania Interface team](https://donadigo.com/tminterface/) allow interfacing to [Trackmania Nations Forever](https://en.wikipedia.org/wiki/TrackMania#TrackMania_United). Allowing you to programmatically send inputs, get car states, get screenshots, etc... This part of our codebase could be useful to other RL projects.
+1. Install [TrackMania Nations Forever](https://store.steampowered.com/app/11020/TrackMania_Nations_Forever/) (free)
+2. Install [TMLoader](https://tomashu.dev/software/tmloader/) and [TMInterface 2.1.0](https://donadigo.com/tminterface/)
+3. Configure game in **windowed mode** and create **online account**
+4. Edit `config_files/user_config.py`:
+   ```python
+   username = "your_tmnf_account"
+   ```
+5. Copy plugin:
+   ```bash
+   # Windows
+   New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\Documents\TMInterface\Plugins"
+   Copy-Item "trackmania_rl\tmi_interaction\Python_Link.as" "$env:USERPROFILE\Documents\TMInterface\Plugins\"
+   
+   # Linux
+   mkdir -p ~/Documents/TMInterface/Plugins
+   cp trackmania_rl/tmi_interaction/Python_Link.as ~/Documents/TMInterface/Plugins/
+   ```
 
-## Results
+### Training
 
-To our knowledge, Linesight is by far the most advanced AI in Trackmania. It was the first to demonstrate human-level driving around May 2023, with [Wirtual playing against it](https://www.youtube.com/watch?v=wjHW3ai47Og) in June. In May 2024, Linesight was the first to [showcase beating world records on official campaign tracks](https://www.youtube.com/watch?v=cUojVsCJ51I).
+```bash
+python scripts/train.py
 
-Now that the project is open-source, can you help make it even stronger?
+# Monitor (in separate terminal)
+tensorboard --logdir=tensorboard
+# Open http://localhost:6006
+```
 
-[doc-link]: https://linesight-rl.github.io/linesight/build/html/
-[discord-link]:       https://discord.gg/PvWYGkGKqd
+## Key Changes
 
-[doc-badge]: https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logoSize=small&logo=readthedocs
-[discord-badge]: https://img.shields.io/discord/847108820479770686?style=for-the-badge&logo=discord&logoSize=auto&label=Discord
+Compared to original Linesight:
+
+- ✅ **Modern build system** - `pyproject.toml` instead of `setup.py` + requirements.txt
+- ✅ **uv support** - fast installation with `uv sync`
+- ✅ **Updated dependencies** - PyTorch 2.7+, TorchRL 0.6+, CUDA 12.6
+- ✅ **Expanded docs** - comprehensive FAQ, troubleshooting, dev guide
+- ✅ **Modular config** - 8 separate modules for easier editing
+
+## Documentation
+
+- **[Installation Guide](docs/source/installation.rst)** - detailed setup instructions
+- **[First Training](docs/source/first_training.rst)** - get started with training
+- **[Configuration Guide](docs/source/configuration_guide.rst)** - all config parameters
+- **[User FAQ](docs/source/user_faq.rst)** - 30+ common questions
+- **[Dev FAQ](docs/source/dev_faq.rst)** - developer questions
+- **[Troubleshooting](docs/source/troubleshooting.rst)** - common issues
+
+**Build HTML docs:**
+```bash
+cd docs && pip install -e ".[doc]" && make html
+```
+
+## Requirements
+
+- **OS:** Windows 10/11 or Linux
+- **GPU:** NVIDIA with CUDA 12.x (6GB+ VRAM)
+- **RAM:** 20 GB+
+- **Python:** 3.10 or 3.11
+
+## Project Structure
+
+```
+rulka/
+├── config_files/       # Modular configuration (8 modules)
+├── trackmania_rl/      # Core RL code (IQN agent, multiprocess)
+├── scripts/            # train.py and utilities
+├── maps/               # Reference lines (.npy)
+├── docs/               # Documentation
+└── save/               # Checkpoints and replays
+```
+
+## License
+
+MIT License
+
+## Credits
+
+- Original [Linesight](https://github.com/pb4git/linesight) by pb4git
+- [donadigo](https://github.com/donadigo) for TMInterface
+- TrackMania community
+
+---
+
+⚠️ **Important:** All AI runs are Tool Assisted and must NOT be submitted to official leaderboards.

@@ -1,7 +1,79 @@
 Contributions
 =============
 
-We welcome contributions to the Linesight Trackmania AI project. If you're interested in contributing, please follow the guidelines below to ensure that your contributions are clear, well-formatted, and thoroughly tested.
+We welcome contributions to the TrackMania RL project. Whether you're fixing bugs, improving documentation, or implementing new features, your contributions are valuable.
+
+This is a personal fork of the original Linesight project, but contributions are encouraged to help improve the codebase and make it more accessible for RL experimentation.
+
+Getting Started
+---------------
+
+**Before Contributing:**
+
+1. Fork the repository
+2. Set up your development environment (see :doc:`dev_faq`)
+3. Open an issue to discuss your proposed changes
+4. Create a feature branch for your work
+
+**Development Setup:**
+
+.. code-block:: bash
+
+    # Clone your fork
+    git clone <your-fork-url>
+    cd rulka
+    
+    # Install with uv (recommended)
+    uv sync
+    
+    # Or with pip
+    pip install -e ".[dev,doc]"
+
+Coding Guidelines
+-----------------
+
+**Code Style:**
+
+- Use Ruff for formatting and linting:
+
+.. code-block:: bash
+
+    ruff format .
+    ruff check .
+
+- Follow existing code patterns and structure
+- Add docstrings to new functions and classes
+- Keep configuration in modular config files
+
+**Commits:**
+
+- Write clear, descriptive commit messages
+- Break changes into logical, self-contained commits
+- Reference related issues in commit messages
+
+**Testing:**
+
+- Test changes before committing
+- Verify configuration with ``python scripts/check_config.py``
+- For algorithmic changes, provide multiple training runs demonstrating improvements
+
+Documentation
+-------------
+
+When contributing, please update relevant documentation:
+
+- Add docstrings to new code
+- Update ``docs/source/`` RST files for user-facing changes
+- Update ``config_files/README.md`` for configuration changes
+- Update ``CHANGELOG.md`` for notable changes
+
+**Building Documentation:**
+
+.. code-block:: bash
+
+    cd docs
+    pip install -e ".[doc]"
+    make html
 
 Contribution opportunities
 --------------------------

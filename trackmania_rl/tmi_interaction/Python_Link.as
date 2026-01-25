@@ -196,6 +196,7 @@ int HandleMessage()
             if(debug){
                 print("Server: command "+command+" received");
             }
+            log("ExecuteCommand: " + command);
             ExecuteCommand(command);
             break;
         }
