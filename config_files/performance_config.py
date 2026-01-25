@@ -26,3 +26,9 @@ threshold_to_save_all_runs_ms = -1  # Auto-save threshold (disabled)
 
 # Game speed
 running_speed = 160  # Simulation speed multiplier (160x real-time)
+
+# Window focus management (LEGACY - kept for compatibility)
+# NOTE: After analysis, constant focus switching causes "focus war" between multiple instances
+# Solution: Focus is set once after map load (game_activated flag reset in request_map)
+# This is sufficient - TMInterface uses socket API, not keyboard simulation
+force_window_focus_on_input = False  # Deprecated - focus is managed automatically per map load

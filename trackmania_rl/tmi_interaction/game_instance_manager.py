@@ -57,14 +57,56 @@ def _set_window_focus(trackmania_window):
         win32gui.SetForegroundWindow(trackmania_window)
 
 
-def ensure_not_minimized(trackmania_window):
+def is_window_focused(trackmania_window):
+    """Check if the TrackMania window is currently in focus."""
+    if trackmania_window is None:
+        return False
     if config_copy.is_linux:
-        Xdo().map_window(trackmania_window)
+        try:
+            xdo = Xdo()
+            active_window = xdo.get_active_window()
+            return active_window == trackmania_window
+        except (AttributeError, Exception):
+            # If get_active_window doesn't exist or fails, assume not focused to be safe
+            return False
     else:
-        if win32gui.IsIconic(
-            trackmania_window
-        ):  # https://stackoverflow.com/questions/54560987/restore-window-without-setting-to-foreground
-            win32gui.ShowWindow(trackmania_window, win32con.SW_SHOWNORMAL)  # Unminimize window
+        try:
+            foreground_window = win32gui.GetForegroundWindow()
+            return foreground_window == trackmania_window
+        except Exception:
+            return False
+
+
+def ensure_not_minimized(trackmania_window):
+    if trackmania_window is None:
+        return
+    if config_copy.is_linux:
+        try:
+            Xdo().map_window(trackmania_window)
+        except Exception:
+            pass
+    else:
+        try:
+            if win32gui.IsIconic(
+                trackmania_window
+            ):  # https://stackoverflow.com/questions/54560987/restore-window-without-setting-to-foreground
+                win32gui.ShowWindow(trackmania_window, win32con.SW_SHOWNORMAL)  # Unminimize window
+        except Exception:
+            pass
+
+
+def ensure_window_focused(trackmania_window):
+    """Ensure the window is not minimized and is in focus."""
+    if trackmania_window is None:
+        return
+    try:
+        ensure_not_minimized(trackmania_window)
+        # Only restore focus if window is not already focused to avoid unnecessary overhead
+        if not is_window_focused(trackmania_window):
+            _set_window_focus(trackmania_window)
+    except Exception:
+        # If focus restoration fails, at least ensure window is not minimized
+        ensure_not_minimized(trackmania_window)
 
 
 @numba.njit
@@ -281,6 +323,12 @@ class GameInstanceManager:
 
         self.iface.execute_command(map_command)
         self.UI_disabled = False
+        
+        # CRITICAL: Reset game_activated flag when loading new map
+        # This ensures window will be focused on first input after map change
+        # Without this, inputs may be lost when switching between maps
+        self.game_activated = False
+        
         (
             self.next_real_checkpoint_positions,
             self.max_allowable_distance_to_real_checkpoint,
@@ -721,6 +769,17 @@ class GameInstanceManager:
                         pc8 = time.perf_counter_ns()
                         instrumentation__exploration_policy += pc8 - pc7
 
+                        # CRITICAL: Window must be focused at least once after activation
+                        # Game needs initial focus to start processing inputs, but doesn't need
+                        # constant refocusing (which would cause "focus war" with multiple instances)
+                        if not self.game_activated:
+                            ensure_window_focused(self.tm_window_id)
+                            self.game_activated = True
+                            if config_copy.is_linux:
+                                # With the switch to ModLoader, we observed that the game instance needs to be focused once to work properly,
+                                # but this needs to be done late enough AND not when another game instance is starting.
+                                self.game_spawning_lock.release()
+
                         self.request_inputs(action_idx, rollout_results)
                         self.request_speed(self.running_speed)
 
@@ -738,14 +797,6 @@ class GameInstanceManager:
 
                         compute_action_asap = False
                         n_th_action_we_compute += 1
-
-                        if not self.game_activated:
-                            _set_window_focus(self.tm_window_id)
-                            self.game_activated = True
-                            if config_copy.is_linux:
-                                # With the switch to ModLoader, we observed that the game instance needs to be focused once to work properly,
-                                # but this needs to be done late enough AND not when another game instance is starting.
-                                self.game_spawning_lock.release()
 
                         instrumentation__request_inputs_and_speed += time.perf_counter_ns() - pc8
                     self.iface._respond_to_call(msgtype)
