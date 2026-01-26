@@ -50,6 +50,7 @@ python scripts/train.py
 
 # Monitor (in separate terminal)
 tensorboard --logdir=tensorboard
+python -m tensorboard.main --logdir=tensorboard
 # Open http://localhost:6006
 ```
 

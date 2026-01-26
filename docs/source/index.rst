@@ -27,6 +27,7 @@ The project uses distributional reinforcement learning (IQN - Implicit Quantile 
    first_training
    second_training
    configuration_guide
+   tensorboard_metrics
    user_faq
    troubleshooting
 
