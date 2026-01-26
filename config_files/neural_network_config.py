@@ -9,6 +9,10 @@ from config_files.environment_config import (
     n_contact_material_physics_behavior_types,
 )
 
+# Image dimensions (moved from environment_config.py)
+W_downsized = 128  # Width of captured game frames (pixels)
+H_downsized = 128  # Height of captured game frames (pixels)
+
 # Input dimensions
 float_input_dim = (
     27  # Base features
@@ -20,7 +24,8 @@ float_input_dim = (
 
 # Network architecture
 float_hidden_dim = 256  # Hidden layer for scalar features
-conv_head_output_dim = 5632  # CNN output dimension
+# Note: conv_head_output_dim is calculated dynamically in make_untrained_iqn_network()
+# based on H_downsized and W_downsized, matching the actual CNN architecture
 dense_hidden_dimension = 1024  # Main hidden layer size
 
 # IQN parameters

@@ -84,15 +84,15 @@ To modify settings during training:
 Image processing, timing, spatial parameters, timeouts, game settings
 
 Key settings:
-- `W_downsized`, `H_downsized` - Image dimensions
 - `tm_engine_step_per_action` - Control frequency
 - `n_zone_centers_in_inputs` - Lookahead waypoints
 
 ### 2. Neural Network (neural_network_config.py)
 
-Network architecture, IQN parameters, gradient clipping
+Network architecture, IQN parameters, gradient clipping, image dimensions
 
 Key settings:
+- `W_downsized`, `H_downsized` - Image dimensions (affects CNN output size)
 - `dense_hidden_dimension` - Main layer size
 - `iqn_n`, `iqn_k` - Quantile samples
 - `clip_grad_norm` - Gradient clipping

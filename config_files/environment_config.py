@@ -5,10 +5,6 @@ See docs/source/configuration_guide.rst for detailed documentation.
 
 import numpy as np
 
-# Image processing
-W_downsized = 160  # Width of captured game frames (pixels)
-H_downsized = 120  # Height of captured game frames (pixels)
-
 # Timing configuration
 tm_engine_step_per_action = 5  # Number of simulation steps per action
 ms_per_tm_engine_step = 10  # Milliseconds per simulation step (fixed by game)

@@ -19,6 +19,45 @@ from config_files import config_copy
 from trackmania_rl import utilities
 
 
+def calculate_conv_output_dim(height: int, width: int) -> int:
+    """
+    Dynamically calculate the output dimension of the CNN head based on input image dimensions.
+    
+    This function creates a temporary CNN head with the same architecture as IQN_Network
+    and computes the output size by running a forward pass with a dummy input.
+    
+    The function works on CPU to avoid CUDA dependencies during configuration loading.
+    
+    Args:
+        height: Input image height in pixels
+        width: Input image width in pixels
+        
+    Returns:
+        Output dimension after Flatten() (channels × final_height × final_width)
+    """
+    # Create the same CNN architecture as in IQN_Network
+    img_head_channels = [1, 16, 32, 64, 32]
+    activation_function = torch.nn.LeakyReLU
+    img_head = torch.nn.Sequential(
+        torch.nn.Conv2d(in_channels=img_head_channels[0], out_channels=img_head_channels[1], kernel_size=(4, 4), stride=2),
+        activation_function(inplace=True),
+        torch.nn.Conv2d(in_channels=img_head_channels[1], out_channels=img_head_channels[2], kernel_size=(4, 4), stride=2),
+        activation_function(inplace=True),
+        torch.nn.Conv2d(in_channels=img_head_channels[2], out_channels=img_head_channels[3], kernel_size=(3, 3), stride=2),
+        activation_function(inplace=True),
+        torch.nn.Conv2d(in_channels=img_head_channels[3], out_channels=img_head_channels[4], kernel_size=(3, 3), stride=1),
+        activation_function(inplace=True),
+        torch.nn.Flatten(),
+    )
+    
+    # Create dummy input and run forward pass on CPU (no CUDA dependency)
+    dummy_input = torch.zeros(1, 1, height, width)
+    with torch.no_grad():
+        output = img_head(dummy_input)
+    
+    return output.shape[1]  # Return the flattened dimension
+
+
 class IQN_Network(torch.nn.Module):
     def __init__(
         self,
@@ -456,11 +495,14 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
     Args:
         jit: a boolean indicating whether compilation should be used
     """
+    # Calculate conv_head_output_dim dynamically based on image dimensions
+    # This is computed once at network creation time (during config loading), not during training
+    conv_head_output_dim = calculate_conv_output_dim(config_copy.H_downsized, config_copy.W_downsized)
 
     uncompiled_model = IQN_Network(
         float_inputs_dim=config_copy.float_input_dim,
         float_hidden_dim=config_copy.float_hidden_dim,
-        conv_head_output_dim=config_copy.conv_head_output_dim,
+        conv_head_output_dim=conv_head_output_dim,
         dense_hidden_dimension=config_copy.dense_hidden_dimension,
         iqn_embedding_dimension=config_copy.iqn_embedding_dimension,
         n_actions=len(config_copy.inputs),

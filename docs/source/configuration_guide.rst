@@ -49,36 +49,6 @@ Environment Configuration
 
 Located in: ``config_files/environment_config.py``
 
-Image Processing
-----------------
-
-.. py:data:: W_downsized
-   :type: int
-   :value: 160
-
-   **Width of captured game frames** (pixels)
-   
-   Game screenshots are resized to this width before being fed to the neural network.
-   
-   - **Lower values**: Faster training, less memory, reduced visual detail
-   - **Higher values**: Better visual quality, slower training, more memory
-   - **Typical range**: 128-256 pixels
-   - **Current**: 160 pixels provides good balance
-   
-   .. note::
-      Changing this requires adjusting ``conv_head_output_dim`` in network config.
-
-.. py:data:: H_downsized
-   :type: int
-   :value: 120
-
-   **Height of captured game frames** (pixels)
-   
-   Game screenshots are resized to this height before being fed to the neural network.
-   
-   - **Typical range**: 96-192 pixels
-   - **Current**: 120 pixels (4:3 aspect ratio with W=160)
-
 Timing Configuration
 --------------------
 
@@ -256,6 +226,41 @@ Neural Network Configuration
 
 Located in: ``config_files/neural_network_config.py``
 
+Image Dimensions
+----------------
+
+.. py:data:: W_downsized
+   :type: int
+   :value: 160
+
+   **Width of captured game frames** (pixels)
+   
+   Game screenshots are resized to this width before being fed to the neural network.
+   
+   - **Lower values**: Faster training, less memory, reduced visual detail
+   - **Higher values**: Better visual quality, slower training, more memory
+   - **Typical range**: 128-256 pixels
+   - **Current**: 160 pixels provides good balance
+   
+   .. note::
+      The CNN output dimension is automatically calculated from these dimensions when the network is created.
+      No manual configuration needed.
+
+.. py:data:: H_downsized
+   :type: int
+   :value: 120
+
+   **Height of captured game frames** (pixels)
+   
+   Game screenshots are resized to this height before being fed to the neural network.
+   
+   - **Typical range**: 96-192 pixels
+   - **Current**: 120 pixels (4:3 aspect ratio with W=160)
+   
+   .. note::
+      The CNN output dimension is automatically calculated from these dimensions when the network is created.
+      No manual configuration needed.
+
 Input Dimensions
 ----------------
 
@@ -297,20 +302,6 @@ Network Architecture
    - **Lower values (128-192)**: Faster, less capacity
    - **Higher values (256-512)**: More capacity, slower
    - **Typical range**: 128-512
-
-.. py:data:: conv_head_output_dim
-   :type: int
-   :value: 5632
-
-   **CNN output dimension**
-   
-   Size of flattened feature vector from convolutional layers processing game frames.
-   
-   - **Depends on**: Image size and CNN architecture (see ``agents/iqn.py``)
-   - **Current**: 5632 for 160×120 images
-   
-   .. warning::
-      Must match actual CNN output. Recalculate if changing image dimensions.
 
 .. py:data:: dense_hidden_dimension
    :type: int
@@ -555,6 +546,18 @@ Optimizer
    - Final decay to 1e-5 at 15M frames for fine-tuning
    
    **Rationale**: Large steps for exploration, small steps for exploitation.
+   
+   **Why a separate schedule is needed:**
+   
+   Even though RAdam optimizer is used (which has built-in variance reduction through rectification), a separate learning rate schedule is still necessary for the following reasons:
+   
+   - **RAdam does not have built-in warmup**: While RAdam's rectification mechanism reduces variance in early training stages, it does not provide explicit learning rate warmup or decay functionality.
+   
+   - **Decay is essential**: The schedule provides explicit learning rate decay throughout training, which is crucial for stable convergence and fine-tuning. The exponential decay between schedule points allows smooth transitions.
+   
+   - **Frame-based updates**: Unlike standard PyTorch schedulers (which update based on optimizer steps via ``scheduler.step()``), this schedule updates based on ``cumul_number_frames_played``, which better matches the RL training paradigm where learning rate should be tied to environment interactions rather than optimization steps.
+   
+   - **Custom interpolation**: The implementation uses exponential interpolation between schedule points, providing smoother decay than step-based schedulers.
 
 .. py:data:: gamma_schedule
    :type: list
@@ -608,6 +611,43 @@ N-Step Learning
    - **False**: Include all actions
    
    Reduces exploration bias with epsilon-greedy.
+
+TensorBoard Logging
+-------------------
+
+.. py:data:: tensorboard_suffix_schedule
+   :type: list
+   :value: [(0, ""), (6000000, "_2"), (15000000, "_3"), (30000000, "_4"), (45000000, "_5"), (80000000, "_6"), (150000000, "_7")]
+
+   **TensorBoard log directory suffix schedule**
+   
+   Controls when new TensorBoard log directories are created during long training runs.
+   
+   **How it works:**
+   
+   - When a schedule point is reached, a new ``SummaryWriter`` is created with a new suffix
+   - Log directory format: ``{run_name}{suffix}/`` (e.g., ``uni_4/``, ``uni_4_2/``, ``uni_4_3/``)
+   - Uses staircase schedule (no interpolation - switches at exact frame counts)
+   
+   **Why split logs:**
+   
+   - **Performance**: TensorBoard can slow down significantly with very large log files (>100M data points)
+   - **Organization**: Easier to analyze separate training phases
+   - **Comparison**: Compare different training stages side-by-side
+   - **File size**: Prevents single log files from becoming too large
+   
+   **When to use:**
+   
+   - **Long training runs** (>30M frames): Recommended to split logs
+   - **Short training runs** (<30M frames): Can use single log (set to ``[(0, "")]``)
+   - **Very long runs** (>100M frames): Essential for TensorBoard performance
+   
+   **Example**: For ``run_name = "uni_4"``:
+   
+   - 0-6M frames: logs to ``uni_4/``
+   - 6-15M frames: logs to ``uni_4_2/``
+   - 15-30M frames: logs to ``uni_4_3/``
+   - And so on...
 
 Memory Configuration
 ====================

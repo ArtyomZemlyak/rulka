@@ -62,7 +62,7 @@ Configuration settings are now organized into separate modules for better mainta
 
 All settings are re-exported below for backward compatibility.
 You can still import from this file as before: `from config_files.config import setting_name`
-Or import from specific modules: `from config_files.environment_config import W_downsized`
+Or import from specific modules: `from config_files.neural_network_config import W_downsized`
 
 ===========================================================================================================
 """
