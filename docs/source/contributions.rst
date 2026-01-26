@@ -20,7 +20,7 @@ Getting Started
 .. code-block:: bash
 
     # Clone your fork
-    git clone <your-fork-url>
+    git clone https://github.com/ArtyomZemlyak/rulka.git
     cd rulka
     
     # Install with uv (recommended)

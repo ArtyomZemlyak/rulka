@@ -18,7 +18,7 @@ A: We recommend using `uv` for fast installation:
     irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
     # Clone and setup
-    git clone <your-repo-url>
+    git clone https://github.com/ArtyomZemlyak/rulka.git
     cd rulka
     uv sync
 

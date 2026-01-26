@@ -49,59 +49,66 @@ def learner_process_fn(
     SummaryWriter(log_dir=str(tensorboard_base_dir / layout_version)).add_custom_scalars(
         {
             layout_version: {
-                # "eval_agg_ratio": [
-                #     "Multiline",
-                #     [
-                #         "eval_agg_ratio_trained_author",
-                #         "eval_agg_ratio_blind_author",
-                #     ],
-                # ],
-                # "eval_ratio_trained_author": [
-                #     "Multiline",
-                #     [
-                #         "eval_ratio_trained_author",
-                #     ],
-                # ],
-                # "eval_ratio_blind_author": [
-                #     "Multiline",
-                #     [
-                #         "eval_ratio_blind_author",
-                #     ],
-                # ],
-                "eval_race_time_robust": [
+                # Race metrics
+                "Race/eval_race_time_robust": [
                     "Multiline",
                     [
-                        "eval_race_time_robust",
+                        "Race/eval_race_time_robust.*",
                     ],
                 ],
-                "explo_race_time_finished": [
+                "Race/explo_race_time_finished": [
                     "Multiline",
                     [
-                        "explo_race_time_finished",
+                        "Race/explo_race_time_finished.*",
                     ],
                 ],
-                "loss": ["Multiline", ["loss$", "loss_test$"]],
-                "avg_Q": [
-                    "Multiline",
-                    ["avg_Q"],
-                ],
-                "single_zone_reached": [
+                # Training metrics
+                "Training/loss": [
                     "Multiline",
                     [
-                        "single_zone_reached",
+                        "Training/loss$",
+                        "Training/loss_test$",
                     ],
                 ],
-                "grad_norm_history": [
+                # RL metrics
+                "RL/avg_Q": [
                     "Multiline",
                     [
-                        "grad_norm_history_d9",
-                        "grad_norm_history_d98",
+                        "RL/avg_Q.*",
                     ],
                 ],
-                "priorities": [
+                "RL/single_zone_reached": [
                     "Multiline",
                     [
-                        "priorities",
+                        "RL/single_zone_reached.*",
+                    ],
+                ],
+                # Gradient metrics
+                "Gradients/norm": [
+                    "Multiline",
+                    [
+                        "Gradients/norm_median",
+                        "Gradients/norm_d9",
+                        "Gradients/norm_d98",
+                        "Gradients/norm_max",
+                    ],
+                ],
+                "Gradients/norm_before_clip": [
+                    "Multiline",
+                    [
+                        "Gradients/norm_before_clip_median",
+                        "Gradients/norm_before_clip_d9",
+                        "Gradients/norm_before_clip_d98",
+                        "Gradients/norm_before_clip_max",
+                    ],
+                ],
+                # Buffer metrics
+                "Buffer/priorities": [
+                    "Multiline",
+                    [
+                        "Buffer/priorities_median",
+                        "Buffer/priorities_d9",
+                        "Buffer/priorities_max",
                     ],
                 ],
             },
@@ -196,6 +203,7 @@ def learner_process_fn(
     loss_test_history = []
     train_on_batch_duration_history = []
     grad_norm_history = []
+    grad_norm_before_clip_history = []
     layer_grad_norm_history = defaultdict(list)
 
     # ========================================================
@@ -384,8 +392,30 @@ def learner_process_fn(
 
         walltime_tb = time.time()
         for tag, value in race_stats_to_write.items():
+            # Group race metrics
+            if tag.startswith("eval_race_time") or tag.startswith("explo_race_time"):
+                grouped_tag = f"Race/{tag}"
+            elif tag.startswith("eval_race_finished") or tag.startswith("explo_race_finished"):
+                grouped_tag = f"Race/{tag}"
+            elif tag.startswith("race_time_ratio"):
+                grouped_tag = f"Race/{tag}"
+            elif tag.startswith("avg_Q"):
+                grouped_tag = f"RL/{tag}"
+            elif tag.startswith("single_zone_reached"):
+                grouped_tag = f"RL/{tag}"
+            elif tag.startswith("mean_action_gap"):
+                grouped_tag = f"RL/{tag}"
+            elif tag.startswith("q_value_"):
+                grouped_tag = f"RL/{tag}"
+            elif tag.startswith("split_"):
+                grouped_tag = f"Race/{tag}"
+            elif tag.startswith("instrumentation__") or tag.startswith("worker_time_") or tag.startswith("tmi_protection_"):
+                grouped_tag = f"Performance/{tag}"
+            else:
+                grouped_tag = tag  # Keep original tag for unknown metrics
+            
             tensorboard_writer.add_scalar(
-                tag=tag,
+                tag=grouped_tag,
                 scalar_value=value,
                 global_step=accumulated_stats["cumul_number_frames_played"],
                 walltime=walltime_tb,
@@ -516,13 +546,13 @@ def learner_process_fn(
             ):
                 if (random.random() < config_copy.buffer_test_ratio and len(buffer_test) > 0) or len(buffer) == 0:
                     test_start_time = time.perf_counter()
-                    loss, _ = trainer.train_on_batch(buffer_test, do_learn=False)
+                    loss, _, _ = trainer.train_on_batch(buffer_test, do_learn=False)
                     time_testing_since_last_tensorboard_write += time.perf_counter() - test_start_time
                     loss_test_history.append(loss)
                     # Removed noisy test batch log
                 else:
                     train_start_time = time.perf_counter()
-                    loss, grad_norm = trainer.train_on_batch(buffer, do_learn=True)
+                    loss, grad_norm, grad_norm_before_clip = trainer.train_on_batch(buffer, do_learn=True)
                     train_on_batch_duration_history.append(time.perf_counter() - train_start_time)
                     time_training_since_last_tensorboard_write += train_on_batch_duration_history[-1]
                     accumulated_stats["cumul_number_single_memories_used"] += (
@@ -533,7 +563,10 @@ def learner_process_fn(
                     loss_history.append(loss)
                     if not math.isinf(grad_norm):
                         grad_norm_history.append(grad_norm)
-                        # utilities.log_gradient_norms(online_network, layer_grad_norm_history) #~1ms overhead per batch
+                    if not math.isinf(grad_norm_before_clip):
+                        grad_norm_before_clip_history.append(grad_norm_before_clip)
+                    # Log gradient norms per layer for monitoring
+                    utilities.log_gradient_norms(online_network, layer_grad_norm_history)
 
                     accumulated_stats["cumul_number_batches_done"] += 1
                     # Removed noisy training batch log - use TensorBoard for detailed metrics
@@ -581,57 +614,90 @@ def learner_process_fn(
             #   COLLECT VARIOUS STATISTICS
             # ===============================================
             step_stats = {
-                "gamma": gamma,
-                "n_steps": config_copy.n_steps,
-                "epsilon": utilities.from_exponential_schedule(config_copy.epsilon_schedule, shared_steps.value),
-                "epsilon_boltzmann": utilities.from_exponential_schedule(config_copy.epsilon_boltzmann_schedule, shared_steps.value),
-                "tau_epsilon_boltzmann": config_copy.tau_epsilon_boltzmann,
-                "learning_rate": learning_rate,
-                "weight_decay": weight_decay,
-                "discard_non_greedy_actions_in_nsteps": config_copy.discard_non_greedy_actions_in_nsteps,
-                "memory_size": len(buffer),
-                "number_times_single_memory_is_used_before_discard": config_copy.number_times_single_memory_is_used_before_discard,
-                "learner_percentage_waiting_for_workers": waited_percentage,
-                "learner_percentage_training": trained_percentage,
-                "learner_percentage_testing": tested_percentage,
-                "transitions_learned_per_second": transitions_learned_per_second,
+                # Training metrics
+                "Training/learning_rate": learning_rate,
+                "Training/weight_decay": weight_decay,
+                "Training/batch_size": config_copy.batch_size,
+                "Training/n_steps": config_copy.n_steps,
+                "Training/discard_non_greedy_actions_in_nsteps": config_copy.discard_non_greedy_actions_in_nsteps,
+                
+                # RL hyperparameters
+                "RL/gamma": gamma,
+                "RL/epsilon": utilities.from_exponential_schedule(config_copy.epsilon_schedule, shared_steps.value),
+                "RL/epsilon_boltzmann": utilities.from_exponential_schedule(config_copy.epsilon_boltzmann_schedule, shared_steps.value),
+                "RL/tau_epsilon_boltzmann": config_copy.tau_epsilon_boltzmann,
+                
+                # Buffer metrics
+                "Buffer/size": len(buffer),
+                "Buffer/max_size": buffer._storage.max_size,
+                "Buffer/number_times_single_memory_is_used_before_discard": config_copy.number_times_single_memory_is_used_before_discard,
+                
+                # Performance metrics
+                "Performance/learner_percentage_waiting_for_workers": waited_percentage,
+                "Performance/learner_percentage_training": trained_percentage,
+                "Performance/learner_percentage_testing": tested_percentage,
+                "Performance/transitions_learned_per_second": transitions_learned_per_second,
             }
             if len(loss_history) > 0 and len(loss_test_history) > 0:
                 step_stats.update(
                     {
-                        "loss": np.mean(loss_history),
-                        "loss_test": np.mean(loss_test_history),
-                        "train_on_batch_duration": np.median(train_on_batch_duration_history),
-                        "grad_norm_history_q1": np.quantile(grad_norm_history, 0.25),
-                        "grad_norm_history_median": np.quantile(grad_norm_history, 0.5),
-                        "grad_norm_history_q3": np.quantile(grad_norm_history, 0.75),
-                        "grad_norm_history_d9": np.quantile(grad_norm_history, 0.9),
-                        "grad_norm_history_d98": np.quantile(grad_norm_history, 0.98),
-                        "grad_norm_history_max": np.max(grad_norm_history),
+                        # Training loss
+                        "Training/loss": np.mean(loss_history),
+                        "Training/loss_test": np.mean(loss_test_history),
+                        "Training/train_on_batch_duration": np.median(train_on_batch_duration_history),
+                        
+                        # Gradient norms (after clipping)
+                        "Gradients/norm_q1": np.quantile(grad_norm_history, 0.25),
+                        "Gradients/norm_median": np.quantile(grad_norm_history, 0.5),
+                        "Gradients/norm_q3": np.quantile(grad_norm_history, 0.75),
+                        "Gradients/norm_d9": np.quantile(grad_norm_history, 0.9),
+                        "Gradients/norm_d98": np.quantile(grad_norm_history, 0.98),
+                        "Gradients/norm_max": np.max(grad_norm_history),
+                        
+                        # Gradient norms BEFORE clipping (for explosion detection)
+                        "Gradients/norm_before_clip_q1": np.quantile(grad_norm_before_clip_history, 0.25) if len(grad_norm_before_clip_history) > 0 else 0.0,
+                        "Gradients/norm_before_clip_median": np.quantile(grad_norm_before_clip_history, 0.5) if len(grad_norm_before_clip_history) > 0 else 0.0,
+                        "Gradients/norm_before_clip_q3": np.quantile(grad_norm_before_clip_history, 0.75) if len(grad_norm_before_clip_history) > 0 else 0.0,
+                        "Gradients/norm_before_clip_d9": np.quantile(grad_norm_before_clip_history, 0.9) if len(grad_norm_before_clip_history) > 0 else 0.0,
+                        "Gradients/norm_before_clip_d98": np.quantile(grad_norm_before_clip_history, 0.98) if len(grad_norm_before_clip_history) > 0 else 0.0,
+                        "Gradients/norm_before_clip_max": np.max(grad_norm_before_clip_history) if len(grad_norm_before_clip_history) > 0 else 0.0,
                     }
                 )
+                # Per-layer gradient norms
                 for key, val in layer_grad_norm_history.items():
-                    step_stats.update(
-                        {
-                            f"{key}_median": np.quantile(val, 0.5),
-                            f"{key}_q3": np.quantile(val, 0.75),
-                            f"{key}_d9": np.quantile(val, 0.9),
-                            f"{key}_c98": np.quantile(val, 0.98),
-                            f"{key}_max": np.max(val),
-                        }
-                    )
+                    # Extract layer name from key (format: "L2_grad_norm_layer_name" or "Linf_grad_norm_layer_name")
+                    if key.startswith("L2_grad_norm_"):
+                        layer_name = key.replace("L2_grad_norm_", "")
+                        step_stats.update(
+                            {
+                                f"Gradients/by_layer/{layer_name}/L2_median": np.quantile(val, 0.5),
+                                f"Gradients/by_layer/{layer_name}/L2_q3": np.quantile(val, 0.75),
+                                f"Gradients/by_layer/{layer_name}/L2_d9": np.quantile(val, 0.9),
+                                f"Gradients/by_layer/{layer_name}/L2_max": np.max(val),
+                            }
+                        )
+                    elif key.startswith("Linf_grad_norm_"):
+                        layer_name = key.replace("Linf_grad_norm_", "")
+                        step_stats.update(
+                            {
+                                f"Gradients/by_layer/{layer_name}/Linf_median": np.quantile(val, 0.5),
+                                f"Gradients/by_layer/{layer_name}/Linf_q3": np.quantile(val, 0.75),
+                                f"Gradients/by_layer/{layer_name}/Linf_d9": np.quantile(val, 0.9),
+                                f"Gradients/by_layer/{layer_name}/Linf_max": np.max(val),
+                            }
+                        )
             if isinstance(buffer._sampler, PrioritizedSampler):
                 all_priorities = np.array([buffer._sampler._sum_tree.at(i) for i in range(len(buffer))])
                 step_stats.update(
                     {
-                        "priorities_min": np.min(all_priorities),
-                        "priorities_q1": np.quantile(all_priorities, 0.1),
-                        "priorities_mean": np.mean(all_priorities),
-                        "priorities_median": np.quantile(all_priorities, 0.5),
-                        "priorities_q3": np.quantile(all_priorities, 0.75),
-                        "priorities_d9": np.quantile(all_priorities, 0.9),
-                        "priorities_c98": np.quantile(all_priorities, 0.98),
-                        "priorities_max": np.max(all_priorities),
+                        "Buffer/priorities_min": np.min(all_priorities),
+                        "Buffer/priorities_q1": np.quantile(all_priorities, 0.1),
+                        "Buffer/priorities_mean": np.mean(all_priorities),
+                        "Buffer/priorities_median": np.quantile(all_priorities, 0.5),
+                        "Buffer/priorities_q3": np.quantile(all_priorities, 0.75),
+                        "Buffer/priorities_d9": np.quantile(all_priorities, 0.9),
+                        "Buffer/priorities_c98": np.quantile(all_priorities, 0.98),
+                        "Buffer/priorities_max": np.max(all_priorities),
                     }
                 )
             for key, value in accumulated_stats.items():
@@ -644,6 +710,7 @@ def learner_process_fn(
             loss_test_history = []
             train_on_batch_duration_history = []
             grad_norm_history = []
+            grad_norm_before_clip_history = []
             layer_grad_norm_history = defaultdict(list)
 
             # ===============================================
@@ -654,23 +721,26 @@ def learner_process_fn(
                 online_network.eval()
             tau = torch.linspace(0.05, 0.95, config_copy.iqn_k)[:, None].to("cuda")
             per_quantile_output = inferer.infer_network(rollout_results["frames"][0], rollout_results["state_float"][0], tau)
+            # IQN-specific metrics: quantile spread per action
             for i, std in enumerate(list(per_quantile_output.std(axis=0))):
-                step_stats[f"std_within_iqn_quantiles_for_action{i}"] = std
+                step_stats[f"IQN/quantile_std_action_{i}"] = std
 
             # ===============================================
             #   WRITE TO TENSORBOARD
             # ===============================================
 
             walltime_tb = time.time()
+            # Log network weights
             for name, param in online_network.named_parameters():
                 tensorboard_writer.add_scalar(
-                    tag=f"layer_{name}_L2",
+                    tag=f"Network/weights/{name}/L2",
                     scalar_value=np.sqrt((param**2).mean().detach().cpu().item()),
                     global_step=accumulated_stats["cumul_number_frames_played"],
                     walltime=walltime_tb,
                 )
             assert len(optimizer1.param_groups) == 1
             try:
+                # Log optimizer state (Adam/RAdam specific)
                 for p, (name, _) in zip(
                     optimizer1.param_groups[0]["params"],
                     online_network.named_parameters(),
@@ -679,19 +749,19 @@ def learner_process_fn(
                     exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                     mod_lr = 1 / (exp_avg_sq.sqrt() + 1e-4)
                     tensorboard_writer.add_scalar(
-                        tag=f"lr_ratio_{name}_L2",
+                        tag=f"Network/optimizer/{name}/adaptive_lr_L2",
                         scalar_value=np.sqrt((mod_lr**2).mean().detach().cpu().item()),
                         global_step=accumulated_stats["cumul_number_frames_played"],
                         walltime=walltime_tb,
                     )
                     tensorboard_writer.add_scalar(
-                        tag=f"exp_avg_{name}_L2",
+                        tag=f"Network/optimizer/{name}/exp_avg_L2",
                         scalar_value=np.sqrt((exp_avg**2).mean().detach().cpu().item()),
                         global_step=accumulated_stats["cumul_number_frames_played"],
                         walltime=walltime_tb,
                     )
                     tensorboard_writer.add_scalar(
-                        tag=f"exp_avg_sq_{name}_L2",
+                        tag=f"Network/optimizer/{name}/exp_avg_sq_L2",
                         scalar_value=np.sqrt((exp_avg_sq**2).mean().detach().cpu().item()),
                         global_step=accumulated_stats["cumul_number_frames_played"],
                         walltime=walltime_tb,
@@ -699,6 +769,7 @@ def learner_process_fn(
             except:
                 pass
 
+            # Log all aggregated statistics (already grouped with prefixes)
             for k, v in step_stats.items():
                 tensorboard_writer.add_scalar(
                     tag=k,

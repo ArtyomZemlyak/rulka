@@ -33,6 +33,7 @@ Configuration settings are now organized into separate modules for better mainta
    - Layer dimensions, IQN parameters, gradient clipping
 
 3. training_config.py - Training hyperparameters
+   - Run identification (run_name)
    - Learning rates, optimizer settings, schedules
 
 4. memory_config.py - Replay buffer configuration

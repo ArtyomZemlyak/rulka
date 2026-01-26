@@ -1,5 +1,5 @@
 [project]
-name = "trackmania-rl"
+name = "rulka"
 version = "1.0.0"
 description = "Trackmania AI with reinforcement learning - Rulka fork"
 license = {text = "MIT"}
@@ -75,7 +75,9 @@ index-strategy = "unsafe-best-match"
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
-explicit = true[tool.uv.sources]
+explicit = true
+
+[tool.uv.sources]
 torch = { index = "pytorch-cu126" }
 torchvision = { index = "pytorch-cu126" }
 torchaudio = { index = "pytorch-cu126" }

@@ -7,9 +7,9 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'Rulka'
-copyright = '2024, pb4 and Agade'
-author = 'pb4 and Agade'
-release = '3.0.1'
+copyright = '2024-2026, ArtyomZemlyak'
+author = 'ArtyomZemlyak'
+release = '1.0.0'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

@@ -54,4 +54,3 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 This is a fork of the original Linesight project:
 - Repository: https://github.com/pb4git/linesight
-- Documentation: https://linesight-rl.github.io/linesight/

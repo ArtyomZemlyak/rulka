@@ -102,6 +102,7 @@ Key settings:
 Learning rates, optimizer, schedules, batch size
 
 Key settings:
+- `run_name` - Experiment identifier
 - `batch_size` - Training batch size
 - `lr_schedule` - Learning rate schedule
 - `gamma_schedule` - Discount factor schedule
@@ -138,7 +139,6 @@ Key settings:
 Map selection and training sequences
 
 Key settings:
-- `run_name` - Experiment identifier
 - `map_cycle` - Training map rotation
 
 ### 8. Performance (performance_config.py)
@@ -210,4 +210,4 @@ firefox build/html/configuration_guide.html
 
 - Documentation: [Configuration Guide](../../docs/source/configuration_guide.rst)
 - Discord: [Join discussion](https://discord.gg/PvWYGkGKqd)
-- GitHub: [Report issues](https://github.com/pb4git/linesight)
+- GitHub: [Report issues](https://github.com/ArtyomZemlyak/rulka)

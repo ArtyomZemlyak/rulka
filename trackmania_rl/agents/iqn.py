@@ -222,11 +222,12 @@ class Trainer:
 
         Args:
             buffer: a ReplayBuffer object from which transitions are sampled. Currently, handles a basic buffer or a prioritized replay buffer.
-            do_learn: a boolean indicating whether steps 3 and 4 should be applied. If these are not applied, the method only returns total_loss and grad_norm for logging purposes.
+            do_learn: a boolean indicating whether steps 3 and 4 should be applied. If these are not applied, the method only returns total_loss, grad_norm, and grad_norm_before_clip for logging purposes.
 
         Returns:
             total_loss: a float
-            grad_norm: a float
+            grad_norm: a float (gradient norm after clipping)
+            grad_norm_before_clip: a float (gradient norm before clipping, for monitoring)
 
         """
         self.optimizer.zero_grad(set_to_none=True)
@@ -322,6 +323,13 @@ class Trainer:
 
                 # Gradient clipping : https://pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
                 self.scaler.unscale_(self.optimizer)
+                
+                # Calculate gradient norm BEFORE clipping for monitoring
+                grad_norm_before_clip = torch.nn.utils.clip_grad_norm_(
+                    self.online_network.parameters(), float('inf')
+                ).detach().cpu().item()
+                
+                # Now clip gradients
                 grad_norm = (
                     torch.nn.utils.clip_grad_norm_(self.online_network.parameters(), config_copy.clip_grad_norm).detach().cpu().item()
                 )
@@ -331,6 +339,7 @@ class Trainer:
                 self.scaler.update()
             else:
                 grad_norm = 0
+                grad_norm_before_clip = 0
 
             total_loss = total_loss.detach().cpu()
             if config_copy.prio_alpha > 0:
@@ -344,7 +353,7 @@ class Trainer:
                     .cpu()
                     .type(torch.float64),
                 )
-        return total_loss, grad_norm
+        return total_loss, grad_norm, grad_norm_before_clip
 
 
 class Inferer:

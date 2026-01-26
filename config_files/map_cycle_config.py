@@ -5,9 +5,6 @@ See docs/source/configuration_guide.rst for detailed documentation.
 
 from itertools import repeat
 
-# Run identification
-run_name = "uni_3"  # Experiment name
-
 # Nadeo maps selection
 nadeo_maps_to_train_and_test = [
     "A01-Race",

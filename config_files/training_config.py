@@ -6,14 +6,17 @@ See docs/source/configuration_guide.rst for detailed documentation.
 import numpy as np
 from config_files.environment_config import temporal_mini_race_duration_actions
 
+# Run identification
+run_name = "uni_4"  # Experiment name
+
 # Schedule control
 global_schedule_speed = 1  # Multiplier for all schedules
 
 # Optimizer (Adam)
-adam_epsilon = 1e-4  # Numerical stability constant
+adam_epsilon = 1e-5  # Numerical stability constant
 adam_beta1 = 0.9  # First moment decay rate
 adam_beta2 = 0.999  # Second moment decay rate
-weight_decay_lr_ratio = 1 / 50  # L2 regularization strength
+weight_decay_lr_ratio = 0.1  # L2 regularization strength
 
 # Batch size
 batch_size = 512  # Number of transitions per training step

@@ -116,6 +116,8 @@ MIT License
 - [donadigo](https://github.com/donadigo) for TMInterface
 - TrackMania community
 
+*The Contributors list on GitHub includes original Linesight authors; see above for attribution.*
+
 ---
 
 ⚠️ **Important:** All AI runs are Tool Assisted and must NOT be submitted to official leaderboards.

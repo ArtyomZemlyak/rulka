@@ -2,7 +2,7 @@
 Configuration Guide
 ====================
 
-This guide provides detailed documentation for all configuration parameters in Linesight.
+This guide provides detailed documentation for all configuration parameters in TrackMania RL (Rulka).
 
 Configuration files are located in ``config_files/`` and organized by category for easy editing.
 Each setting includes a brief inline comment. This document provides comprehensive explanations.
@@ -447,6 +447,23 @@ Training Configuration
 
 Located in: ``config_files/training_config.py``
 
+Run Identification
+------------------
+
+.. py:data:: run_name
+   :type: str
+   :value: "uni_3"
+
+   **Experiment identifier**
+   
+   Used for:
+   
+   - Tensorboard log directory naming
+   - Model checkpoint naming
+   - Distinguishing multiple experiments
+   
+   **Example**: ``"uni_3"``, ``"A02_training"``, ``"experiment_v2"``
+
 Schedules
 ---------
 
@@ -796,18 +813,6 @@ Map Cycle Configuration
 ========================
 
 Located in: ``config_files/map_cycle_config.py``
-
-.. py:data:: run_name
-   :type: str
-   :value: "uni_1"
-
-   **Experiment identifier**
-   
-   Used for:
-   
-   - Tensorboard log directory naming
-   - Model checkpoint naming
-   - Distinguishing multiple experiments
 
 .. py:data:: map_cycle
    :type: list

@@ -97,7 +97,7 @@ For harder maps like `map5 <https://tmnf.exchange/trackshow/10460245>`_ or E03-E
 
 **3. Update run name (optional)**
 
-In ``config_files/map_cycle_config.py``, change the run name to identify this experiment:
+In ``config_files/training_config.py``, change the run name to identify this experiment:
 
 .. code-block:: python
 

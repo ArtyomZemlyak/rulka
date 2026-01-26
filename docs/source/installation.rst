@@ -47,7 +47,7 @@ On Linux/macOS:
 
 .. code-block:: bash
 
-    git clone <your-repository-url>
+    git clone https://github.com/ArtyomZemlyak/rulka.git
     cd rulka
     uv sync
 
@@ -75,7 +75,7 @@ If not using uv, you can install with standard pip:
 
 .. code-block:: bash
 
-    git clone <your-repository-url>
+    git clone https://github.com/ArtyomZemlyak/rulka.git
     cd rulka
     python -m venv .venv
     
