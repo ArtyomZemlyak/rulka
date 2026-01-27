@@ -25,7 +25,7 @@ frames_before_save_best_runs = 1_500_000  # Min frames before saving replays
 threshold_to_save_all_runs_ms = -1  # Auto-save threshold (disabled)
 
 # Game speed
-running_speed = 160  # Simulation speed multiplier (160x real-time)
+running_speed = 1024  # Simulation speed multiplier (160x real-time)
 
 # Window focus management (LEGACY - kept for compatibility)
 # NOTE: After analysis, constant focus switching causes "focus war" between multiple instances

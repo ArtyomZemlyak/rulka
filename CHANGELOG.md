@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.1.0] - 2026-01-27
+
+### Added
+- **Experiment analysis scripts** — `scripts/analyze_experiment.py`, `scripts/analyze_batch_experiment.py`, `scripts/extract_tensorboard_data.py` for extracting and comparing TensorBoard metrics across runs
+- **Experiments documentation** — `docs/source/experiments/` section (training_speed and index) with toctree in main docs
+
+### Changed
+- **performance_config.py** — parameter names aligned with code (e.g. `plot_race_time_left_curves`, `update_inference_network_every_n_actions`); `force_window_focus_on_input` deprecated (focus managed once per map load)
+- **training_config.py** — extended `tensorboard_suffix_schedule`, `oversample_long_term_steps` / `oversample_maximum_term_steps`, `min_horizon_to_update_priority_actions`
+- **docs/source/index.rst** — added Experiments toctree
+
 ## [1.0.0] - 2026-01-25
 
 ### Added

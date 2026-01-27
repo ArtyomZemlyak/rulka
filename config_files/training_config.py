@@ -7,10 +7,10 @@ import numpy as np
 from config_files.environment_config import temporal_mini_race_duration_actions
 
 # Run identification
-run_name = "uni_6"  # Experiment name
+run_name = "uni_9"  # Experiment name
 
 # Batch size
-batch_size = 8192  # Number of transitions per training step
+batch_size = 64  # Number of transitions per training step
 
 # Optimizer (Adam)
 adam_epsilon = 1e-4  # Numerical stability constant
