@@ -69,15 +69,15 @@ include = ["pyproject.toml", "trackmania_rl/**/*.py", "scripts/**/*.py", "config
 line-length = 140
 
 [tool.uv]
-# Используем PyTorch с CUDA 12.x (compatible with most modern GPUs)
+# Используем PyTorch nightly с CUDA 12.8 (нужно для RTX 50xx / sm_120)
 index-strategy = "unsafe-best-match"
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu128-nightly"
+url = "https://download.pytorch.org/whl/nightly/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
+torch = { index = "pytorch-cu128-nightly" }
+torchvision = { index = "pytorch-cu128-nightly" }
+torchaudio = { index = "pytorch-cu128-nightly" }

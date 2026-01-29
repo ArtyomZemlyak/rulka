@@ -37,9 +37,10 @@ When creating or updating an experiment page, ensure it has:
 **Experiments often run for different wall-clock times.** Comparing “last value” or “final loss at step N” across runs is **invalid** when one run lasted 80 min and another 160 min.
 
 - **Compare by relative time** — minutes from run start. Use checkpoints 5, 10, 15, 20, … min; compare only up to when the **shortest** of the compared runs is still going.
-- **Script:** ``scripts/analyze_experiment_by_relative_time.py``. Primary tool for experiment comparison.
+- **Script:** ``scripts/analyze_experiment_by_relative_time.py``. Primary tool; supports **2+ runs** (e.g. ``uni_5 uni_7`` or ``uni_12 uni_13 uni_14``).
 - **At each checkpoint:**
-  - **Race times** (e.g. ``alltime_min_ms_hock``): use **best so far** by that moment.
+  - **Race times (preferred):** per-race events ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` — script prints **best / mean / std**, best among finished, **finish rate**, **first finish** (one run-wide t0 per run). Use these tables for dynamics and stability.
+  - **Scalar race times:** ``alltime_min_ms_{map}`` = best so far at that moment (for runs before learner_process fix, prefer per-race tables; scalar may be wrong).
   - **Loss, Q, GPU %**: use **last value at that moment**.
 - **Always document run durations** in the RST, e.g. “uni_5 ~160 min, uni_7 ~86 min”, and state that conclusions are “by relative time”.
 - **Wording in docs:** “at 60 min”, “at 70 min”, “common window up to 85 min”, “by relative time”.
@@ -47,8 +48,8 @@ When creating or updating an experiment page, ensure it has:
 **When to use which script:**
 
 - **Relative time (default for comparisons):**  
-  ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5]``  
-  Use when runs had different lengths or when you care about “same wall-clock time” comparison.
+  ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5]``  
+  Use when runs had different lengths or when you care about “same wall-clock time” comparison. Output: per-race tables (best/mean/std, finish rate, first finish) then scalar metrics.
 - **Last value (step-based):**  
   ``python scripts/analyze_experiment.py <run1> <run2> ...``  
   Use only for runs of the same length or when explicitly comparing final step-based numbers; otherwise prefer relative time.
@@ -84,6 +85,7 @@ From project root:
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 --interval 5
+# or 3+ runs: python scripts/analyze_experiment_by_relative_time.py uni_12 uni_13 uni_14 --interval 5
 ```
 
 With explicit log dir:
@@ -216,7 +218,7 @@ Recommendations
 - By **relative time**: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5]`` (``--logdir "<path>"`` if not from project root).
 - By “last value”: ``python scripts/analyze_experiment.py <run1> <run2> ...`` (less meaningful when durations differ).
 - ``scripts/extract_tensorboard_data.py`` — specific metrics (e.g. ``Gradients/norm_before_clip_max``, ``Performance/transitions_learned_per_second``).
-- Key metrics (see ``docs/source/tensorboard_metrics.rst``): ``Training/loss``, ``Race/eval_race_time_robust_*``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Performance/transitions_learned_per_second``, ``Gradients/norm_before_clip_max``.
+- Key metrics (see ``docs/source/tensorboard_metrics.rst``): Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Gradients/norm_before_clip_max``.
 ```
 
 ---
@@ -251,7 +253,7 @@ When you **only update** an existing file (e.g. training_speed.rst), do **not** 
 
 | Purpose | Command |
 |--------|--------|
-| **Compare by relative time** (primary when durations differ) | ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5]`` |
+| **Compare by relative time** (primary when durations differ; 2+ runs) | ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5]`` |
 | Compare by last value (step-based) | ``python scripts/analyze_experiment.py <run1> <run2> ...`` |
 | Extract specific metrics | ``python scripts/extract_tensorboard_data.py --runs <run1> <run2> --metrics "Race/eval_race_time_robust_hock" "Training/loss"`` |
 | Batch-size–specific (legacy) | ``python scripts/analyze_batch_experiment.py`` |
@@ -264,7 +266,7 @@ Use ``--logdir "C:\...\rulka\tensorboard"`` when not running from project root.
 
 Align with ``docs/source/tensorboard_metrics.rst``. Priority:
 
-1. **Map performance**: ``alltime_min_ms_{map}`` (best time by checkpoint), ``Race/eval_race_time_robust_*``  
+1. **Map performance (preferred):** Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` (best/mean/std, finish rate, first finish). Scalar: ``alltime_min_ms_{map}``  
 2. **Training loss**: ``Training/loss``  
 3. **Q-values**: ``RL/avg_Q_*``  
 4. **GPU / throughput**: ``Performance/learner_percentage_training`` (>70% target), ``Performance/transitions_learned_per_second``  
@@ -300,7 +302,7 @@ When comparing by relative time, report these **at the same checkpoints** (e.g. 
 
 User: “Documented uni_7 — batch 512, speed 512, converges faster; add to docs.”
 
-1. Activate venv, run: ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 --interval 5`` (from project root or with ``--logdir``).
+1. Activate venv, run: ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 --interval 5`` or ``uni_12 uni_13 uni_14`` for 3+ runs (from project root or with ``--logdir``).
 2. Read config files for exact values.
 3. **Update** ``training_speed.rst``: add metrics and conclusions for uni_7 **by relative time** (at X min, common window, durations). Do not create a new file.
 4. Do **not** change ``experiments/index.rst``.

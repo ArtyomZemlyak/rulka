@@ -704,7 +704,7 @@ def learner_process_fn(
                 if key not in ["alltime_min_ms", "rolling_mean_ms"]:
                     step_stats[key] = value
             for key, value in accumulated_stats["alltime_min_ms"].items():
-                step_stats[f"alltime_min_ms_{map_name}"] = value
+                step_stats[f"alltime_min_ms_{key}"] = value
 
             loss_history = []
             loss_test_history = []

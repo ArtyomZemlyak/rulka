@@ -131,6 +131,58 @@ Spatial Configuration
    .. warning::
       Very low values (<0.3m) can cause performance issues with many checkpoints.
 
+.. py:data:: n_zone_centers_extrapolate_before_start_of_map
+   :type: int
+   :value: 20
+
+   **Virtual waypoints before the start line**
+   
+   Number of extrapolated zone centers added before the actual track start. These virtual waypoints extend the track centerline backwards from the start line.
+   
+   **Why needed:**
+   
+   - At race start, the car may be positioned before the start line (during countdown/initialization)
+   - The zone tracking system needs valid zone indices even when the car is before the start
+   - ``current_zone_idx`` is initialized to this value at rollout start
+   
+   **How it works:**
+   
+   - Virtual waypoints are created by extrapolating backwards along the direction from the first real checkpoint to the second
+   - This creates a smooth continuation of the track before the start
+   - The system can track position and progress even before crossing the start line
+   
+   **Typical values:** 10-30. Current: 20 provides sufficient buffer for initialization.
+
+.. py:data:: n_zone_centers_extrapolate_after_end_of_map
+   :type: int
+   :value: 1000
+
+   **Virtual waypoints after the finish line**
+   
+   Number of extrapolated zone centers added after the actual track finish. These virtual waypoints extend the track centerline forwards from the finish line.
+   
+   **Why needed:**
+   
+   - After crossing the finish, the car may continue moving forward
+   - The system needs to track position and calculate distances even after finish
+   - Used for calculating distance-to-finish notifications (see ``margin_to_announce_finish_meters``)
+   - Prevents zone tracking from breaking when the car overshoots the finish
+   
+   **How it works:**
+   
+   - Virtual waypoints are created by extrapolating forwards along the direction from the last real checkpoint to the second-to-last
+   - The agent cannot enter the final virtual zone (protected by a check in zone tracking)
+   - Used to compute remaining distance to finish for reward shaping and state representation
+   
+   **Why so many (1000)?**
+   
+   - After finishing, the car may coast for significant distance
+   - Need enough virtual waypoints to cover potential overshoot
+   - With ``distance_between_checkpoints=0.5m``, 1000 waypoints = ~500 meters of virtual track
+   - Ensures distance calculations remain valid even if the car travels far past finish
+   
+   **Typical values:** 500-2000. Current: 1000 provides generous buffer for post-finish tracking.
+
 .. py:data:: road_width
    :type: int
    :value: 90
@@ -142,6 +194,166 @@ Spatial Configuration
    - **Purpose**: Collision detection and checkpoint validation
    - **Current**: 90m is conservative (actual roads are 16-32m wide)
    - **Typical range**: 50-100m
+
+Temporal Configuration - Mini-Races
+------------------------------------
+
+**What are mini-races?**
+
+Mini-races are a key technique that allows the agent to learn with ``gamma = 1`` (no discounting) by reinterpreting each state as part of a fixed-duration "mini-race" rather than the full track trajectory. This simplifies learning and enables efficient credit assignment.
+
+**How it works:**
+
+1. During training, when sampling a batch from the replay buffer, each transition is reinterpreted as part of a random 7-second "mini-race"
+2. A random "current time" (0 to 7 seconds) is sampled **independently for each transition** in the batch
+3. The state is interpreted as "we are at time X in a mini-race"
+4. If the next state would exceed 7 seconds, the transition becomes terminal
+5. Q-values represent "expected sum of rewards in the next 7 seconds" instead of "expected sum of discounted rewards until finish"
+
+**Important: How intervals are selected**
+
+The 7-second intervals are **not sequential** (0-7, 7-14, 14-21...). Instead:
+
+- Each transition from the real race can be reinterpreted as part of **any random 7-second window**
+- For example, a transition at 15 seconds into the race might be interpreted as:
+  - "Time 0 in a mini-race" (covering 15-22 seconds of real race)
+  - "Time 3.5 in a mini-race" (covering 11.5-18.5 seconds)
+  - "Time 6.5 in a mini-race" (covering 8.5-15.5 seconds)
+  - Any other random position
+
+- Intervals **overlap extensively** and are sampled randomly for each batch
+- This means the same real transition can be trained on as part of many different mini-race contexts
+
+**How does the agent learn the full track?**
+
+Even though Q-values only predict 7 seconds ahead, the agent still learns to drive the entire track efficiently:
+
+1. **Local optimization → global optimization**: By optimizing every 7-second segment along the track, the agent implicitly optimizes the full trajectory
+2. **Overlapping coverage**: Since intervals overlap and are randomly sampled, transitions from all parts of the track are trained with various mini-race contexts
+3. **Greedy policy**: At inference time, the agent greedily selects actions that maximize the 7-second Q-value, which naturally chains into a good full-track policy
+4. **Reward structure**: The rewards (progress, time penalty) encourage forward progress, so optimizing 7-second segments leads to efficient full-track driving
+
+**Benefits:**
+
+- **Simplified learning**: No need to learn long-term value estimates for the entire track
+- **Gamma = 1**: Can use undiscounted returns because the horizon is naturally limited
+- **Better credit assignment**: Focuses learning on near-term consequences (7 seconds)
+- **Stability**: Avoids issues with very long episodes and sparse rewards
+
+**Implementation:**
+
+The mini-race logic is implemented in ``buffer_utilities.buffer_collate_function()``, which is called during batch sampling. The first element of ``state_float`` contains the current time in the mini-race (in actions).
+
+.. py:data:: temporal_mini_race_duration_ms
+   :type: int
+   :value: 7000
+
+   **Duration of mini-races** (milliseconds)
+   
+   The fixed horizon for each mini-race. All Q-values are defined as "expected sum of rewards in the next N milliseconds".
+   
+   - **Purpose**: Defines the temporal horizon for value estimation
+   - **Current**: 7000ms = 7 seconds
+   - **Typical range**: 5000-10000ms (5-10 seconds)
+   
+   **Trade-offs:**
+   
+   - **Shorter (3-5s)**: Faster learning, but may miss long-term consequences
+   - **Longer (10-15s)**: Better long-term planning, but slower learning and more variance
+   - **Current (7s)**: Good balance for TrackMania's typical decision-making horizon
+   
+   With ``ms_per_action = 50ms``, this equals 140 actions per mini-race.
+
+.. py:data:: temporal_mini_race_duration_actions
+   :type: int
+   :value: 140
+
+   **Duration of mini-races in actions** (computed automatically)
+   
+   Automatically calculated as ``temporal_mini_race_duration_ms // ms_per_action``.
+   
+   Used internally for mini-race time calculations and terminal state detection.
+
+.. py:data:: margin_to_announce_finish_meters
+   :type: int
+   :value: 700
+
+   **Distance threshold to notify agent of finish line** (meters)
+   
+   When the agent is within this distance of the finish, the distance-to-finish feature in the state is capped at this value. This provides a consistent signal as the agent approaches the finish.
+   
+   **Why needed:**
+   
+   - The agent needs to know it's approaching the finish to adjust behavior (e.g., maintain speed, avoid unnecessary actions)
+   - Without capping, the distance feature would decrease rapidly near finish, creating a non-linear signal
+   - Capping provides a stable "finish approaching" signal within the last 700 meters
+   
+   **How it's used:**
+   
+   - Included in ``state_float`` as one of the input features
+   - Value is ``min(margin_to_announce_finish_meters, actual_distance_to_finish)``
+   - When far from finish (>700m), shows actual distance
+   - When close (<700m), shows 700m (constant signal)
+   
+   **Typical values:** 500-1000 meters. Current: 700m provides good advance warning for finish approach.
+
+Contact and Physics
+-------------------
+
+.. py:data:: n_contact_material_physics_behavior_types
+   :type: int
+   :value: 4
+
+   **Number of surface physics categories** used as scalar input
+   
+   TrackMania has many surface types (Concrete, Grass, Ice, Turbo, Dirt, etc.). They are grouped into a small number of *physics behavior* categories for the agent's input. This parameter is the number of such categories that are explicitly encoded in the state.
+   
+   **How it works:**
+   
+   - Surface types are grouped in ``trackmania_rl/contact_materials.py`` (e.g. Asphalt-like, Grass, Dirt, Turbo, and "other")
+   - For each of the 4 wheels, the game provides the current contact material ID
+   - The state includes a one-hot-like encoding per wheel: for each category index ``0 .. n_contact_material_physics_behavior_types - 1``, one float indicates whether that wheel is on that surface category
+   - Total floats from contact materials: **4 wheels × n_contact_material_physics_behavior_types** = 4 × 4 = 16
+   
+   **Why needed:**
+   
+   - Grip and behavior depend strongly on surface (asphalt vs grass vs turbo vs ice)
+   - The agent needs to know which surface each wheel is on to predict handling and choose actions
+   - Using a few physics groups keeps the input size small while preserving the main distinction (road vs off-road vs turbo vs other)
+   
+   **Current:** 4 categories. The mapping from game materials to these groups is defined in ``contact_materials.py`` (e.g. 0 = Asphalt-like, 1 = Grass, 2 = Dirt, 3 = Turbo; other materials map to an implicit "other" and are not encoded as a separate category index).
+   
+   **Do not change** unless you also change the grouping logic in ``contact_materials.py`` and the input dimension in ``neural_network_config.py``.
+
+.. py:data:: n_prev_actions_in_inputs
+   :type: int
+   :value: 5
+
+   **Number of previous actions** included in the state (action history)
+   
+   The state includes the last N actions taken by the agent, each encoded as 4 binary flags: accelerate, brake, left, right (see ``config_files/inputs_list.py``). This gives the network a short history of what the car was doing.
+   
+   **How it works:**
+   
+   - At each step, the last ``n_prev_actions_in_inputs`` actions are taken from ``rollout_results["actions"]``
+   - Each action is expanded to 4 floats: one per input name in ``["accelerate", "brake", "left", "right"]`` (1.0 if that input is pressed, 0.0 otherwise)
+   - They are concatenated in order (oldest to newest)
+   - Total floats from action history: **4 × n_prev_actions_in_inputs** = 4 × 5 = 20
+   
+   **Why needed:**
+   
+   - The MDP is not fully Markovian from a single frame: steering and acceleration have inertia, and the current command is partly a continuation of the previous ones
+   - Including the last few actions makes the state closer to Markovian and helps the policy produce smooth, consistent control (e.g. sustained turns instead of jitter)
+   - Without action history, the agent would have to infer "I was turning left" from the image/state alone, which is harder and noisier
+   
+   **Trade-offs:**
+   
+   - **Larger (6–8):** Longer memory of past actions, smoother behavior, more input dimensions
+   - **Smaller (3–4):** Fewer parameters, but less context and possibly jerkier control
+   
+   **Current:** 5 actions. With 50 ms per action, this is 250 ms of action history (~0.25 s).
+   
+   Changing this value changes ``float_input_dim`` in ``neural_network_config.py`` (add or subtract 4 per action).
 
 Timeouts
 --------
@@ -287,6 +499,34 @@ Input Dimensions
    - 1: Additional feature (freewheeling flag)
    
    **Current**: 27 + 120 + 20 + 16 + 1 = 184 features
+
+State Normalization (float_inputs_mean / float_inputs_std)
+---------------------------------------------------------
+
+Located in: ``config_files/state_normalization.py``
+
+Scalar inputs are normalized before the network: ``(float_inputs - float_inputs_mean) / float_inputs_std``. This keeps activations in a reasonable range and can speed up training.
+
+**How were these values obtained?**
+
+The repo does **not** include a script that computes them from data. The current values are a mix of:
+
+1. **Domain-derived:** From config or known ranges. Examples:
+   - First feature (mini-race time): mean = ``temporal_mini_race_duration_actions / 2`` (70), std = 70.
+   - Distance to finish: mean = ``margin_to_announce_finish_meters`` (700), std = 350.
+
+2. **Typical for binary/bounded inputs:** For action flags (0/1) and wheel/gear floats, mean and std are set to plausible "typical" values (e.g. 0.5 for symmetric binary, 0.8/0.2 for "often accelerate").
+
+3. **Possibly empirical:** The 40 waypoint coordinates (120 floats) have non-round means and stds (e.g. -2.1, 9.5, 19.1, 28.5…), which suggests they may have been computed as sample mean and std over rollouts on one or more maps in the past, then hardcoded.
+
+**How to recompute from your own data:**
+
+1. Collect many ``state_float`` vectors (same order as in ``game_instance_manager.py``: placeholder, previous_actions, gear/wheels, angular velocity, velocity, y_map, zone_centers, distance_to_finish, freewheeling). During training, the first element is overwritten with mini-race time in ``buffer_collate_function``, so for normalization you can either use the "raw" state from the game or the post-collate state from the buffer.
+2. Stack into a matrix of shape ``(N, float_input_dim)``.
+3. Compute ``mean = np.nanmean(data, axis=0)`` and ``std = np.nanstd(data, axis=0)`` (or replace zeros in std with a small constant to avoid division by zero).
+4. Update ``float_inputs_mean`` and ``float_inputs_std`` in ``state_normalization.py``.
+
+If you change the number or order of float features (e.g. waypoints, actions), the length and indices in ``state_normalization.py`` must match ``float_input_dim`` and the order in ``game_instance_manager.py`` / ``buffer_utilities.py``.
 
 Network Architecture
 --------------------
@@ -612,6 +852,68 @@ N-Step Learning
    
    Reduces exploration bias with epsilon-greedy.
 
+Temporal Training Parameters (Mini-Races)
+-----------------------------------------
+
+These parameters bias how the **current time in the mini-race** is sampled when forming batches in ``buffer_collate_function``, and (when PER is enabled) which transitions get their priority updated.
+
+**What is "current time" in the mini-race?**
+
+The mini-race is always 7 seconds (140 actions). For each transition in a batch we randomly choose *where* we are within that window: a number from 0 to about 139 (in actions). That is the "current time" in the mini-race: 0 = start of the window, 139 = near the end. This number drives how many steps are left until the "finish" of the mini-race and whether the transition is terminal.
+
+**How is this time computed (step by step)?**
+
+The code does **not** draw uniformly from [0, 140). It does:
+
+1. **Extended range:** Draw an integer from **[low, high)** with  
+   ``low = -oversample_long_term_steps + oversample_maximum_term_steps`` (= -35),  
+   ``high = temporal_mini_race_duration_actions + oversample_maximum_term_steps`` (= 145).  
+   So we draw from **[-35, 145)** — including negatives and slightly above 140. That is the "extended" range: wider than the "honest" 0..139.
+
+2. **abs():** Take the absolute value. Negatives -35..-1 become 35..1. So values 1, 2, …, 35 now each appear **twice** (once from a positive draw, once from a negative), while 0, 36, 37, …, 144 appear once. So **the probability of values 1–35 is about twice** the probability of the rest.
+
+3. **Shift (-5):** Subtract ``oversample_maximum_term_steps`` (= 5) from the result. The range shifts left; some values become negative.
+
+4. **clip(min=0):** Replace all negatives by 0. The final "current time" is in **[0, 139]**.
+
+So: the final time is still *inside* the 7-second window (0..139 actions). But the distribution is **not uniform**: values roughly 0–35 (start of the mini-race, "many steps left") are more likely — that is the **oversampling** of the "long horizon".
+
+.. py:data:: oversample_long_term_steps
+   :type: int
+   :value: 40
+
+   **Oversample "long horizon"** (many steps left in the mini-race)
+   
+   The larger this number, the wider the **early** part of the mini-race (times 0, 1, 2, …) that gets higher probability from the abs() step. With 40, the negative part of the extended range is -35..-1; after abs(), the probability of values 1..35 is doubled. So transitions with "many steps left" in the 7-second window appear in the batch more often than under uniform sampling — they are **oversampled**.
+   
+   **Why:** Long-horizon transitions are often more useful for learning value; oversampling them can improve credit assignment and stability.
+   
+   **Typical range:** 20–60. Current: 40 (about the first 1.4 s of the 7 s).
+
+.. py:data:: oversample_maximum_term_steps
+   :type: int
+   :value: 5
+
+   **Shift and upper bound of the extended range**
+   
+   Used in the same formula: (1) subtract 5 after abs(), and (2) upper bound of the extended range = 140 + 5 = 145. The shift keeps the final time in a sensible range after clip(min=0) and keeps the high end (139) reachable. Without the extra width and shift, the top values could be cut off.
+   
+   **Typical range:** 1–10. Current: 5.
+
+.. py:data:: min_horizon_to_update_priority_actions
+   :type: int
+   :value: 100
+
+   **Minimum horizon (in actions) for PER priority updates** (computed)
+   
+   Automatically set to ``temporal_mini_race_duration_actions - 40`` (e.g. 140 - 40 = 100). Used **only when PER is enabled** (``prio_alpha > 0``).
+   
+   **How it works:** After each training step, PER updates the priority of the sampled transitions from the TD-error. The code updates priority only for transitions whose **current time in the mini-race** (first element of ``state_float``) is **less than** ``min_horizon_to_update_priority_actions``. So transitions that were interpreted as "near the end" of the mini-race (e.g. time 100–140) do **not** get their priority updated.
+   
+   **Why:** Short-horizon transitions (few steps left in the mini-race) have small TD-targets and noisier TD-errors; using them to update PER priorities can be misleading. Restricting updates to "long-horizon" samples (at least 40 actions left) keeps priorities more meaningful.
+   
+   **Summary:** Only transitions with "current time" < 100 (i.e. at least 40 actions remaining in the mini-race) get their PER priority updated. Do not change unless you also change ``oversample_long_term_steps`` or the mini-race duration.
+
 TensorBoard Logging
 -------------------
 
@@ -657,6 +959,18 @@ Located in: ``config_files/memory_config.py``
 Buffer Size
 -----------
 
+**Why the replay buffer is needed**
+
+The agent uses off-policy RL (IQN/DQN): it learns from past experience stored in a replay buffer, not only from the current rollout. The buffer is needed for:
+
+1. **Sample efficiency** — Each transition (state, action, reward, next state) is expensive: it comes from real-time play. The buffer lets the learner reuse each transition many times (see ``number_times_single_memory_is_used_before_discard``). Without a buffer, we would train only once per frame.
+
+2. **Breaking temporal correlation** — Consecutive frames from one run are highly correlated. Training on them in sequence would destabilize learning. Sampling random mini-batches from the buffer decorrelates the data and stabilizes gradient updates.
+
+3. **Stable gradients** — Training on diverse, randomly sampled transitions approximates i.i.d. data and helps the Q-network converge.
+
+``memory_size_schedule`` controls how large this buffer is and when learning is allowed to start.
+
 .. py:data:: memory_size_schedule
    :type: list
    :value: [(0, (50000, 20000)), (5000000, (100000, 75000)), (7000000, (200000, 150000))]
@@ -665,13 +979,19 @@ Buffer Size
    
    Format: ``(frames, (total_size, start_learning_size))``
    
-   - **total_size**: Maximum transitions in buffer
-   - **start_learning_size**: Minimum transitions before training begins
+   - **total_size**: Maximum number of transitions in the buffer. Limits both RAM use and how much past experience is kept. Larger buffers store more diverse data and allow more reuse per transition, but use more memory and take longer to fill.
    
-   **Strategy:**
+   - **start_learning_size**: Minimum number of transitions that must be in the buffer before training starts. Ensures the first updates use reasonably diverse data instead of a few early rollouts; avoids overfitting to the initial exploration.
    
-   - Start small (50K/20K) for rapid early training
-   - Grow to 100K/75K at 5M frames for diversity
+   The schedule is applied by *cumulative frames played*: each entry is ``(frames_played, (total_size, start_learning_size))``. Sizes grow over training so that:
+   
+   - **Early** (small buffer): The buffer fills quickly, learning starts sooner, and RAM use stays low.
+   - **Later** (larger buffer): More diverse experience is stored for harder phases and finer policy learning.
+   
+   **Typical strategy:**
+   
+   - Start small (50K total / 20K start) for rapid early training
+   - Grow to 100K/75K at 5M frames for more diversity
    - Grow to 200K/150K at 7M frames for maximum diversity
    
    **Memory estimate** (~10KB per transition):
@@ -685,16 +1005,27 @@ Prioritized Experience Replay
 
 See: `Schaul et al. 2015 - Prioritized Experience Replay <https://arxiv.org/abs/1511.05952>`_
 
+**Why Prioritized Experience Replay (PER)?**
+
+With uniform replay, all transitions are sampled with equal probability. Many of them are "easy": the network already predicts them well (low TD-error), and training on them adds little. PER uses a *priority* proportional to how wrong the network was on that transition (e.g. |Q_predicted − Q_target|). High-priority transitions are sampled more often, so the same buffer and the same number of batches are used mostly on transitions the agent still needs to learn from.
+
+**Benefits:** Better sample efficiency — less waste on trivial transitions, more updates on informative ones. Can speed up learning when the distribution of TD-errors is very uneven.
+
+**Trade-offs:** Prioritized sampling is biased (some transitions are over-represented). Importance sampling (``prio_beta``) corrects this in the loss; ``prio_epsilon`` ensures every transition keeps a non-zero chance of being sampled so no experience is completely ignored. Tuning PER (alpha, beta, epsilon) adds complexity and can cause instability, so it is often left off in favor of uniform replay.
+
+**In this project:** ``prio_alpha=0`` disables PER; sampling is uniform. The parameters below are available for experiments with ``prio_alpha > 0``. Priorities are updated from the absolute error between predicted and target Q-values after each training step.
+
 .. py:data:: prio_alpha
    :type: float
    :value: 0.0
 
    **Priority exponent**
    
-   Controls how much prioritization affects sampling.
+   Controls how much prioritization affects sampling. Priority is stored as ``(td_error + eps)^alpha``; sampling probability is proportional to that value.
    
-   - **alpha=0.0**: Uniform sampling (no prioritization)
-   - **alpha=1.0**: Fully prioritized sampling
+   - **alpha=0.0**: Uniform sampling (no prioritization). All transitions have equal probability.
+   - **alpha=1.0**: Sampling probability proportional to priority (strong prioritization).
+   - **0 < alpha < 1**: Smooth interpolation; higher alpha → more focus on high-error transitions.
    
    **Paper recommendations:**
    
@@ -702,7 +1033,7 @@ See: `Schaul et al. 2015 - Prioritized Experience Replay <https://arxiv.org/abs/
    - Rainbow: 0.5
    - PER: 0.6
    
-   **Current**: 0.0 (uniform) for simplicity and avoiding bias.
+   **Current**: 0.0 (uniform) for simplicity and to avoid bias/instability from prioritization.
 
 .. py:data:: prio_epsilon
    :type: float
@@ -710,23 +1041,58 @@ See: `Schaul et al. 2015 - Prioritized Experience Replay <https://arxiv.org/abs/
 
    **Priority offset**
    
-   Added to priorities to ensure non-zero probability for all transitions.
+   Added to TD-error before computing priority: ``(td_error + prio_epsilon)^alpha``. Ensures that every transition has a strictly positive priority and thus a non-zero chance of being sampled.
    
-   - **Current**: 2e-3 (ensures reasonable uniformity)
-   - **Typical range**: 1e-6 to 1e-2
+   - Prevents transitions from never being revisited.
+   - **Current**: 2e-3 (keeps sampling reasonably uniform when alpha is small).
+   - **Typical range**: 1e-6 to 1e-2.
 
 .. py:data:: prio_beta
    :type: float
    :value: 1.0
 
-   **Importance sampling correction**
+   **Importance sampling exponent**
    
-   Corrects bias from prioritized sampling.
+   Prioritized sampling oversamples some transitions; the loss is weighted by inverse sampling probability (raised to beta) so that the expected gradient is unbiased.
    
-   - **beta=0.0**: No correction (biased)
-   - **beta=1.0**: Full correction (unbiased)
+   - **beta=0.0**: No correction (biased updates, prioritization effect is strongest).
+   - **beta=1.0**: Full correction (unbiased). Often annealed from <1 to 1 over training in the PER paper.
    
-   **Current**: 1.0 (full correction, but has no effect with alpha=0)
+   **Current**: 1.0 (full correction; when ``prio_alpha=0`` this has no effect because sampling is uniform).
+
+Memory Usage Control
+--------------------
+
+.. py:data:: number_times_single_memory_is_used_before_discard
+   :type: int
+   :value: 32
+
+   **Expected reuse per transition**
+   
+   Controls how many times each transition is expected to be used for training on average. This is a *global* limit, not a per-transition counter.
+   
+   **How it works:**
+   
+   - When N new transitions are added to the buffer, the system "allows" ``N * number_times_single_memory_is_used_before_discard`` total uses across all training batches
+   - Training continues while the global usage counter is below this limit
+   - Transitions are removed from the buffer only when it overflows (FIFO), not based on individual usage counts
+   
+   **Interaction with PER:**
+   
+   When ``prio_alpha > 0`` (PER enabled), high-priority transitions are sampled more often. This means:
+   
+   - High-priority transitions participate in more batches and contribute more to the global usage counter
+   - However, they are **not** removed faster — removal is FIFO-based when the buffer overflows
+   - Priorities are updated after each training step: as the network learns, TD-errors decrease, priorities drop, and sampling frequency self-balances
+   - This creates a natural feedback loop: transitions that are hard to learn stay longer (high priority → frequent sampling → priority updates → if still hard, priority stays high)
+   
+   **Potential concern:** Could high-priority transitions "consume" the usage budget faster, leaving less training for low-priority ones?
+   
+   - In practice, this is mitigated by the self-balancing mechanism: as transitions are learned, their priority decreases
+   - ``prio_epsilon`` ensures all transitions have a non-zero sampling probability
+   - The global limit ensures overall training frequency matches data collection rate
+   
+   **Typical values:** 1-64. Higher values = more reuse per transition, better sample efficiency, but transitions may become stale if the policy changes significantly.
 
 Exploration Configuration
 ==========================
@@ -934,6 +1300,95 @@ Parallelization
    
    .. warning::
       Too fast may cause physics instability or inaccurate simulation.
+
+Network Synchronization
+-----------------------
+
+Training uses one **learner process** (updates the policy) and several **collector processes** (run the game and select actions with the current policy). The learner and collectors share the same network weights via a **shared network** in shared memory. Two parameters control how often weights are pushed from the learner and pulled by the collectors.
+
+**Data flow:**
+
+1. **Learner** trains ``online_network`` every batch.
+2. Periodically the learner copies ``online_network`` → **shared network** (in shared memory). This is the *push*.
+3. Each **collector** has its own local **inference network** used to choose actions.
+4. The collector copies **shared network** → **inference network** at the start of each rollout and periodically during long rollouts. This is the *pull*.
+
+.. py:data:: send_shared_network_every_n_batches
+   :type: int
+   :value: 8
+
+   **How often the learner pushes new weights to the shared network**
+   
+   Every N training batches, the learner copies the current ``online_network`` weights into the shared network (in shared memory). Collectors read from this shared copy when they update their local inference network.
+   
+   **How it works:**
+   
+   - After each batch, the learner checks ``cumul_number_batches_done % send_shared_network_every_n_batches == 0``
+   - When true, it does: ``shared_network.load_state_dict(online_network.state_dict())`` under a lock
+   - Collectors never write to the shared network; they only read from it when they pull
+   
+   **Why it matters:**
+   
+   - **Larger (e.g. 16–32):** Fewer copies, less lock contention, slightly less up-to-date policy in collectors
+   - **Smaller (e.g. 2–4):** Collectors see new weights more often, but more frequent locking and copy cost
+   
+   **Trade-off:** Balance between "collectors use fresh policy" and "learner is not blocked by shared-memory writes". With 8, collectors are at most 8 batches behind; at ~512 batch size that is a few thousand transitions.
+   
+   **Current:** 8 batches. Typical range: 4–16.
+
+.. py:data:: update_inference_network_every_n_actions
+   :type: int
+   :value: 8
+
+   **How often each collector pulls the shared network into its local inference network during a rollout**
+   
+   Each collector updates its local inference network from the shared network at the start of every rollout. During a long rollout (e.g. a 2-minute race), it also updates every N **actions** (e.g. every 8 actions). So the policy used for action selection can be refreshed mid-race without waiting for the next rollout.
+   
+   **How it works:**
+   
+   - At rollout start: collector always calls ``update_network()`` (shared → inference) once before driving
+   - During the rollout: the game loop runs with ``_time`` (race time in milliseconds). Every ``10 * run_steps_per_action * update_inference_network_every_n_actions`` ms, the collector calls ``update_network()`` again. That product equals ``ms_per_action * update_inference_network_every_n_actions`` (with 50 ms per action), so the interval is N actions in time.
+   - With ``run_steps_per_action = 5``, ``ms_per_action = 50`` and ``update_inference_network_every_n_actions = 8``: interval = 50 × 8 = 400 ms = 8 actions
+   
+   **Why it matters:**
+   
+   - **Larger (e.g. 16–32):** Fewer copies during a run; inference network may be several hundred actions behind the learner
+   - **Smaller (e.g. 2–4):** Inference network stays closer to the shared (and thus learner) policy during long races; more copy and lock usage
+   
+   **When it helps:** Long rollouts (e.g. 1–2 min). If you update only at rollout start, the first half of the race uses weights that may be hundreds of batches old by the time the rollout ends. Updating every N actions keeps inference policy closer to the current learner policy.
+   
+   **Current:** 8 actions. With 50 ms per action, that is an update every 400 ms during a rollout. Typical range: 4–16.
+
+**Summary:** ``send_shared_network_every_n_batches`` controls how often the **learner** updates the shared copy. ``update_inference_network_every_n_actions`` controls how often each **collector** refreshes its local policy from that shared copy during a single run. Both are trade-offs between freshness of the policy used for data collection and the cost of copying/locking.
+
+Visualization and Analysis
+--------------------------
+
+.. py:data:: make_highest_prio_figures
+   :type: bool
+   :value: False
+
+   **Save images of highest-priority transitions** (only when PER is enabled)
+   
+   When ``True`` and the buffer uses Prioritized Experience Replay (``prio_alpha > 0``), the learner periodically saves PNG images of the transitions that have the **highest priority** in the replay buffer. These are written to ``save_dir / "high_prio_figures"``, **not** to TensorBoard.
+   
+   **What the figures show:**
+   
+   - For each of the **top 20 transitions by priority** (i.e. by TD-error), the code saves a small window of transitions: indices from ``high_error_idx - 4`` to ``high_error_idx + 5``
+   - Each saved image is one transition: **state frame** and **next_state frame** side by side (horizontally), upscaled 4× for visibility
+   - Filename format: ``{high_error_idx}_{idx}_{n_steps}_{priority:.2f}.png`` (e.g. ``123_120_3_0.45.png``)
+   
+   **What you can infer from them:**
+   
+   - **Which situations get high TD-error:** High priority ≈ “network was most wrong on this transition”. Looking at the frames tells you *where* (e.g. sharp turn, specific surface, near wall) and *what* (state → next_state) the agent is struggling to predict.
+   - **Clustering:** If many high-priority transitions look similar (e.g. same turn, same surface), the agent may need more data or reward shaping there.
+   - **Debugging PER and rewards:** Helps check that high TD-error corresponds to “hard” or “surprising” situations rather than noise or bugs.
+   
+   **When it runs:** Only at checkpoint save time (when the learner saves weights and stats), and only if ``config_copy.make_highest_prio_figures`` is ``True`` and the buffer uses ``PrioritizedSampler``. If ``prio_alpha = 0`` (uniform replay), this option has no effect.
+   
+   **TensorBoard:** These figures are **not** sent to TensorBoard. They are only written as PNG files under ``save_dir / "high_prio_figures"``. To inspect them in TensorBoard you would need to add custom logging (e.g. ``writer.add_image(...)``) yourself.
+   
+   **Performance:** Generating them is relatively slow (iterating over the buffer and saving many images), so they are disabled by default. Enable only for occasional debugging or analysis.
 
 Advanced Topics
 ===============
