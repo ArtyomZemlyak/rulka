@@ -31,8 +31,20 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
-      - name: Install dependencies (with doc extra)
-        run: uv sync --extra doc --frozen
+      - name: Create venv and install doc dependencies only
+        run: |
+          uv venv --python 3.11
+          # uv sync --extra doc would install main deps (torch etc.) too; optional-dependencies are additive.
+          # Read doc extra from pyproject.toml (single source of truth) and install only those.
+          python -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              p = tomllib.load(f)
+          deps = p['project']['optional-dependencies']['doc']
+          with open('doc-requirements.txt', 'w') as out:
+              out.write('\n'.join(deps))
+          "
+          uv pip install -r doc-requirements.txt
 
       - name: Build documentation
         run: |
