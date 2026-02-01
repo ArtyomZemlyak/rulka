@@ -86,7 +86,7 @@ python -m sphinx -b html source build/html
 start build/html/index.html
 ```
 
-**Note:** `docs/build/` is git-ignored. Documentation builds automatically on GitHub Pages.
+**Note:** `docs/build/` is git-ignored (built files are not committed). Documentation is built by GitHub Actions on every push to `main` and deployed to GitHub Pages. To enable it: **Settings → Pages → Source: GitHub Actions**.
 
 ## Requirements
 
