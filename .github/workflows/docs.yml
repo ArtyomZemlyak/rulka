@@ -49,7 +49,8 @@ jobs:
       - name: Build documentation
         run: |
           cd docs
-          uv run python -m sphinx -b html source build/html
+          # Use venv Python directly so uv does not re-resolve project (torch) from pyproject.toml
+          ../.venv/bin/python -m sphinx -b html source build/html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
