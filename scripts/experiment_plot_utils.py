@@ -1,7 +1,11 @@
 """
 Plot comparison data from compute_comparison_data (analyze_experiment_by_relative_time).
 One graph per metric; multiple runs as lines. Saves compressed JPG files.
-Y-axis uses robust scaling (percentiles) so outliers (e.g. 300s at start) don't squash the readable range.
+
+Y-axis:
+- **Best-time metrics** (race best, scalar best time): scale from **min(time)** to **mean(time) + 1s**
+  so the initial 300s spike is off-scale and the improvement (e.g. down to 30s) is readable.
+- **Other metrics** (loss, Q, finish rate): robust scaling (percentiles).
 """
 
 from pathlib import Path
@@ -28,7 +32,7 @@ def _robust_ylim(
     min_span_ratio: float = 0.02,
 ) -> Tuple[float, float]:
     """Compute y-axis limits from percentiles so outliers don't dominate.
-    E.g. race times 300s -> 30s: focus on the main range, not the initial spike.
+    Used for non-time metrics (loss, Q, rate).
     """
     ys = _all_y_from_run_series(run_series)
     if not ys:
@@ -41,11 +45,33 @@ def _robust_ylim(
     y_hi = ys_sorted[hi_idx]
     span = y_hi - y_lo
     if span <= 0 or (abs(y_hi) > 1e-9 and span / abs(y_hi) < min_span_ratio):
-        # Single value or nearly constant: add padding
         pad = abs(y_lo) * 0.05 + 0.01 if abs(y_lo) > 1e-9 else 0.01
         return (y_lo - pad, y_lo + pad)
     pad = span * margin
     return (y_lo - pad, y_hi + pad)
+
+
+def _time_axis_ylim(
+    run_series: Dict[str, List[Tuple[float, float]]],
+    margin_above_mean: float = 1.0,
+    min_span: float = 2.0,
+) -> Tuple[float, float]:
+    """Y-axis for best-time metrics: from minimum time to mean + margin.
+    Hides the initial 300s spike so the improvement (e.g. 300s -> 30s) is readable:
+    scale is [best_time, mean_time + 1s], so the curve lives in the visible range.
+    """
+    ys = _all_y_from_run_series(run_series)
+    if not ys:
+        return (0.0, 1.0)
+    y_min = min(ys)
+    y_mean = sum(ys) / len(ys)
+    y_hi = y_mean + margin_above_mean
+    if y_hi <= y_min:
+        y_hi = y_min + min_span
+    span = y_hi - y_min
+    if span < min_span:
+        y_hi = y_min + min_span
+    return (y_min, y_hi)
 
 
 def _tag_to_slug(tag: str) -> str:
@@ -99,7 +125,7 @@ def plot_comparison(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
-        y_lo, y_hi = _robust_ylim(run_series)
+        y_lo, y_hi = _time_axis_ylim(run_series)
         plt.ylim(y_lo, y_hi)
         plt.xlabel("Time (min from run start)")
         plt.ylabel("Best race time (s)")
@@ -141,7 +167,8 @@ def plot_comparison(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
-        y_lo, y_hi = _robust_ylim(run_series)
+        is_time_metric = "time" in key and ("ms" in key or "best" in key)
+        y_lo, y_hi = _time_axis_ylim(run_series) if is_time_metric else _robust_ylim(run_series)
         plt.ylim(y_lo, y_hi)
         plt.xlabel("Time (min from run start)")
         if key == "training_pct":
@@ -170,7 +197,7 @@ def plot_comparison(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 plt.plot(xs, ys, label=run, marker="o", markersize=3)
-            y_lo, y_hi = _robust_ylim(run_series)
+            y_lo, y_hi = _time_axis_ylim(run_series)
             plt.ylim(y_lo, y_hi)
             plt.xlabel("Training step")
             plt.ylabel("Best race time (s)")
@@ -193,7 +220,8 @@ def plot_comparison(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 plt.plot(xs, ys, label=run, marker="o", markersize=3)
-            y_lo, y_hi = _robust_ylim(run_series)
+            is_time_metric = "time" in key and ("ms" in key or "best" in key)
+            y_lo, y_hi = _time_axis_ylim(run_series) if is_time_metric else _robust_ylim(run_series)
             plt.ylim(y_lo, y_hi)
             plt.xlabel("Training step")
             if key == "training_pct":
