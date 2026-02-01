@@ -23,7 +23,7 @@ Virtual checkpoints (VCP) provide dense progress tracking for the agent. You nee
 Option A: Use existing reference line
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If a reference line already exists in ``maps/`` folder (e.g., ``map5_0.5m_cl.npy``), you can use it directly by configuring ``map_cycle_config.py``.
+If a reference line already exists in ``maps/`` folder (e.g., ``map5_0.5m_cl.npy``), you can use it directly by configuring the ``map_cycle`` section in the config YAML.
 
 Option B: Generate from replay
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -40,11 +40,11 @@ To create a new reference line:
 
 This generates a ``.npy`` file in ``maps/`` folder with virtual checkpoints spaced at ``distance_between_checkpoints`` (default 0.5m).
 
-4. Update ``map_cycle_config.py`` to reference your new ``.npy`` file
+4. Update the ``map_cycle`` section in your config YAML (e.g. ``config_files/config_default.yaml``) to reference your new ``.npy`` file
 
 **3. Verify configuration**
 
-These instructions assume that no modifications were made to the files since cloning the repository, except for ``config_files/user_config.py``. 
+These instructions assume that no modifications were made to the files since cloning the repository, except for the ``.env`` file (user-specific settings). 
 
 If needed, the repository can be restored to its original condition with:
 
@@ -60,7 +60,7 @@ We are ready to start training.
 
 .. code-block:: bash
 
-   python scripts/train.py
+   python scripts/train.py --config config_files/config_default.yaml
 
 Upon running this command, it is expected that a :doc:`wall of text appears in your terminal <wall_text>`. *Don't worry, this is normal.*
 

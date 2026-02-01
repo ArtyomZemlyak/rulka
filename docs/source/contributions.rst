@@ -43,7 +43,7 @@ Coding Guidelines
 
 - Follow existing code patterns and structure
 - Add docstrings to new functions and classes
-- Keep configuration in modular config files
+- Keep configuration in the YAML schema and default file
 
 **Commits:**
 
@@ -54,7 +54,7 @@ Coding Guidelines
 **Testing:**
 
 - Test changes before committing
-- Verify configuration with ``python scripts/check_config.py``
+- Verify configuration loads: ``python -c "from config_files.config_loader import load_config; load_config('config_files/config_default.yaml')"``
 - For algorithmic changes, provide multiple training runs demonstrating improvements
 
 Documentation

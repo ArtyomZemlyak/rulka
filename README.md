@@ -28,9 +28,9 @@ source .venv/bin/activate  # Linux/macOS
 1. Install [TrackMania Nations Forever](https://store.steampowered.com/app/11020/TrackMania_Nations_Forever/) (free)
 2. Install [TMLoader](https://tomashu.dev/software/tmloader/) and [TMInterface 2.1.0](https://donadigo.com/tminterface/)
 3. Configure game in **windowed mode** and create **online account**
-4. Edit `config_files/user_config.py`:
-   ```python
-   username = "your_tmnf_account"
+4. Create a `.env` file in the project root (user-specific settings):
+   ```
+   USERNAME=your_tmnf_account
    ```
 5. Copy plugin:
    ```bash
@@ -46,7 +46,7 @@ source .venv/bin/activate  # Linux/macOS
 ### Training
 
 ```bash
-python scripts/train.py
+python scripts/train.py --config config_files/config_default.yaml
 
 # Monitor (in separate terminal)
 tensorboard --logdir=tensorboard
@@ -62,7 +62,7 @@ Compared to original Linesight:
 - ✅ **uv support** - fast installation with `uv sync`
 - ✅ **Updated dependencies** - PyTorch 2.7+, TorchRL 0.6+, CUDA 12.6
 - ✅ **Expanded docs** - comprehensive FAQ, troubleshooting, dev guide
-- ✅ **Modular config** - 8 separate modules for easier editing
+- ✅ **YAML config** - single file with sections, versioned per experiment
 
 ## Documentation
 
@@ -99,7 +99,7 @@ start build/html/index.html
 
 ```
 rulka/
-├── config_files/       # Modular configuration (8 modules)
+├── config_files/       # YAML configuration (config_default.yaml, config_schema.py)
 ├── trackmania_rl/      # Core RL code (IQN agent, multiprocess)
 ├── scripts/            # train.py and utilities
 ├── maps/               # Reference lines (.npy)

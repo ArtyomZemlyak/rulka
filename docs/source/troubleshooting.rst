@@ -10,7 +10,7 @@ Common Issues
 The TMNF account must be an **online account**. If your account is offline:
 
 - Start the game without TMInterface and create an online account
-- Set your `username` to that online account in `user_config.py`
+- Set your `USERNAME` in the ``.env`` file to that online account
 
 **FileNotFoundError: Python_Link.as**
 
@@ -41,28 +41,28 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 **Map not loading**
 
 - Ensure map files are NOT in OneDrive or cloud storage directories
-- Verify map path in `map_cycle_config.py` matches actual location
+- Verify map path in the ``map_cycle.entries`` section of your config YAML matches actual location
 - Check that map file exists in ``~/Documents/TrackMania/Tracks/Challenges/``
 
 **Low FPS / Slow training**
 
-- Increase ``gpu_collectors_count`` in ``performance_config.py``
+- Increase ``gpu_collectors_count`` in the ``performance`` section of the config YAML
 - Increase ``running_speed`` (up to 200x real-time)
 - Lower game graphics settings and resolution
 - Close unnecessary background applications
 
 **Memory issues**
 
-- Reduce ``memory_size_schedule`` in ``memory_config.py``
-- Reduce ``gpu_collectors_count`` in ``performance_config.py``
-- Reduce ``batch_size`` in ``training_config.py``
+- Reduce ``memory_size_schedule`` in the ``memory`` section
+- Reduce ``gpu_collectors_count`` in the ``performance`` section
+- Reduce ``batch_size`` in the ``training`` section
 - Check RAM usage with Task Manager / htop
 
 **Agent gets stuck or doesn't progress**
 
 - Verify virtual checkpoint file (`.npy`) is correctly generated
 - Check ``cutoff_rollout_if_no_vcp_passed_within_duration_ms`` timeout
-- Increase exploration (higher epsilon in ``exploration_config.py``)
+- Increase exploration (higher epsilon in the ``exploration`` section)
 - Verify reference line covers the entire track
 
 **Cars stop moving during training (Window Focus Issue)** 🆕
@@ -83,7 +83,7 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 *If issue persists:*
 
 1. Check that windows are not minimized (game pauses when minimized)
-2. Verify ``force_window_focus_on_input = False`` in ``performance_config.py``
+2. Verify ``force_window_focus_on_input: false`` in the ``performance`` section of the config YAML
 3. With multiple maps, ensure smooth transitions between maps in logs
 
 **Game crashes on startup**

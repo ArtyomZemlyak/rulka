@@ -13,11 +13,17 @@ import time
 import numpy as np
 import psutil
 
-from config_files import config
+from config_files.config_loader import load_config, set_config, get_config
 from trackmania_rl import map_loader
 from trackmania_rl.tmi_interaction.tminterface2 import MessageType, TMInterface
 
-if config.is_linux:
+# Load config for standalone script usage
+from pathlib import Path
+_config_path = Path(__file__).resolve().parents[3] / "config_files" / "config_default.yaml"
+if _config_path.exists():
+    set_config(load_config(_config_path))
+
+if get_config().is_linux:
     import pyautogui as input_lib
     from xdo import Xdo
 else:
@@ -32,7 +38,7 @@ timeout = 10
 
 
 def _set_window_focus(tm_window_id):
-    if config.is_linux:
+    if get_config().is_linux:
         Xdo().focus_window(tm_window_id)
     else:
         shell = win32com.client.Dispatch("WScript.Shell")
@@ -41,7 +47,7 @@ def _set_window_focus(tm_window_id):
 
 
 def get_tm_window_id(tm_process_id):
-    if config.is_linux:
+    if get_config().is_linux:
         return Xdo().search_windows(winname=b"Track", pid=tm_process_id)
     else:
 
@@ -70,10 +76,10 @@ def is_game_running(tm_process_id):
 def launch_game(tmi_port):
     tm_process_id = None
 
-    if config.is_linux:
+    if get_config().is_linux:
         pid_before = [proc.pid for proc in psutil.process_iter() if proc.name().startswith("TmForever")]
-        print(config.linux_launch_game_path)
-        os.system(config.linux_launch_game_path + " " + str(tmi_port))
+        print(get_config().linux_launch_game_path)
+        os.system(get_config().linux_launch_game_path + " " + str(tmi_port))
         pid_after = [proc.pid for proc in psutil.process_iter() if proc.name().startswith("TmForever")]
         tmi_pid_candidates = set(pid_after) - set(pid_before)
         assert len(tmi_pid_candidates) == 1
@@ -81,11 +87,11 @@ def launch_game(tmi_port):
     else:
         launch_string = (
             'powershell -executionPolicy bypass -command "& {$process = start-process $args[0] -passthru -argumentList \'run TmForever "'
-            + config.windows_TMLoader_profile_name
+            + get_config().windows_TMLoader_profile_name
             + '" /configstring=\\"set custom_port '
             + str(tmi_port)
             + '\\"\'; echo exit $process.id}" "'
-            + str(config.windows_TMLoader_path)
+            + str(get_config().windows_TMLoader_path)
             + '"'
         )
 
@@ -116,7 +122,7 @@ def launch_game(tmi_port):
 
 
 def close_game(tm_process_id):
-    if config.is_linux:
+    if get_config().is_linux:
         os.system("kill -9 " + str(tm_process_id))
     else:
         os.system(f"taskkill /PID {tm_process_id} /f")
@@ -251,7 +257,7 @@ def main():
             elif msgtype == int(MessageType.C_SHUTDOWN):
                 iface.close()
             elif msgtype == int(MessageType.SC_ON_CONNECT_SYNC):
-                iface.execute_command(f"set autologin {config.username}")
+                iface.execute_command(f"set autologin {get_config().username}")
                 iface.execute_command(f"set auto_reload_plugins false")
                 if console_open:
                     iface.execute_command("toggle_console")

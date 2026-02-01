@@ -11,24 +11,30 @@ import numpy as np
 from numba import jit
 from torchrl.data import ReplayBuffer
 
-from config_files import config_copy
+from config_files.config_loader import get_config
 from trackmania_rl.experience_replay.experience_replay_interface import Experience
 from trackmania_rl.reward_shaping import speedslide_quality_tarmac
 
 
 @jit(nopython=True)
-def get_potential(state_float):
+def get_potential(
+    state_float,
+    shaped_reward_dist_to_cur_vcp: float,
+    shaped_reward_min_dist_to_cur_vcp: float,
+    shaped_reward_max_dist_to_cur_vcp: float,
+    shaped_reward_point_to_vcp_ahead: float,
+):
     # https://people.eecs.berkeley.edu/~pabbeel/cs287-fa09/readings/NgHaradaRussell-shaping-ICML1999.pdf
     vector_vcp_to_vcp_further_ahead = state_float[65:68] - state_float[62:65]
     vector_vcp_to_vcp_further_ahead_normalized = vector_vcp_to_vcp_further_ahead / np.linalg.norm(vector_vcp_to_vcp_further_ahead)
 
     return (
-        config_copy.shaped_reward_dist_to_cur_vcp
+        shaped_reward_dist_to_cur_vcp
         * max(
-            config_copy.shaped_reward_min_dist_to_cur_vcp,
-            min(config_copy.shaped_reward_max_dist_to_cur_vcp, np.linalg.norm(state_float[62:65])),
+            shaped_reward_min_dist_to_cur_vcp,
+            min(shaped_reward_max_dist_to_cur_vcp, np.linalg.norm(state_float[62:65])),
         )
-    ) + (config_copy.shaped_reward_point_to_vcp_ahead * (vector_vcp_to_vcp_further_ahead_normalized[2] - 1))
+    ) + (shaped_reward_point_to_vcp_ahead * (vector_vcp_to_vcp_further_ahead_normalized[2] - 1))
 
 
 def fill_buffer_from_rollout_with_n_steps_rule(
@@ -43,6 +49,7 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     engineered_kamikaze_reward: float,
     engineered_close_to_vcp_reward: float,
 ):
+    cfg = get_config()
     assert len(rollout_results["frames"]) == len(rollout_results["current_zone_idx"])
     n_frames = len(rollout_results["frames"])
 
@@ -50,7 +57,7 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     number_memories_added_test = 0
     Experiences_For_Buffer = []
     Experiences_For_Buffer_Test = []
-    list_to_fill = Experiences_For_Buffer_Test if random.random() < config_copy.buffer_test_ratio else Experiences_For_Buffer
+    list_to_fill = Experiences_For_Buffer_Test if random.random() < cfg.buffer_test_ratio else Experiences_For_Buffer
 
     gammas = (gamma ** np.linspace(1, n_steps_max, n_steps_max)).astype(
         np.float32
@@ -58,18 +65,18 @@ def fill_buffer_from_rollout_with_n_steps_rule(
 
     reward_into = np.zeros(n_frames)
     for i in range(1, n_frames):
-        reward_into[i] += config_copy.constant_reward_per_ms * (
-            config_copy.ms_per_action
+        reward_into[i] += cfg.constant_reward_per_ms * (
+            cfg.ms_per_action
             if (i < n_frames - 1 or ("race_time" not in rollout_results))
-            else rollout_results["race_time"] - (n_frames - 2) * config_copy.ms_per_action
+            else rollout_results["race_time"] - (n_frames - 2) * cfg.ms_per_action
         )
         reward_into[i] += (
             rollout_results["meters_advanced_along_centerline"][i] - rollout_results["meters_advanced_along_centerline"][i - 1]
-        ) * config_copy.reward_per_m_advanced_along_centerline
+        ) * cfg.reward_per_m_advanced_along_centerline
         if i < n_frames - 1:
-            if config_copy.final_speed_reward_per_m_per_s != 0 and rollout_results["state_float"][i][58] > 0:
+            if cfg.final_speed_reward_per_m_per_s != 0 and rollout_results["state_float"][i][58] > 0:
                 # car has velocity *forward*
-                reward_into[i] += config_copy.final_speed_reward_per_m_per_s * (
+                reward_into[i] += cfg.final_speed_reward_per_m_per_s * (
                     np.linalg.norm(rollout_results["state_float"][i][56:59]) - np.linalg.norm(rollout_results["state_float"][i - 1][56:59])
                 )
             if engineered_speedslide_reward != 0 and np.all(rollout_results["state_float"][i][25:29]):
@@ -92,13 +99,13 @@ def fill_buffer_from_rollout_with_n_steps_rule(
                 reward_into[i] += engineered_kamikaze_reward
             if engineered_close_to_vcp_reward != 0:
                 reward_into[i] += engineered_close_to_vcp_reward * max(
-                    config_copy.engineered_reward_min_dist_to_cur_vcp,
-                    min(config_copy.engineered_reward_max_dist_to_cur_vcp, np.linalg.norm(rollout_results["state_float"][i][62:65])),
+                    cfg.engineered_reward_min_dist_to_cur_vcp,
+                    min(cfg.engineered_reward_max_dist_to_cur_vcp, np.linalg.norm(rollout_results["state_float"][i][62:65])),
                 )
     for i in range(n_frames - 1):  # Loop over all frames that were generated
         # Switch memory buffer sometimes
         if random.random() < 0.1:
-            list_to_fill = Experiences_For_Buffer_Test if random.random() < config_copy.buffer_test_ratio else Experiences_For_Buffer
+            list_to_fill = Experiences_For_Buffer_Test if random.random() < cfg.buffer_test_ratio else Experiences_For_Buffer
 
         n_steps = min(n_steps_max, n_frames - 1 - i)
         if discard_non_greedy_actions_in_nsteps:
@@ -114,7 +121,13 @@ def fill_buffer_from_rollout_with_n_steps_rule(
 
         state_img = rollout_results["frames"][i]
         state_float = rollout_results["state_float"][i]
-        state_potential = get_potential(rollout_results["state_float"][i])
+        state_potential = get_potential(
+            rollout_results["state_float"][i],
+            cfg.shaped_reward_dist_to_cur_vcp,
+            cfg.shaped_reward_min_dist_to_cur_vcp,
+            cfg.shaped_reward_max_dist_to_cur_vcp,
+            cfg.shaped_reward_point_to_vcp_ahead,
+        )
 
         # Get action that was played
         action = rollout_results["actions"][i]
@@ -124,7 +137,13 @@ def fill_buffer_from_rollout_with_n_steps_rule(
         if not next_state_has_passed_finish:
             next_state_img = rollout_results["frames"][i + n_steps]
             next_state_float = rollout_results["state_float"][i + n_steps]
-            next_state_potential = get_potential(rollout_results["state_float"][i + n_steps])
+            next_state_potential = get_potential(
+                rollout_results["state_float"][i + n_steps],
+                cfg.shaped_reward_dist_to_cur_vcp,
+                cfg.shaped_reward_min_dist_to_cur_vcp,
+                cfg.shaped_reward_max_dist_to_cur_vcp,
+                cfg.shaped_reward_point_to_vcp_ahead,
+            )
         else:
             # It doesn't matter what next_state_img and next_state_float contain, as the transition will be forced to be final
             next_state_img = state_img

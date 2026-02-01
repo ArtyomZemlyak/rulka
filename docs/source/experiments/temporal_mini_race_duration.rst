@@ -134,7 +134,7 @@ GPU utilization
 Configuration Changes
 ---------------------
 
-**Environment** (``config_files/environment_config.py``):
+**Environment** (``environment`` section in config YAML):
 
 .. code-block:: python
 
@@ -143,7 +143,7 @@ Configuration Changes
    # uni_14: 3500 ms (3.5 s) — at 55 min slightly better Hock and A01, lower loss, better Q; slower convergence on A01
    temporal_mini_race_duration_ms = 7000  # or 3500 / 14000; see experiment doc
 
-**Note:** ``temporal_mini_race_duration_actions`` is derived as ``temporal_mini_race_duration_ms // ms_per_action`` (e.g. 280 actions at 14 s with 50 ms per action). It affects state normalization, priority horizon (``min_horizon_to_update_priority_actions`` in ``training_config.py``), and buffer collate logic in ``buffer_utilities.py``.
+**Note:** ``temporal_mini_race_duration_actions`` is derived as ``temporal_mini_race_duration_ms // ms_per_action`` (e.g. 280 actions at 14 s with 50 ms per action). It affects state normalization, priority horizon (``min_horizon_to_update_priority_actions`` in the ``training`` section), and buffer collate logic in ``buffer_utilities.py``.
 
 Hardware
 --------

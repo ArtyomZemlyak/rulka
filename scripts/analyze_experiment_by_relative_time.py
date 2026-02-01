@@ -11,8 +11,11 @@ Race times (preferred, more info and dynamics):
 
 Scalar metrics (alltime_min_ms_*, loss, Q, etc.): last or best value at each checkpoint.
 
+Also prints BY STEP: same tables keyed by training step (e.g. 50k, 100k, 150k) so you can compare
+runs at equal numbers of gradient updates / transitions, not only at equal wall-clock time.
+
 Usage:
-  python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 [--logdir tensorboard] [--interval 5]
+  python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 [--logdir tensorboard] [--interval 5] [--step_interval 50000]
   python scripts/analyze_experiment_by_relative_time.py uni_12 uni_13 uni_14 --interval 5   # 3+ runs supported
 """
 
@@ -188,10 +191,70 @@ def value_at_minutes(
     return max(candidates, key=lambda x: x[0])
 
 
+def race_stats_at_step(
+    events: List[Tuple[float, int, float]],
+    target_step: int,
+    *,
+    only_finished_steps: Optional[Set[int]] = None,
+) -> Optional[Tuple[float, float, float, int]]:
+    """(best_s, mean_s, std_s, n) for events with step <= target_step."""
+    candidates = [(r, s, v) for r, s, v in events if s <= target_step]
+    if not candidates:
+        return None
+    if only_finished_steps is not None:
+        candidates = [(r, s, v) for r, s, v in candidates if s in only_finished_steps]
+    if not candidates:
+        return None
+    vals = [v for (_, _, v) in candidates]
+    n = len(vals)
+    best = min(vals)
+    mean = sum(vals) / n
+    var = sum((x - mean) ** 2 for x in vals) / n if n else 0
+    std = math.sqrt(var) if n > 1 else 0.0
+    return (best, mean, std, n)
+
+
+def finish_stats_at_step(
+    time_events: List[Tuple[float, int, float]],
+    finished_events: List[Tuple[float, int, float]],
+    target_step: int,
+) -> Optional[Tuple[float, int, Optional[int]]]:
+    """(finish_rate_0_1, n_finished, first_finish_step). Match by step."""
+    finished_steps = set(s for r, s, v in finished_events if s <= target_step and v >= 0.5)
+    all_up_to = [(r, s, v) for r, s, v in time_events if s <= target_step]
+    if not all_up_to:
+        return None
+    n_total = len(all_up_to)
+    n_finished = sum(1 for (_, s, _) in all_up_to if s in finished_steps)
+    rate = n_finished / n_total if n_total else 0.0
+    first_step = min((s for (_, s, _) in all_up_to if s in finished_steps), default=None)
+    return (rate, n_finished, first_step)
+
+
+def value_at_step(
+    data: List[Tuple[float, int, float]],
+    target_step: int,
+    kind: str,
+) -> Optional[Tuple[float, int, float]]:
+    """Value at checkpoint target_step (training step).
+    - 'time': best (min) value by that step — for race times.
+    - 'last': last value at or before target_step — for loss, avg_q, training_pct.
+    """
+    if not data:
+        return None
+    candidates = [(r, s, v) for r, s, v in data if s <= target_step]
+    if not candidates:
+        return None
+    if kind == 'time':
+        return min(candidates, key=lambda x: x[2])
+    return max(candidates, key=lambda x: x[1])  # last by step
+
+
 def compare_by_relative_time(
     run_names: List[str],
     base_dir: Path = Path("tensorboard"),
     interval_min: int = 5,
+    step_interval: int = 50000,
 ) -> None:
     base_dir = Path(base_dir)
     # Load scalar metrics
@@ -318,15 +381,137 @@ def compare_by_relative_time(
                     else:
                         cells.append(f"{val:.2f}")
             print("\t".join(cells))
+
+    # ---- BY STEP: same tables keyed by training step ----
+    max_step_per_run: Dict[str, int] = {}
+    for name in run_names:
+        m = 0
+        for data in cache.get(name, {}).values():
+            if data:
+                m = max(m, max(s for _, s, _ in data))
+        for tag_data in race_time.get(name, {}).values():
+            if tag_data:
+                m = max(m, max(s for _, s, _ in tag_data))
+        for tag_data in race_finished.get(name, {}).values():
+            if tag_data:
+                m = max(m, max(s for _, s, _ in tag_data))
+        max_step_per_run[name] = m
+    common_max_step = min(max_step_per_run.values()) if max_step_per_run else 0
+    for name in run_names:
+        print(f"{name}: max step {max_step_per_run[name]}")
+
+    step_checkpoints = list(range(step_interval, int(common_max_step) + 1, step_interval))
+    if not step_checkpoints and common_max_step > 0:
+        step_checkpoints = [int(common_max_step)]
+
+    print("\n" + "=" * 80)
+    print("BY STEP (training step checkpoints; compare at equal gradient updates)")
+    print("=" * 80)
+    print(f"\nStep checkpoints: {step_checkpoints}")
+    print("=" * 80)
+
+    for tag in sorted(all_race_tags):
+        runs_with_tag = [n for n in run_names if tag in race_time.get(n, {})]
+        if not runs_with_tag:
+            continue
+        finished_tag = _race_time_to_finished_tag(tag)
+        print(f"\n[BY STEP] {tag} (best / mean / std / best_fin; finish rate; first finish step)")
+        print("-" * 80)
+        parts = ["step"]
+        for n in runs_with_tag:
+            parts.append(f"{n}_best")
+            parts.append(f"{n}_mean")
+            parts.append(f"{n}_std")
+            parts.append(f"{n}_best_fin")
+            parts.append(f"{n}_rate")
+            parts.append(f"{n}_first_step")
+        print("\t".join(parts))
+        for S in step_checkpoints:
+            row = [str(S)]
+            for name in runs_with_tag:
+                events = race_time[name][tag]
+                fin_events = race_finished[name].get(finished_tag, []) if finished_tag else []
+                finished_steps = set(s for r, s, v in fin_events if s <= S and v >= 0.5) if fin_events else None
+                st_all = race_stats_at_step(events, S, only_finished_steps=None)
+                st_fin = race_stats_at_step(events, S, only_finished_steps=finished_steps) if finished_steps else None
+                fin_stat = finish_stats_at_step(events, fin_events, S) if fin_events else None
+                if st_all is not None:
+                    best_all, mean_all, std_all, _ = st_all
+                    row.append(f"{best_all:.3f}s")
+                    row.append(f"{mean_all:.2f}s")
+                    row.append(f"{std_all:.2f}s")
+                else:
+                    row.extend(["-", "-", "-"])
+                if st_fin is not None:
+                    best_fin, _, _, _ = st_fin
+                    row.append(f"{best_fin:.3f}s")
+                else:
+                    row.append("-")
+                if fin_stat is not None:
+                    rate, n_fin, first_step = fin_stat
+                    row.append(f"{rate*100:.0f}%")
+                    row.append(str(first_step) if first_step is not None else "-")
+                else:
+                    row.append("-")
+                    row.append("-")
+            print("\t".join(row))
+
+    print("\n" + "=" * 80)
+    print("[BY STEP] Scalar metrics (alltime_min_ms, loss, Q, training %)")
+    print("=" * 80)
+    for key, tag in METRICS.items():
+        kind = 'time' if ('time' in key and 'ms' in key) else 'last'
+        rows = []
+        for S in step_checkpoints:
+            row = {"step": S}
+            for name in run_names:
+                data = cache.get(name, {}).get(tag, [])
+                v = value_at_step(data, S, kind)
+                if v is not None:
+                    rel, step, val = v
+                    row[name] = (rel, step, val / (1000.0 if 'time' in key and 'ms' in key else 1) if 'time' in key else (val * 100 if key == 'training_pct' else val))
+                else:
+                    row[name] = None
+            rows.append(row)
+        print(f"\n{tag}")
+        print("-" * 60)
+        head = "step\t" + "\t".join(run_names)
+        print(head)
+        for r in rows:
+            cells = [str(r["step"])]
+            for name in run_names:
+                x = r.get(name)
+                if x is None:
+                    cells.append("-")
+                else:
+                    if isinstance(x, tuple):
+                        val = x[2]
+                    else:
+                        val = x
+                    if key == 'training_pct':
+                        cells.append(f"{val:.1f}%")
+                    elif 'time' in key:
+                        cells.append(f"{val:.3f}s")
+                    elif key == 'avg_q':
+                        cells.append(f"{val:.4f}")
+                    else:
+                        cells.append(f"{val:.2f}")
+            print("\t".join(cells))
     print()
     return durations, checkpoints
 
 
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="Compare metrics by relative time (min from run start)")
+    p = argparse.ArgumentParser(description="Compare metrics by relative time and by training step")
     p.add_argument("--logdir", type=Path, default=Path("tensorboard"))
-    p.add_argument("--interval", type=int, default=5, help="Checkpoint interval in minutes")
+    p.add_argument("--interval", type=int, default=5, help="Checkpoint interval in minutes (relative time)")
+    p.add_argument("--step_interval", type=int, default=50000, help="Checkpoint interval in training steps (by-step tables)")
     p.add_argument("runs", nargs="+")
     args = p.parse_args()
-    compare_by_relative_time(args.runs, base_dir=args.logdir, interval_min=args.interval)
+    compare_by_relative_time(
+        args.runs,
+        base_dir=args.logdir,
+        interval_min=args.interval,
+        step_interval=args.step_interval,
+    )

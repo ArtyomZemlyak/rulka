@@ -3,22 +3,22 @@ This file implements a single multithreaded worker that handles a Trackmania gam
 """
 
 import copy
-import importlib
 import time
-from itertools import chain, count, cycle
+from itertools import count, cycle
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch import multiprocessing as mp
 
-from config_files import config_copy
+from config_files.config_loader import load_config, set_config, get_config
 from trackmania_rl import utilities
 from trackmania_rl.agents import iqn as iqn
 from trackmania_rl.utilities import set_random_seed
 
 
 def collector_process_fn(
+    config_path: Path,
     rollout_queue,
     uncompiled_shared_network,
     shared_network_lock,
@@ -32,24 +32,28 @@ def collector_process_fn(
     from trackmania_rl.map_loader import analyze_map_cycle, load_next_map_zone_centers
     from trackmania_rl.tmi_interaction import game_instance_manager
 
+    # Load config once per process (no hot-reload)
+    set_config(load_config(config_path))
+    config = get_config()
+
     set_random_seed(process_number)
 
     tmi = game_instance_manager.GameInstanceManager(
         game_spawning_lock=game_spawning_lock,
-        running_speed=config_copy.running_speed,
-        run_steps_per_action=config_copy.tm_engine_step_per_action,
-        max_overall_duration_ms=config_copy.cutoff_rollout_if_race_not_finished_within_duration_ms,
-        max_minirace_duration_ms=config_copy.cutoff_rollout_if_no_vcp_passed_within_duration_ms,
+        running_speed=config.running_speed,
+        run_steps_per_action=config.tm_engine_step_per_action,
+        max_overall_duration_ms=config.cutoff_rollout_if_race_not_finished_within_duration_ms,
+        max_minirace_duration_ms=config.cutoff_rollout_if_no_vcp_passed_within_duration_ms,
         tmi_port=tmi_port,
     )
 
-    inference_network, uncompiled_inference_network = iqn.make_untrained_iqn_network(config_copy.use_jit, is_inference=True)
+    inference_network, uncompiled_inference_network = iqn.make_untrained_iqn_network(config.use_jit, is_inference=True)
     try:
         inference_network.load_state_dict(torch.load(f=save_dir / "weights1.torch", weights_only=False))
     except Exception as e:
         print(f"[INFO] Worker {process_number} starting with fresh weights")
 
-    inferer = iqn.Inferer(inference_network, config_copy.iqn_k, config_copy.tau_epsilon_boltzmann)
+    inferer = iqn.Inferer(inference_network, config.iqn_k, config.tau_epsilon_boltzmann)
 
     def update_network():
         # Update weights of the inference network
@@ -63,17 +67,16 @@ def collector_process_fn(
 
     # Initialize map cycle
     print(f"[Collector {process_number}] Initializing map cycle...")
-    print(f"[Collector {process_number}] map_cycle length: {len(config_copy.map_cycle)}")
+    print(f"[Collector {process_number}] map_cycle length: {len(config.map_cycle)}")
     
-    if not config_copy.map_cycle:
+    if not config.map_cycle:
         print(f"[Collector {process_number}] ERROR: map_cycle is EMPTY at initialization!")
-        print(f"[Collector {process_number}] Please configure maps in config_files/map_cycle_config.py")
+        print(f"[Collector {process_number}] Please configure maps in YAML config file.")
         raise ValueError("map_cycle cannot be empty. Configure at least one map.")
     
-    map_cycle_str = str(config_copy.map_cycle)
-    set_maps_trained, set_maps_blind = analyze_map_cycle(config_copy.map_cycle)
-    # IMPORTANT: Use deepcopy because analyze_map_cycle consumes repeat iterators
-    map_cycle_iter = cycle(chain(*copy.deepcopy(config_copy.map_cycle)))
+    map_cycle_str = str(config.map_cycle)
+    set_maps_trained, set_maps_blind = analyze_map_cycle(config.map_cycle)
+    map_cycle_iter = cycle(copy.deepcopy(config.map_cycle))
     
     print(f"[Collector {process_number}] Map cycle initialized successfully")
     print(f"[Collector {process_number}] Training maps: {set_maps_trained}")
@@ -86,34 +89,31 @@ def collector_process_fn(
     # ========================================================
     for _ in range(5):
         inferer.infer_network(
-            np.random.randint(low=0, high=255, size=(1, config_copy.H_downsized, config_copy.W_downsized), dtype=np.uint8),
-            np.random.rand(config_copy.float_input_dim).astype(np.float32),
+            np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
+            np.random.rand(config.float_input_dim).astype(np.float32),
         )
     # game_instance_manager.update_current_zone_idx(0, zone_centers, np.zeros(3))
 
     time_since_last_queue_push = time.perf_counter()
     for loop_number in count(1):
-        importlib.reload(config_copy)
-
-        tmi.max_minirace_duration_ms = config_copy.cutoff_rollout_if_no_vcp_passed_within_duration_ms
+        # Config is fixed at startup (no hot-reload)
+        tmi.max_minirace_duration_ms = config.cutoff_rollout_if_no_vcp_passed_within_duration_ms
 
         # ===============================================
-        #   DID THE CYCLE CHANGE ?
+        #   DID THE CYCLE CHANGE ? (not applicable - config fixed)
         # ===============================================
-        if str(config_copy.map_cycle) != map_cycle_str:
-            map_cycle_str = str(config_copy.map_cycle)
+        if str(config.map_cycle) != map_cycle_str:
+            map_cycle_str = str(config.map_cycle)
             
             # Validate map_cycle is not empty
-            if not config_copy.map_cycle:
+            if not config.map_cycle:
                 print(f"[Collector {process_number}] ERROR: map_cycle is EMPTY!")
-                print(f"[Collector {process_number}] Check config_files/map_cycle_config.py")
-                print(f"[Collector {process_number}] Example: repeat(('map5', '\"My Challenges/Map5.Challenge.Gbx\"', 'map5_0.5m_cl.npy', True, True), 4)")
-                raise ValueError("map_cycle cannot be empty. Please configure at least one map in map_cycle_config.py")
+                print(f"[Collector {process_number}] Check YAML config file.")
+                raise ValueError("map_cycle cannot be empty. Please configure at least one map in config.")
             
-            print(f"[Collector {process_number}] Map cycle updated. Number of cycle elements: {len(config_copy.map_cycle)}")
-            set_maps_trained, set_maps_blind = analyze_map_cycle(config_copy.map_cycle)
-            # IMPORTANT: Use deepcopy because analyze_map_cycle consumes repeat iterators
-            map_cycle_iter = cycle(chain(*copy.deepcopy(config_copy.map_cycle)))
+            print(f"[Collector {process_number}] Map cycle updated. Number of cycle elements: {len(config.map_cycle)}")
+            set_maps_trained, set_maps_blind = analyze_map_cycle(config.map_cycle)
+            map_cycle_iter = cycle(copy.deepcopy(config.map_cycle))
             print(f"[Collector {process_number}] Maps for training: {set_maps_trained}")
             print(f"[Collector {process_number}] Maps for blind testing: {set_maps_blind}")
 
@@ -124,17 +124,17 @@ def collector_process_fn(
             next_map_tuple = next(map_cycle_iter)
         except StopIteration:
             print(f"[Collector {process_number}] ERROR: StopIteration in map_cycle!")
-            print(f"[Collector {process_number}] map_cycle length: {len(config_copy.map_cycle)}")
-            print(f"[Collector {process_number}] map_cycle contents: {config_copy.map_cycle}")
+            print(f"[Collector {process_number}] map_cycle length: {len(config.map_cycle)}")
+            print(f"[Collector {process_number}] map_cycle contents: {config.map_cycle}")
             raise RuntimeError(f"map_cycle iterator exhausted unexpectedly. This should not happen with cycle().")
         if next_map_tuple[2] != zone_centers_filename:
             zone_centers = load_next_map_zone_centers(next_map_tuple[2], base_dir)
         map_name, map_path, zone_centers_filename, is_explo, fill_buffer = next_map_tuple
         map_status = "trained" if map_name in set_maps_trained else "blind"
 
-        inferer.epsilon = utilities.from_exponential_schedule(config_copy.epsilon_schedule, shared_steps.value)
-        inferer.epsilon_boltzmann = utilities.from_exponential_schedule(config_copy.epsilon_boltzmann_schedule, shared_steps.value)
-        inferer.tau_epsilon_boltzmann = config_copy.tau_epsilon_boltzmann
+        inferer.epsilon = utilities.from_exponential_schedule(config.epsilon_schedule, shared_steps.value)
+        inferer.epsilon_boltzmann = utilities.from_exponential_schedule(config.epsilon_boltzmann_schedule, shared_steps.value)
+        inferer.tau_epsilon_boltzmann = config.tau_epsilon_boltzmann
         inferer.is_explo = is_explo
 
         # ===============================================

@@ -15,7 +15,7 @@ import numpy.typing as npt
 import torch
 from torchrl.data import ReplayBuffer
 
-from config_files import config_copy
+from config_files.config_loader import get_config
 from trackmania_rl import utilities
 
 
@@ -191,7 +191,7 @@ class IQN_Network(torch.nn.Module):
         return self
 
 
-@torch.compile(disable=not config_copy.is_linux, dynamic=False)
+@torch.compile(disable=not get_config().is_linux, dynamic=False)
 def iqn_loss(targets: torch.Tensor, outputs: torch.Tensor, tau_outputs: torch.Tensor, num_quantiles: int, batch_size: int):
     """
     Implements the IQN loss as defined in the IQN paper (https://arxiv.org/pdf/1806.06923)
@@ -209,9 +209,9 @@ def iqn_loss(targets: torch.Tensor, outputs: torch.Tensor, tau_outputs: torch.Te
     TD_error = targets[:, :, None, :] - outputs[:, None, :, :]
     # (batch_size, iqn_n, iqn_n, 1)
     loss = torch.where(
-        torch.lt(torch.abs(TD_error), config_copy.iqn_kappa),
-        (0.5 / config_copy.iqn_kappa) * TD_error**2,
-        (torch.abs(TD_error) - 0.5 * config_copy.iqn_kappa),
+        torch.lt(torch.abs(TD_error), get_config().iqn_kappa),
+        (0.5 / get_config().iqn_kappa) * TD_error**2,
+        (torch.abs(TD_error) - 0.5 * get_config().iqn_kappa),
     )
     tau = tau_outputs.reshape([num_quantiles, batch_size, 1]).transpose(0, 1)  # (batch_size, iqn_n, 1)
     tau = tau[:, None, :, :].expand([-1, num_quantiles, -1, -1])  # (batch_size, iqn_n, iqn_n, 1)
@@ -283,7 +283,7 @@ class Trainer:
                     next_state_float_tensor,
                     gammas_terminal,
                 ) = batch
-                if config_copy.prio_alpha > 0:
+                if get_config().prio_alpha > 0:
                     IS_weights = torch.from_numpy(batch_info["_weight"]).to("cuda", non_blocking=True)
 
                 rewards = rewards.unsqueeze(-1).repeat(
@@ -301,7 +301,7 @@ class Trainer:
                 #   Use online network to choose an action for next state.
                 #   This action is chosen AFTER reduction to the mean, and repeated to all quantiles
                 #
-                if config_copy.use_ddqn:
+                if get_config().use_ddqn:
                     a__tpo__online__reduced_repeated = (
                         self.online_network(
                             next_state_img_tensor,
@@ -339,23 +339,23 @@ class Trainer:
                 q__st__online__quantiles_tau3.gather(1, actions).reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
             )  # (batch_size, iqn_n, 1)
 
-            loss = iqn_loss(outputs_target_tau2, outputs_tau3, tau3, config_copy.iqn_n, config_copy.batch_size)
+            loss = iqn_loss(outputs_target_tau2, outputs_tau3, tau3, get_config().iqn_n, get_config().batch_size)
 
             target_self_loss = torch.sqrt(
                 iqn_loss(
-                    outputs_target_tau2.detach(), outputs_target_tau2.detach(), tau2.detach(), config_copy.iqn_n, config_copy.batch_size
+                    outputs_target_tau2.detach(), outputs_target_tau2.detach(), tau2.detach(), get_config().iqn_n, get_config().batch_size
                 )
             )
 
             self.typical_self_loss = 0.99 * self.typical_self_loss + 0.01 * target_self_loss.mean()
 
-            correction_clamped = target_self_loss.clamp(min=self.typical_self_loss / config_copy.target_self_loss_clamp_ratio)
+            correction_clamped = target_self_loss.clamp(min=self.typical_self_loss / get_config().target_self_loss_clamp_ratio)
 
             self.typical_clamped_self_loss = 0.99 * self.typical_clamped_self_loss + 0.01 * correction_clamped.mean()
 
             loss *= self.typical_clamped_self_loss / correction_clamped
 
-            total_loss = torch.sum(IS_weights * loss if config_copy.prio_alpha > 0 else loss)
+            total_loss = torch.sum(IS_weights * loss if get_config().prio_alpha > 0 else loss)
 
             if do_learn:
                 self.scaler.scale(total_loss).backward()
@@ -370,9 +370,9 @@ class Trainer:
                 
                 # Now clip gradients
                 grad_norm = (
-                    torch.nn.utils.clip_grad_norm_(self.online_network.parameters(), config_copy.clip_grad_norm).detach().cpu().item()
+                    torch.nn.utils.clip_grad_norm_(self.online_network.parameters(), get_config().clip_grad_norm).detach().cpu().item()
                 )
-                torch.nn.utils.clip_grad_value_(self.online_network.parameters(), config_copy.clip_grad_value)
+                torch.nn.utils.clip_grad_value_(self.online_network.parameters(), get_config().clip_grad_value)
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -381,8 +381,8 @@ class Trainer:
                 grad_norm_before_clip = 0
 
             total_loss = total_loss.detach().cpu()
-            if config_copy.prio_alpha > 0:
-                mask_update_priority = torch.lt(state_float_tensor[:, 0], config_copy.min_horizon_to_update_priority_actions).detach().cpu()
+            if get_config().prio_alpha > 0:
+                mask_update_priority = torch.lt(state_float_tensor[:, 0], get_config().min_horizon_to_update_priority_actions).detach().cpu()
                 # Only update the transition priority if the transition was sampled with a sufficiently long-term horizon.
                 buffer.update_priority(
                     batch_info["index"][mask_update_priority],
@@ -497,20 +497,20 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
     """
     # Calculate conv_head_output_dim dynamically based on image dimensions
     # This is computed once at network creation time (during config loading), not during training
-    conv_head_output_dim = calculate_conv_output_dim(config_copy.H_downsized, config_copy.W_downsized)
+    conv_head_output_dim = calculate_conv_output_dim(get_config().H_downsized, get_config().W_downsized)
 
     uncompiled_model = IQN_Network(
-        float_inputs_dim=config_copy.float_input_dim,
-        float_hidden_dim=config_copy.float_hidden_dim,
+        float_inputs_dim=get_config().float_input_dim,
+        float_hidden_dim=get_config().float_hidden_dim,
         conv_head_output_dim=conv_head_output_dim,
-        dense_hidden_dimension=config_copy.dense_hidden_dimension,
-        iqn_embedding_dimension=config_copy.iqn_embedding_dimension,
-        n_actions=len(config_copy.inputs),
-        float_inputs_mean=config_copy.float_inputs_mean,
-        float_inputs_std=config_copy.float_inputs_std,
+        dense_hidden_dimension=get_config().dense_hidden_dimension,
+        iqn_embedding_dimension=get_config().iqn_embedding_dimension,
+        n_actions=len(get_config().inputs),
+        float_inputs_mean=get_config().float_inputs_mean,
+        float_inputs_std=get_config().float_inputs_std,
     )
     if jit:
-        if config_copy.is_linux:
+        if get_config().is_linux:
             compile_mode = None if "rocm" in torch.__version__ else ("max-autotune" if is_inference else "max-autotune-no-cudagraphs")
             model = torch.compile(uncompiled_model, dynamic=False, mode=compile_mode)
         else:

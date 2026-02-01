@@ -9,7 +9,7 @@ import numpy.typing as npt
 from pygbx import Gbx, GbxType
 from scipy.interpolate import make_interp_spline
 
-from config_files import config_copy
+from config_files.config_loader import get_config
 
 
 def load_next_map_zone_centers(zone_centers_filename, base_dir):
@@ -21,11 +21,11 @@ def load_next_map_zone_centers(zone_centers_filename, base_dir):
         (
             zone_centers[0]
             + np.expand_dims(zone_centers[0] - zone_centers[1], axis=0)
-            * np.expand_dims(np.arange(config_copy.n_zone_centers_extrapolate_before_start_of_map, 0, -1), axis=1),
+            * np.expand_dims(np.arange(get_config().n_zone_centers_extrapolate_before_start_of_map, 0, -1), axis=1),
             zone_centers,
             zone_centers[-1]
             + np.expand_dims(zone_centers[-1] - zone_centers[-2], axis=0)
-            * np.expand_dims(np.arange(1, 1 + config_copy.n_zone_centers_extrapolate_after_end_of_map, 1), axis=1),
+            * np.expand_dims(np.arange(1, 1 + get_config().n_zone_centers_extrapolate_after_end_of_map, 1), axis=1),
         )
     )
     # Smoothen the trajectory defined by virtual checkpoints
@@ -90,7 +90,7 @@ def densify_raw_pos_list_n_times(raw_pos_list: List[npt.NDArray], n: int):
 
 
 def map_name_from_map_path(map_path):
-    gbx = Gbx(str(config_copy.trackmania_base_path / "Tracks" / "Challenges" / Path(map_path.strip("'\""))))
+    gbx = Gbx(str(get_config().trackmania_base_path / "Tracks" / "Challenges" / Path(map_path.strip("'\""))))
     gbx_challenge = gbx.get_class_by_id(GbxType.CHALLENGE)
     
     # If map_name is None, use the filename without extension as fallback
@@ -102,9 +102,9 @@ def map_name_from_map_path(map_path):
 
 
 def replay_personal_record(map_path):
-    trackmania_replay_username = config_copy.username if config_copy.is_linux else os.getlogin()
+    trackmania_replay_username = get_config().username if get_config().is_linux else os.getlogin()
     filename = trackmania_replay_username + "_" + map_name_from_map_path(map_path) + ".Replay.gbx"
-    filepath = config_copy.trackmania_base_path / "Tracks" / "Replays" / "Autosaves"
+    filepath = get_config().trackmania_base_path / "Tracks" / "Replays" / "Autosaves"
     return filename, filepath
 
 
@@ -123,7 +123,7 @@ def get_checkpoint_positions_from_gbx(map_path: str):
     Given a challenge.gbx file, return an unordered list of the checkpoint positions on that track.
     <!> Warning: this function assumes that the block size for that map is 32x8x32. This is true for campaign maps, but not for all custom maps.
     """
-    g = Gbx(str(config_copy.trackmania_base_path / "Tracks" / "Challenges" / map_path.strip("'\"").replace("\\", "/")))
+    g = Gbx(str(get_config().trackmania_base_path / "Tracks" / "Challenges" / map_path.strip("'\"").replace("\\", "/")))
 
     challenges = g.get_classes_by_ids([GbxType.CHALLENGE, GbxType.CHALLENGE_OLD])
     if not challenges:
@@ -153,7 +153,7 @@ def sync_virtual_and_real_checkpoints(zone_centers: npt.NDArray, map_path: str):
     """
     next_real_checkpoint_positions = np.zeros((len(zone_centers), 3))
     max_allowable_distance_to_real_checkpoint = 9999999 * np.ones(len(zone_centers))
-    if config_copy.sync_virtual_and_real_checkpoints:
+    if get_config().sync_virtual_and_real_checkpoints:
         checkpoint_positions = get_checkpoint_positions_from_gbx(map_path)
         for checkpoint_position in checkpoint_positions:
             dist_vcp_cp = np.linalg.norm(zone_centers - checkpoint_position, axis=1)
@@ -184,9 +184,10 @@ def find_indices_of_positions_near_cut_position(pos_list: List[npt.NDArray], cut
 
 def analyze_map_cycle(map_cycle):
     """
-    Given a map cycle, identify which maps are used for training and testing, and which maps are only used for testing.
+    Given a map cycle (list of tuples: short_name, map_path, ref_line, is_exploration, fill_buffer),
+    identify which maps are used for training and testing, and which maps are only used for testing.
     """
-    set_all_maps = set(map(lambda x: x[0], (a for a in itertools.chain(*copy.deepcopy(config_copy.map_cycle)))))
-    set_maps_trained = set(map(lambda x: x[0], filter(lambda x: x[4], (a for a in itertools.chain(*copy.deepcopy(map_cycle))))))
+    set_all_maps = set(x[0] for x in map_cycle)
+    set_maps_trained = set(x[0] for x in map_cycle if x[4])
     set_maps_blind = set_all_maps - set_maps_trained
     return set_maps_trained, set_maps_blind

@@ -34,6 +34,10 @@ dependencies = [
     "joblib>=1.4.0",
     "psutil>=6.0.0",
     "setuptools",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
     
     # TrackMania specific
     "readwritememory",

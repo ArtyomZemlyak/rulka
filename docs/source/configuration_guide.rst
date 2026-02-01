@@ -14,40 +14,43 @@ Each setting includes a brief inline comment. This document provides comprehensi
 Quick Start
 ===========
 
-All configuration settings are in compact Python files:
+Configuration is loaded from a single **YAML file** at startup and accessed via ``get_config()``:
 
 .. code-block:: python
 
-   from config_files import config_copy
+   from config_files.config_loader import get_config
    
-   # Access any setting
-   batch_size = config_copy.batch_size
-   learning_rate = config_copy.lr_schedule
+   # Access any setting (flat attribute access)
+   cfg = get_config()
+   batch_size = cfg.batch_size
+   learning_rate = cfg.lr_schedule
 
-To modify settings during training:
+To run training with a specific config:
 
-1. Edit ``config_files/config_copy.py``
-2. Changes apply automatically without restart
-3. Replay buffer is preserved
+.. code-block:: bash
 
-Configuration Modules
-=====================
+   python scripts/train.py --config config_files/config_default.yaml
 
-Settings are organized into 8 modules:
+You can version configs with separate YAML files (e.g. ``config_uni18.yaml``) and pass the path with ``--config``. User-specific settings (paths, usernames) are read from a ``.env`` file in the project root. Config is loaded once per process and cached; there is no hot-reload.
 
-1. **environment_config.py** - Environment and simulation
-2. **neural_network_config.py** - Network architecture
-3. **training_config.py** - Training hyperparameters
-4. **memory_config.py** - Replay buffer
-5. **exploration_config.py** - Exploration strategies
-6. **rewards_config.py** - Reward shaping
-7. **map_cycle_config.py** - Map training cycle
-8. **performance_config.py** - System performance
+Configuration Structure (YAML)
+==============================
+
+The default YAML (``config_files/config_default.yaml``) is organized into sections that correspond to the former Python modules:
+
+1. **environment** - Environment and simulation
+2. **neural_network** - Network architecture
+3. **training** - Training hyperparameters
+4. **memory** - Replay buffer
+5. **exploration** - Exploration strategies
+6. **rewards** - Reward shaping
+7. **map_cycle** - Map training cycle
+8. **performance** - System performance
 
 Environment Configuration
 ==========================
 
-Located in: ``config_files/environment_config.py``
+Located in the ``environment`` section of the config YAML.
 
 Timing Configuration
 --------------------
@@ -323,7 +326,7 @@ Contact and Physics
    
    **Current:** 4 categories. The mapping from game materials to these groups is defined in ``contact_materials.py`` (e.g. 0 = Asphalt-like, 1 = Grass, 2 = Dirt, 3 = Turbo; other materials map to an implicit "other" and are not encoded as a separate category index).
    
-   **Do not change** unless you also change the grouping logic in ``contact_materials.py`` and the input dimension in ``neural_network_config.py``.
+   **Do not change** unless you also change the grouping logic in ``contact_materials.py`` and the corresponding input dimension in the config.
 
 .. py:data:: n_prev_actions_in_inputs
    :type: int
@@ -353,7 +356,7 @@ Contact and Physics
    
    **Current:** 5 actions. With 50 ms per action, this is 250 ms of action history (~0.25 s).
    
-   Changing this value changes ``float_input_dim`` in ``neural_network_config.py`` (add or subtract 4 per action).
+   Changing this value changes ``float_input_dim`` (add or subtract 4 per action); it is computed from config at load time.
 
 Timeouts
 --------
@@ -436,7 +439,7 @@ Game Settings
 Neural Network Configuration
 =============================
 
-Located in: ``config_files/neural_network_config.py``
+Located in the ``neural_network`` section of the config YAML.
 
 Image Dimensions
 ----------------
@@ -503,7 +506,7 @@ Input Dimensions
 State Normalization (float_inputs_mean / float_inputs_std)
 ---------------------------------------------------------
 
-Located in: ``config_files/state_normalization.py``
+Defined in the ``state_normalization`` section of the config YAML (or built from defaults in the loader).
 
 Scalar inputs are normalized before the network: ``(float_inputs - float_inputs_mean) / float_inputs_std``. This keeps activations in a reasonable range and can speed up training.
 
@@ -526,7 +529,7 @@ The repo does **not** include a script that computes them from data. The current
 3. Compute ``mean = np.nanmean(data, axis=0)`` and ``std = np.nanstd(data, axis=0)`` (or replace zeros in std with a small constant to avoid division by zero).
 4. Update ``float_inputs_mean`` and ``float_inputs_std`` in ``state_normalization.py``.
 
-If you change the number or order of float features (e.g. waypoints, actions), the length and indices in ``state_normalization.py`` must match ``float_input_dim`` and the order in ``game_instance_manager.py`` / ``buffer_utilities.py``.
+If you change the number or order of float features (e.g. waypoints, actions), the length and indices in the config's state normalization must match ``float_input_dim`` and the order in ``game_instance_manager.py`` / ``buffer_utilities.py``.
 
 Network Architecture
 --------------------
@@ -615,6 +618,40 @@ See: `Dabney et al. 2018 - Implicit Quantile Networks for Distributional RL <htt
    - **Paper default**: 1.0
    - **Current**: 5e-3 works better empirically
 
+Q-learning variant
+------------------
+
+.. py:data:: use_ddqn
+   :type: bool
+   :value: False
+
+   **Use Double DQN for target computation**
+   
+   Switches how the TD target for the next state is computed in the IQN training loop
+   (see ``trackmania_rl/agents/iqn.py``, ``train_on_batch``).
+   
+   **When False (standard DQN-style):**
+   
+   - Target: ``reward + gamma * max_a Q_target(next_state, a)``
+   - The target network both selects the best action and evaluates it, which can lead to
+     overestimation of Q-values.
+   
+   **When True (Double DQN):**
+   
+   - The **online** network selects the action: ``a* = argmax_a Q_online(next_state, a)``
+     (after averaging over quantiles).
+   - The **target** network evaluates that action: target = ``reward + gamma * Q_target(next_state, a*)``.
+   - Selecting and evaluating are decoupled, which reduces overestimation and often
+     stabilizes training.
+   
+   **Effect:**
+   
+   - **True**: Usually more stable learning, less Q overestimation; one extra forward pass
+     through the online network per batch.
+   - **False**: Slightly faster per batch; may overestimate Q more.
+   
+   See: `van Hasselt et al. 2016 - Deep Reinforcement Learning with Double Q-learning <https://arxiv.org/abs/1509.06461>`_
+
 Gradient Clipping
 -----------------
 
@@ -676,7 +713,7 @@ Target Network
 Training Configuration
 ======================
 
-Located in: ``config_files/training_config.py``
+Located in the ``training`` section of the config YAML.
 
 Run Identification
 ------------------
@@ -954,7 +991,7 @@ TensorBoard Logging
 Memory Configuration
 ====================
 
-Located in: ``config_files/memory_config.py``
+Located in the ``memory`` section of the config YAML.
 
 Buffer Size
 -----------
@@ -1097,7 +1134,7 @@ Memory Usage Control
 Exploration Configuration
 ==========================
 
-Located in: ``config_files/exploration_config.py``
+Located in the ``exploration`` section of the config YAML.
 
 The agent uses hybrid exploration: epsilon-greedy + epsilon-Boltzmann.
 
@@ -1136,13 +1173,19 @@ Epsilon-Boltzmann
    
    Probability of Boltzmann sampling (when not taking random action).
    
-   Boltzmann samples actions proportional to ``exp(Q(s,a) / temperature)``.
+   **How the action is chosen** (one action per step):
+   
+   - **Random** (with probability epsilon): action is chosen uniformly among all actions (ignores Q-values).
+   - **Boltzmann** (with probability (1−epsilon)×epsilon_boltzmann): to each Q(s,a) we add Gaussian noise, then take the action with the **maximum** of these noised values. So we still pick one action (argmax), but which one can differ from greedy because of the noise.
+   - **Greedy** (with probability (1−epsilon)×(1−epsilon_boltzmann)): action with the **maximum** Q(s,a) is taken (no noise).
+   
+   So the difference: **greedy** = always the best Q; **Boltzmann** = best Q after adding random noise (often the same action when tau is small, sometimes another).
    
    **Combined behavior** (epsilon=0.1, epsilon_boltzmann=0.15):
    
    - 10% purely random
-   - 90% × 15% = 13.5% Boltzmann
-   - 90% × 85% = 76.5% greedy
+   - 90% × 15% = 13.5% Boltzmann (argmax of Q + noise)
+   - 90% × 85% = 76.5% greedy (argmax of Q)
 
 .. py:data:: tau_epsilon_boltzmann
    :type: float
@@ -1150,10 +1193,10 @@ Epsilon-Boltzmann
 
    **Boltzmann temperature**
    
-   Controls distribution sharpness: ``P(a) ∝ exp(Q(s,a) / tau)``
+   In the implementation, Gaussian noise is added to Q-values before taking argmax: ``argmax(Q + tau * randn)``. So tau controls noise scale:
    
-   - **tau → 0**: Nearly deterministic (always max Q-value)
-   - **tau → ∞**: Uniform distribution
+   - **tau → 0**: Almost no noise → almost always greedy (max Q)
+   - **tau large**: Large noise → sometimes a suboptimal action wins
    
    **Current**: 0.01 is very low (near-greedy)
    
@@ -1165,7 +1208,7 @@ Epsilon-Boltzmann
 Rewards Configuration
 =====================
 
-Located in: ``config_files/rewards_config.py``
+Located in the ``rewards`` section of the config YAML.
 
 Base Rewards
 ------------
@@ -1218,44 +1261,36 @@ Avoids reward hacking and unintended behaviors from complex shaping.
 Map Cycle Configuration
 ========================
 
-Located in: ``config_files/map_cycle_config.py``
+Located in the ``map_cycle`` section of the config YAML.
 
 .. py:data:: map_cycle
    :type: list
 
    **Map training cycle**
    
-   List of iterators yielding tuples:
+   Under ``map_cycle.entries`` in YAML, each entry has:
    
-   .. code-block:: python
+   - **short_name** (str): Logging identifier (e.g., "hock", "A01")
+   - **map_path** (str): Path to .Challenge.Gbx file
+   - **reference_line_path** (str): Racing line .npy file in maps/
+   - **is_exploration** (bool): Use exploration strategy
+   - **fill_buffer** (bool): Add experiences to replay buffer
+   - **repeat** (int): How many times to repeat this entry in the cycle
    
-      (short_name, map_path, reference_line_path, is_exploration, fill_buffer)
+   **Common patterns (YAML):**
    
-   **Components:**
+   .. code-block:: yaml
    
-   1. **short_name** (str): Logging identifier (e.g., "hock", "A01")
-   2. **map_path** (str): Path to .Challenge.Gbx file
-   3. **reference_line_path** (str): Racing line .npy file in maps/
-   4. **is_exploration** (bool): Use exploration strategy
-   5. **fill_buffer** (bool): Add experiences to replay buffer
-   
-   **Common patterns:**
-   
-   .. code-block:: python
-   
-      # Standard training: 4 exploration + 1 evaluation
-      repeat((name, path, line, True, True), 4),   # 4 exploration runs
-      repeat((name, path, line, False, True), 1),  # 1 evaluation run
-      
-      # Pure evaluation (no training):
-      repeat((name, path, line, False, False), 1),
-   
-   See inline documentation in config file for extensive examples.
+      map_cycle:
+        entries:
+          # 4 exploration + 1 evaluation
+          - {short_name: A01, map_path: "A01-Race.Challenge.Gbx", reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 4}
+          - {short_name: A01, map_path: "A01-Race.Challenge.Gbx", reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 
 Performance Configuration
 ==========================
 
-Located in: ``config_files/performance_config.py``
+Located in the ``performance`` section of the config YAML.
 
 Parallelization
 ---------------
@@ -1384,7 +1419,7 @@ Visualization and Analysis
    - **Clustering:** If many high-priority transitions look similar (e.g. same turn, same surface), the agent may need more data or reward shaping there.
    - **Debugging PER and rewards:** Helps check that high TD-error corresponds to “hard” or “surprising” situations rather than noise or bugs.
    
-   **When it runs:** Only at checkpoint save time (when the learner saves weights and stats), and only if ``config_copy.make_highest_prio_figures`` is ``True`` and the buffer uses ``PrioritizedSampler``. If ``prio_alpha = 0`` (uniform replay), this option has no effect.
+   **When it runs:** Only at checkpoint save time (when the learner saves weights and stats), and only if ``get_config().make_highest_prio_figures`` is ``True`` and the buffer uses ``PrioritizedSampler``. If ``prio_alpha = 0`` (uniform replay), this option has no effect.
    
    **TensorBoard:** These figures are **not** sent to TensorBoard. They are only written as PNG files under ``save_dir / "high_prio_figures"``. To inspect them in TensorBoard you would need to add custom logging (e.g. ``writer.add_image(...)``) yourself.
    
@@ -1409,20 +1444,13 @@ All schedules use linear interpolation between points:
    # At frame 500: value = 0.75 (interpolated)
    # At frame 1500: value = 0.3 (interpolated)
 
-Hot-Reloading
--------------
+Changing Configuration
+----------------------
 
-``config_copy.py`` is reloaded periodically during training.
-
-To change parameters on-the-fly:
-
-1. Edit ``config_copy.py`` (not ``config.py``)
-2. Save the file
-3. Changes apply at next reload interval
-4. Replay buffer preserved
+Config is loaded once at process startup (from the YAML path passed to ``train.py --config``). To change parameters you must edit the YAML file and restart training. A snapshot of the config used for each run is saved as ``config_snapshot.yaml`` in ``save/{run_name}/``.
 
 .. warning::
-   Don't change:
+   Don't change mid-run:
    
    - Network architecture parameters
    - Input dimensions

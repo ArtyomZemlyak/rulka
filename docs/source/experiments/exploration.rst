@@ -78,7 +78,7 @@ GPU utilization (Performance/learner_percentage_training)
 Configuration Changes
 ----------------------
 
-**Exploration** (``config_files/exploration_config.py``):
+**Exploration** (``exploration`` section in config YAML):
 
 **uni_12 (baseline — default):**
 

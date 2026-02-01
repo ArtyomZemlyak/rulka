@@ -13,7 +13,15 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 
-from config_files import config
+from config_files.config_loader import get_config, load_config, set_config
+
+# Load config for standalone script usage (e.g. when called from a_v_widget_folder.py)
+try:
+    get_config()
+except RuntimeError:
+    _cfg_path = Path(__file__).resolve().parents[1] / "config_files" / "config_default.yaml"
+    if _cfg_path.exists():
+        set_config(load_config(_cfg_path))
 
 
 # ===============================================================
@@ -34,10 +42,10 @@ def write_actions_in_tmi_format(action_idxs: List[int], outfile_path: Path):
     """
     outfile = open(outfile_path, "w")
     time_from = 0
-    time_delta_s = config.tm_engine_step_per_action * 0.01
+    time_delta_s = get_config().tm_engine_step_per_action * 0.01
     last_press = {"accelerate": -1, "brake": -1, "left": -1, "right": -1}
     for action_idx in action_idxs[:-1]:
-        action = config.inputs[action_idx]
+        action = get_config().inputs[action_idx]
         for key, val in action.items():
             if val:
                 if last_press[key] == -1:
@@ -98,7 +106,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                 # Brake
                 ax.bar(
                     x=1,
-                    height=alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["brake"]),
+                    height=alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["brake"]),
                     width=1.9,
                     bottom=0,
                     align="center",
@@ -106,7 +114,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                         1 * (alpha < 1.0),
                         1 * (alpha >= 1.0),
                         0,
-                        alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["brake"]),
+                        alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["brake"]),
                     ),
                     linewidth=0.5,
                     edgecolor="black",
@@ -130,7 +138,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                     width=0.9,
                     bottom=0,
                     align="center",
-                    hatch="////" if not config.inputs[key_number_one_frame]["left"] else "",
+                    hatch="////" if not get_config().inputs[key_number_one_frame]["left"] else "",
                     color=(1, 1, 1, 0.5),
                     linewidth=0.5,
                     edgecolor="black",
@@ -143,7 +151,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                     width=0.9,
                     bottom=0,
                     align="center",
-                    hatch="////" if not config.inputs[key_number_one_frame]["brake"] else "",
+                    hatch="////" if not get_config().inputs[key_number_one_frame]["brake"] else "",
                     color=(1, 1, 1, 0.5),
                     linewidth=0.5,
                     edgecolor="black",
@@ -156,7 +164,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                     width=0.9,
                     bottom=0,
                     align="center",
-                    hatch="////" if not config.inputs[key_number_one_frame]["right"] else "",
+                    hatch="////" if not get_config().inputs[key_number_one_frame]["right"] else "",
                     color=(1, 1, 1, 0.5),
                     linewidth=0.5,
                     edgecolor="black",
@@ -169,7 +177,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                     width=0.9,
                     bottom=1.1,
                     align="center",
-                    hatch="////" if not config.inputs[key_number_one_frame]["accelerate"] else "",
+                    hatch="////" if not get_config().inputs[key_number_one_frame]["accelerate"] else "",
                     color=(1, 1, 1, 0.5),
                     linewidth=0.5,
                     edgecolor="black",
@@ -178,7 +186,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                 # Left
                 ax.bar(
                     x=0,
-                    height=alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["left"]),
+                    height=alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["left"]),
                     width=0.9,
                     bottom=0,
                     align="center",
@@ -186,7 +194,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                         1 * (alpha < 1.0),
                         1 * (alpha >= 1.0),
                         0,
-                        alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["left"]),
+                        alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["left"]),
                     ),
                     linewidth=0.5,
                     edgecolor="black",
@@ -195,7 +203,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                 # Brake
                 ax.bar(
                     x=1,
-                    height=alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["brake"]),
+                    height=alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["brake"]),
                     width=0.9,
                     bottom=0,
                     align="center",
@@ -203,7 +211,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                         1 * (alpha < 1.0),
                         1 * (alpha >= 1.0),
                         0,
-                        alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["brake"]),
+                        alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["brake"]),
                     ),
                     linewidth=0.5,
                     edgecolor="black",
@@ -212,7 +220,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                 # Right
                 ax.bar(
                     x=2,
-                    height=alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["right"]),
+                    height=alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["right"]),
                     width=0.9,
                     bottom=0,
                     align="center",
@@ -220,7 +228,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                         1 * (alpha < 1.0),
                         1 * (alpha >= 1.0),
                         0,
-                        alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["right"]),
+                        alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["right"]),
                     ),
                     linewidth=0.5,
                     edgecolor="black",
@@ -229,7 +237,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                 # Accelerate
                 ax.bar(
                     x=1,
-                    height=alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["accelerate"]),
+                    height=alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["accelerate"]),
                     width=0.9,
                     bottom=1.1,
                     align="center",
@@ -237,7 +245,7 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                         1 * (alpha < 1.0),
                         1 * (alpha >= 1.0),
                         0,
-                        alpha * ((key_number_one_frame == 3) | config.inputs[key_number_one_frame]["accelerate"]),
+                        alpha * ((key_number_one_frame == 3) | get_config().inputs[key_number_one_frame]["accelerate"]),
                     ),
                     linewidth=0.5,
                     edgecolor="black",

@@ -19,37 +19,26 @@ The repository is organized into the following directories:
 config_files
 ------------
 
-The ``config_files/`` folder contains configuration files organized by category for better maintainability:
+The ``config_files/`` folder holds configuration loaded from **YAML** at startup:
 
-**Core Configuration Files:**
+**Core Files:**
 
-    - ``config.py``: Main configuration file that re-exports all settings from modular config files. Provides backward compatibility.
-    - ``config_copy.py``: Created at training start as a copy of config.py. Can be modified during training to hot-reload parameters without restart. See docstring for details.
-    - ``user_config.py``: User-specific settings (paths, usernames). Set once during initial setup.
-
-**Modular Configuration Files:**
-
-    - ``environment_config.py``: Game environment settings (image size, timing, spatial parameters, timeouts)
-    - ``neural_network_config.py``: Network architecture (layer sizes, IQN parameters, gradient clipping)
-    - ``training_config.py``: Training hyperparameters (learning rate, gamma, n-step, batch size, schedules)
-    - ``memory_config.py``: Replay buffer settings (buffer size, prioritization, sampling)
-    - ``exploration_config.py``: Exploration strategies (epsilon-greedy, Boltzmann)
-    - ``rewards_config.py``: Reward shaping (progress rewards, time penalties)
-    - ``map_cycle_config.py``: Map training cycle (which maps to train on, in what order)
-    - ``performance_config.py``: System performance (parallelization, visualization, augmentation)
+    - ``config_default.yaml``: Default configuration (versioned). Use ``scripts/train.py --config config_files/config_default.yaml``. You can add more YAML files (e.g. ``config_uni18.yaml``) and pass them with ``--config``.
+    - ``config_loader.py``: Loads YAML, validates with Pydantic, and exposes ``load_config(path)``, ``get_config()``, and ``set_config(cfg)``. Config is loaded once per process and cached; there is no hot-reload.
+    - ``config_schema.py``: Pydantic models for all config sections (environment, neural_network, training, memory, exploration, rewards, map_cycle, performance, state_normalization, user from ``.env``).
 
 **Supporting Files:**
 
-    - ``inputs_list.py``: Defines discrete action space (forward, brake, steering combinations)
-    - ``state_normalization.py``: Normalization parameters for state features (mean and std deviation)
+    - ``inputs_list.py``: Defines discrete action space (forward, brake, steering combinations), used by the loader/schema.
+    - ``state_normalization.py``: Helpers if needed; main normalization data can live in the YAML.
 
-All settings can be imported from ``config.py`` for backward compatibility, or from specific modules for clarity.
+User-specific settings (paths, usernames) are read from a ``.env`` file in the project root. In code, use ``from config_files.config_loader import get_config`` and then ``get_config().<attribute>`` for flat access to any setting.
 
 
 maps
 ----
 
-The ``maps/`` folder contains ``{map}.npy`` files which define a reference trajectory for a given map. These are binary dumps of numpy arrays of shape (N, 3) with N the number of virtual checkpoints along the reference line. Virtual checkpoints are spaced evenly every 50cm (``config.distance_between_checkpoints``).
+The ``maps/`` folder contains ``{map}.npy`` files which define a reference trajectory for a given map. These are binary dumps of numpy arrays of shape (N, 3) with N the number of virtual checkpoints along the reference line. Virtual checkpoints are spaced evenly according to the config (e.g. ``distance_between_checkpoints``, typically 0.5m).
 
 save
 ----

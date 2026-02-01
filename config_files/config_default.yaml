@@ -1,0 +1,396 @@
+# Rulka default configuration
+# Use: python scripts/train.py --config config_files/config_default.yaml
+
+environment:
+  tm_engine_step_per_action: 5
+  ms_per_tm_engine_step: 10
+  n_zone_centers_in_inputs: 40
+  one_every_n_zone_centers_in_inputs: 20
+  n_zone_centers_extrapolate_after_end_of_map: 1000
+  n_zone_centers_extrapolate_before_start_of_map: 20
+  distance_between_checkpoints: 0.5
+  road_width: 90
+  temporal_mini_race_duration_ms: 7000
+  margin_to_announce_finish_meters: 700
+  n_contact_material_physics_behavior_types: 4
+  n_prev_actions_in_inputs: 5
+  cutoff_rollout_if_race_not_finished_within_duration_ms: 300000
+  cutoff_rollout_if_no_vcp_passed_within_duration_ms: 2000
+  timeout_during_run_ms: 10100
+  timeout_between_runs_ms: 600000000
+  tmi_protection_timeout_s: 500
+  game_reboot_interval: 43200
+  deck_height: "-inf"
+  game_camera_number: 2
+  sync_virtual_and_real_checkpoints: true
+
+neural_network:
+  w_downsized: 64
+  h_downsized: 64
+  float_hidden_dim: 256
+  dense_hidden_dimension: 1024
+  iqn_embedding_dimension: 128
+  iqn_n: 8
+  iqn_k: 32
+  iqn_kappa: 0.005
+  use_ddqn: true
+  clip_grad_value: 1000
+  clip_grad_norm: 30
+  number_memories_trained_on_between_target_network_updates: 2048
+  soft_update_tau: 0.02
+  target_self_loss_clamp_ratio: 4
+  single_reset_flag: 0
+  reset_every_n_frames_generated: 40000000000000
+  additional_transition_after_reset: 1600000
+  last_layer_reset_factor: 0.8
+  overall_reset_mul_factor: 0.01
+  use_jit: true
+
+training:
+  run_name: "uni_20"
+  batch_size: 512
+  adam_epsilon: 0.0001
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  weight_decay_lr_ratio: 0.1
+  global_schedule_speed: 1
+  lr_schedule:
+    - [0, 0.001]
+    - [3000000, 0.00005]
+    - [12000000, 0.00005]
+    - [15000000, 0.00001]
+  gamma_schedule:
+    - [0, 0.999]
+    - [1500000, 0.999]
+    - [2500000, 1]
+  n_steps: 3
+  discard_non_greedy_actions_in_nsteps: true
+  tensorboard_suffix_schedule:
+    - [0, ""]
+    - [6000000, "_2"]
+    - [15000000, "_3"]
+    - [30000000, "_4"]
+    - [45000000, "_5"]
+    - [80000000, "_6"]
+    - [150000000, "_7"]
+  oversample_long_term_steps: 40
+  oversample_maximum_term_steps: 5
+
+memory:
+  memory_size_schedule:
+    - [0, [50000, 20000]]
+    - [5000000, [100000, 75000]]
+    - [7000000, [200000, 150000]]
+  prio_alpha: 0
+  prio_epsilon: 0.002
+  prio_beta: 1
+  number_times_single_memory_is_used_before_discard: 32
+  buffer_test_ratio: 0.05
+
+exploration:
+  epsilon_schedule:
+    - [0, 1]
+    - [50000, 1]
+    - [300000, 0.1]
+    - [3000000, 0.03]
+  epsilon_boltzmann_schedule:
+    - [0, 0.15]
+    - [3000000, 0.03]
+  tau_epsilon_boltzmann: 0.01
+
+rewards:
+  constant_reward_per_ms: -0.0012
+  reward_per_m_advanced_along_centerline: 0.01
+  shaped_reward_dist_to_cur_vcp: -0.1
+  shaped_reward_min_dist_to_cur_vcp: 2
+  shaped_reward_max_dist_to_cur_vcp: 25
+  engineered_reward_min_dist_to_cur_vcp: 5
+  engineered_reward_max_dist_to_cur_vcp: 25
+  shaped_reward_point_to_vcp_ahead: 0
+  engineered_speedslide_reward_schedule: [[0, 0]]
+  engineered_neoslide_reward_schedule: [[0, 0]]
+  engineered_kamikaze_reward_schedule: [[0, 0]]
+  engineered_close_to_vcp_reward_schedule: [[0, 0]]
+  final_speed_reward_as_if_duration_s: 0
+
+map_cycle:
+  entries:
+    - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: true, fill_buffer: true, repeat: 64}
+    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 64}
+    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
+
+performance:
+  gpu_collectors_count: 4
+  max_rollout_queue_size: 1
+  send_shared_network_every_n_batches: 8
+  update_inference_network_every_n_actions: 8
+  plot_race_time_left_curves: false
+  n_transitions_to_plot_in_distribution_curves: 1000
+  make_highest_prio_figures: false
+  apply_randomcrop_augmentation: false
+  n_pixels_to_crop_on_each_side: 2
+  frames_before_save_best_runs: 1500000
+  threshold_to_save_all_runs_ms: -1
+  running_speed: 512
+  force_window_focus_on_input: false
+
+inputs:
+  actions:
+    - {left: false, right: false, accelerate: true, brake: false}
+    - {left: true, right: false, accelerate: true, brake: false}
+    - {left: false, right: true, accelerate: true, brake: false}
+    - {left: false, right: false, accelerate: false, brake: false}
+    - {left: true, right: false, accelerate: false, brake: false}
+    - {left: false, right: true, accelerate: false, brake: false}
+    - {left: false, right: false, accelerate: false, brake: true}
+    - {left: true, right: false, accelerate: false, brake: true}
+    - {left: false, right: true, accelerate: false, brake: true}
+    - {left: false, right: false, accelerate: true, brake: true}
+    - {left: true, right: false, accelerate: true, brake: true}
+    - {left: false, right: true, accelerate: true, brake: true}
+  action_forward_idx: 0
+  action_backward_idx: 6
+
+state_normalization:
+  waypoint_mean_40cp:
+    - 0.0
+    - -2.1
+    - -0.2
+    - 0.0
+    - -2.2
+    - 9.5
+    - 0.0
+    - -2.2
+    - 19.1
+    - 0.0
+    - -2.2
+    - 28.5
+    - 0.0
+    - -2.2
+    - 37.7
+    - 0.0
+    - -2.1
+    - 46.6
+    - 0.0
+    - -2.0
+    - 55.2
+    - 0.0
+    - -1.8
+    - 63.5
+    - 0.0
+    - -1.5
+    - 71.4
+    - 0.0
+    - -1.3
+    - 78.9
+    - 0.0
+    - -1.0
+    - 86.2
+    - 0.0
+    - -0.7
+    - 93.1
+    - 0.0
+    - -0.4
+    - 99.8
+    - 0.0
+    - 0.0
+    - 106.0
+    - 0.0
+    - 0.3
+    - 112.0
+    - 0.0
+    - 0.7
+    - 118.0
+    - 0.0
+    - 1.1
+    - 124.0
+    - 0.0
+    - 1.6
+    - 129.0
+    - 0.0
+    - 2.1
+    - 134.0
+    - 0.0
+    - 2.6
+    - 139.0
+    - 0.0
+    - 3.1
+    - 143.0
+    - 0.0
+    - 3.7
+    - 148.0
+    - 0.0
+    - 4.2
+    - 152.0
+    - 0.0
+    - 4.8
+    - 156.0
+    - 0.0
+    - 5.3
+    - 160.0
+    - 0.0
+    - 5.8
+    - 164.0
+    - 0.0
+    - 6.4
+    - 167.0
+    - 0.0
+    - 6.9
+    - 171.0
+    - 0.0
+    - 7.4
+    - 174.0
+    - 0.0
+    - 7.8
+    - 177.0
+    - 0.0
+    - 8.3
+    - 180.0
+    - 0.0
+    - 8.7
+    - 182.0
+    - 0.0
+    - 9.1
+    - 185.0
+    - 0.0
+    - 9.5
+    - 187.0
+    - 0.0
+    - 9.9
+    - 189.0
+    - 0.0
+    - 10.2
+    - 191.0
+    - 0.0
+    - 10.6
+    - 193.0
+    - 0.0
+    - 10.9
+    - 194.0
+    - 0.0
+    - 11.2
+    - 196.0
+    - 0.0
+    - 11.5
+    - 197.0
+  waypoint_std_40cp:
+    - 7.7
+    - 7.7
+    - 2.9
+    - 7.8
+    - 7.8
+    - 3.3
+    - 8.3
+    - 8.3
+    - 4.1
+    - 9.5
+    - 9.5
+    - 5.1
+    - 11.5
+    - 11.5
+    - 6.4
+    - 14.3
+    - 14.3
+    - 7.9
+    - 17.8
+    - 17.8
+    - 9.7
+    - 21.9
+    - 21.9
+    - 11.7
+    - 26.3
+    - 26.3
+    - 14.2
+    - 31.1
+    - 31.1
+    - 17.0
+    - 36.1
+    - 36.1
+    - 20.1
+    - 41.3
+    - 41.3
+    - 23.5
+    - 46.6
+    - 46.6
+    - 27.2
+    - 52.0
+    - 52.0
+    - 31.1
+    - 57.4
+    - 57.4
+    - 35.2
+    - 63.0
+    - 63.0
+    - 39.4
+    - 68.5
+    - 68.5
+    - 43.7
+    - 74.2
+    - 74.2
+    - 48.1
+    - 79.9
+    - 79.9
+    - 52.5
+    - 85.6
+    - 85.6
+    - 57.0
+    - 91.4
+    - 91.4
+    - 61.4
+    - 97.2
+    - 97.2
+    - 65.8
+    - 103.0
+    - 103.0
+    - 70.2
+    - 109.0
+    - 109.0
+    - 74.6
+    - 115.0
+    - 115.0
+    - 79.1
+    - 121.0
+    - 121.0
+    - 83.5
+    - 127.0
+    - 127.0
+    - 88.0
+    - 132.0
+    - 132.0
+    - 92.6
+    - 138.0
+    - 138.0
+    - 97.2
+    - 144.0
+    - 144.0
+    - 102.0
+    - 149.0
+    - 149.0
+    - 107.0
+    - 155.0
+    - 155.0
+    - 112.0
+    - 160.0
+    - 160.0
+    - 117.0
+    - 166.0
+    - 166.0
+    - 121.0
+    - 171.0
+    - 171.0
+    - 126.0
+    - 176.0
+    - 176.0
+    - 131.0
+    - 182.0
+    - 182.0
+    - 136.0
+    - 187.0
+    - 187.0
+    - 141.0
+    - 192.0
+    - 192.0
+    - 146.0
+    - 198.0
+    - 198.0
+    - 151.0

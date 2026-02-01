@@ -54,53 +54,32 @@ Run the following command:
 Edit the configuration file
 ---------------------------
 
-Configuration is now organized in separate modules for better maintainability. To train on a new map:
+Configuration is loaded from a YAML file. To train on a new map, edit the config YAML (e.g. ``config_files/config_default.yaml``):
 
-**1. Edit map_cycle_config.py**
+**1. Edit the map_cycle section**
 
-Open ``config_files/map_cycle_config.py`` in a text editor. This file contains the map training cycle.
+Find the ``map_cycle`` section with ``entries``. Each entry defines a map with:
 
-Find where the variable ``map_cycle`` is defined. Read the comment that describes how a map_cycle is defined. Edit the map_cycle so that the AI trains on A02-Race.
+- **short_name**: for logging (e.g. "A02")
+- **map_path**: map file name as in TMInterface (e.g. "A02-Race.Challenge.Gbx")
+- **reference_line_path**: path to the ``.npy`` file in maps/ (e.g. "A02_0.5m_cl.npy")
+- **is_exploration**: whether to use exploration (true) or evaluation (false)
+- **fill_buffer**: whether to add experiences to the replay buffer
+- **repeat**: how many times to repeat this entry
 
-.. code-block:: python
+Example for A02-Race (4 exploration + 1 evaluation):
 
-    """
-    Map cycle defines the training sequence.
-    
-    Each iterator returns tuples with:
-        - short map name        (string):     for logging purposes
-        - map path              (string):     to automatically load the map in game.
-                                              This is the same map name as the "map" command in the TMInterface console.
-        - reference line path   (string):     where to find the reference line for this map (in maps/ folder)
-        - is_explo              (boolean):    whether the policy should be exploratory on this map
-        - fill_buffer           (boolean):    whether the memories should be placed in the replay buffer
-    
-    Example: Simple cycle with 4 exploration runs + 1 evaluation run
-    
-    map_cycle = [
-        repeat(("A02", '"A02-Race.Challenge.Gbx"', "A02_0.5m_cl.npy", True, True), 4),
-        repeat(("A02", '"A02-Race.Challenge.Gbx"', "A02_0.5m_cl.npy", False, True), 1),
-    ]
-    """
+.. code-block:: yaml
+
+    map_cycle:
+      entries:
+        - {short_name: A02, map_path: "A02-Race.Challenge.Gbx", reference_line_path: "A02_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 4}
+        - {short_name: A02, map_path: "A02-Race.Challenge.Gbx", reference_line_path: "A02_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 
 **2. Adjust training schedule (optional)**
 
-Open ``config_files/training_config.py``.
-
-Locate the variable ``global_schedule_speed``. For easier maps like A02-Race, you can use a faster annealing schedule:
-
-.. code-block:: python
-
-    global_schedule_speed = 0.8
-
-For harder maps like `map5 <https://tmnf.exchange/trackshow/10460245>`_ or E03-Endurance, use a slower schedule (e.g., 1.5).
+In the ``training`` section, set ``global_schedule_speed``. For easier maps like A02-Race, use a faster schedule (e.g. 0.8). For harder maps like `map5 <https://tmnf.exchange/trackshow/10460245>`_ or E03-Endurance, use a slower schedule (e.g. 1.5).
 
 **3. Update run name (optional)**
 
-In ``config_files/training_config.py``, change the run name to identify this experiment:
-
-.. code-block:: python
-
-    run_name = "A02_training"
-
-This affects tensorboard logs and save file locations.
+In the ``training`` section, change ``run_name`` (e.g. ``"A02_training"``) to identify this experiment. This affects tensorboard logs and save file locations.

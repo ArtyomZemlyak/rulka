@@ -32,7 +32,7 @@ Nadeo.ini
 /imagenet_sample_160p
 *.lnk
 .stignore*
-config_files/config_copy.py
+.env
 
 # Documentation build artifacts
 /docs/build/

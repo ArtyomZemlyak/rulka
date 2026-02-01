@@ -14,3 +14,4 @@ Contents
    training_speed
    temporal_mini_race_duration
    exploration
+   models/iqn

@@ -97,7 +97,7 @@ A: Optimization checklist:
 2. Increase ``running_speed`` to 160-200x
 3. Lower game resolution and graphics quality
 4. Reduce ``batch_size`` for more frequent updates
-5. Disable visualization options in ``performance_config.py``
+5. Disable visualization options in the ``performance`` section of the config YAML
 6. Close unnecessary background applications
 
 Training
@@ -115,28 +115,28 @@ A: Common causes and fixes:
 
 **Q: Can I train on multiple maps simultaneously?**
 
-A: Yes! Edit ``map_cycle_config.py`` to alternate between maps:
+A: Yes! Edit the ``map_cycle.entries`` section in your config YAML to alternate between maps:
 
-.. code-block:: python
+.. code-block:: yaml
 
-    map_cycle = [
-        repeat(("map1", "Map1.Gbx", "map1_0.5m_cl.npy", True, True), 4),
-        repeat(("map2", "Map2.Gbx", "map2_0.5m_cl.npy", True, True), 4),
-    ]
+    map_cycle:
+      entries:
+        - {short_name: map1, map_path: "Map1.Gbx", reference_line_path: "map1_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 4}
+        - {short_name: map2, map_path: "Map2.Gbx", reference_line_path: "map2_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 4}
 
 **Q: How do I resume training from a checkpoint?**
 
 A: Checkpoints are saved automatically in ``save/{run_name}/``. To resume:
 
 1. Ensure ``.torch`` files exist in ``save/{run_name}/``
-2. Keep the same ``run_name`` in ``training_config.py``
-3. Run ``python scripts/train.py``
+2. Keep the same ``run_name`` in the ``training`` section of your config
+3. Run ``python scripts/train.py --config config_files/config_default.yaml``
 
 Training will load the checkpoint automatically.
 
 **Q: Can I change hyperparameters during training?**
 
-A: Yes! Edit ``config_files/config_copy.py`` (not ``config.py``) and save. Changes apply at next reload interval (every few minutes) without losing the replay buffer.
+A: Config is loaded once at startup. To change parameters you must edit the YAML file and restart training. A snapshot of the config used for each run is saved in ``save/{run_name}/config_snapshot.yaml``.
 
 ⚠️ **Don't change**: Network architecture, input dimensions, action space - these require restart.
 
@@ -160,7 +160,7 @@ A:
 2. Place replay in ``Documents/TrackMania/Tracks/Replays/``
 3. Run: ``python scripts/tools/gbx_to_vcp.py "path/to/replay.Replay.Gbx"``
 4. VCP file is saved to ``maps/`` folder (e.g., ``MapName_0.5m_cl.npy``)
-5. Update ``map_cycle_config.py`` to reference the new VCP file
+5. Update the ``map_cycle.entries`` in your config YAML to reference the new VCP file
 
 **Q: Does the reference line need to be fast?**
 
@@ -367,16 +367,16 @@ A: TMNF account must be an **online account**. Create one through the game launc
 
 A: Reduce memory usage:
 
-- Decrease ``batch_size`` in ``training_config.py``
-- Decrease ``memory_size_schedule`` in ``memory_config.py``
-- Reduce ``gpu_collectors_count`` in ``performance_config.py``
-- Lower image resolution in ``environment_config.py``
+- Decrease ``batch_size`` in the ``training`` section
+- Decrease ``memory_size_schedule`` in the ``memory`` section
+- Reduce ``gpu_collectors_count`` in the ``performance`` section
+- Lower image resolution (``w_downsized``, ``h_downsized``) in the ``neural_network`` section
 
 **Q: Game crashes / TMInterface connection lost**
 
 A: Common fixes:
 
-- Increase ``timeout_during_run_ms`` in ``environment_config.py``
+- Increase ``timeout_during_run_ms`` in the ``environment`` section
 - Reduce ``running_speed`` (< 200x)
 - Check TMLoader profile is correctly configured
 - Verify no firewall blocking TMInterface

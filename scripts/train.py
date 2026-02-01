@@ -1,47 +1,35 @@
 # =======================================================================================================================
-# Handle configuration file before running the actual content of train.py
+# Train TrackMania RL agent. Configuration from YAML file (--config).
 # =======================================================================================================================
-"""
-Two files named "config.py" and "config_copy.py" coexist in the same folder.
+# Config MUST be loaded before any trackmania_rl imports (iqn etc need get_config at import time)
 
-At the beginning of training, parameters are copied from config.py to config_copy.py
-During training, config_copy.py will be reloaded at regular time intervals.
-config_copy.py is NOT tracked with git, as it is essentially a temporary file.
-
-Training parameters modifications made during training in config_copy.py will be applied on the fly
-without losing the existing content of the replay buffer.
-
-The content of config.py may be modified after starting a run: it will have no effect on the ongoing run.
-This setup provides the possibility to:
-  1) Modify training parameters on the fly
-  2) Continue to code, use git, and modify config.py without impacting an ongoing run.
-"""
-
-import shutil
-from pathlib import Path
-
-
-def copy_configuration_file():
-    base_dir = Path(__file__).resolve().parents[1]
-    shutil.copyfile(
-        base_dir / "config_files" / "config.py",
-        base_dir / "config_files" / "config_copy.py",
-    )
-
-
-if __name__ == "__main__":
-    copy_configuration_file()
-
-# =======================================================================================================================
-# Actual start of train.py, after copying config.py
-# =======================================================================================================================
-
+import argparse
 import ctypes
 import os
 import random
+import shutil
 import signal
 import sys
 import time
+from pathlib import Path
+
+# Parse args and load config first
+parser = argparse.ArgumentParser(description="Train TrackMania RL agent")
+parser.add_argument(
+    "--config",
+    type=str,
+    default="config_files/config_default.yaml",
+    help="Path to YAML config file",
+)
+args = parser.parse_args()
+base_dir = Path(__file__).resolve().parents[1]
+config_path = base_dir / args.config
+if not config_path.is_file():
+    print(f"ERROR: Config file not found: {config_path}")
+    sys.exit(1)
+
+from config_files.config_loader import load_config, set_config, get_config
+set_config(load_config(config_path))
 
 import numpy as np
 import torch
@@ -49,7 +37,6 @@ import torch.multiprocessing as mp
 from art import tprint
 from torch.multiprocessing import Lock
 
-from config_files import config_copy
 from trackmania_rl.agents.iqn import make_untrained_iqn_network
 from trackmania_rl.multiprocess.collector_process import collector_process_fn
 from trackmania_rl.multiprocess.learner_process import learner_process_fn
@@ -61,6 +48,7 @@ torch.set_num_threads(1)
 torch.set_float32_matmul_precision("high")
 random_seed = 444
 set_random_seed(random_seed)
+
 
 def signal_handler(sig, frame):
     print("Received SIGINT signal. Killing all open Trackmania instances.")
@@ -74,55 +62,68 @@ def signal_handler(sig, frame):
 
 
 def clear_tm_instances():
-    if config_copy.is_linux:
+    config = get_config()
+    if config.is_linux:
         os.system("pkill -9 TmForever.exe")
     else:
         os.system("taskkill /F /IM TmForever.exe")
 
 
 if __name__ == "__main__":
+    config = get_config()  # Already loaded above
+
     signal.signal(signal.SIGINT, signal_handler)
 
     clear_tm_instances()
 
-    base_dir = Path(__file__).resolve().parents[1]
-    save_dir = base_dir / "save" / config_copy.run_name
+    save_dir = Path(base_dir) / "save" / config.run_name
     save_dir.mkdir(parents=True, exist_ok=True)
-    tensorboard_base_dir = base_dir / "tensorboard"
+
+    # Save config snapshot to experiment folder
+    shutil.copy(config_path, save_dir / "config_snapshot.yaml")
+
+    tensorboard_base_dir = Path(base_dir) / "tensorboard"
 
     # Copy Angelscript plugin to TMInterface dir
     shutil.copyfile(
-        base_dir / "trackmania_rl" / "tmi_interaction" / "Python_Link.as",
-        config_copy.target_python_link_path,
+        Path(base_dir) / "trackmania_rl" / "tmi_interaction" / "Python_Link.as",
+        config.target_python_link_path,
     )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     tprint("Rulka", font="tarty1")
-    print("="*80)
-    print(f"  Run name: {config_copy.run_name}")
-    print(f"  GPU collectors: {config_copy.gpu_collectors_count}")
-    print(f"  Base TMI port: {config_copy.base_tmi_port}")
+    print("=" * 80)
+    print(f"  Run name: {config.run_name}")
+    print(f"  GPU collectors: {config.gpu_collectors_count}")
+    print(f"  Base TMI port: {config.base_tmi_port}")
     print(f"  Save directory: {save_dir}")
-    print("="*80)
+    print(f"  Config: {config_path}")
+    print("=" * 80)
     print("\n[INFO] Starting training...\n")
 
-    if config_copy.is_linux:
-        os.system(f"chmod +x {config_copy.linux_launch_game_path}")
+    if config.is_linux:
+        os.system(f"chmod +x {config.linux_launch_game_path}")
 
     # Prepare multi process utilities
     shared_steps = mp.Value(ctypes.c_int64)
     shared_steps.value = 0
-    rollout_queues = [mp.Queue(config_copy.max_rollout_queue_size) for _ in range(config_copy.gpu_collectors_count)]
+    rollout_queues = [
+        mp.Queue(config.max_rollout_queue_size)
+        for _ in range(config.gpu_collectors_count)
+    ]
     shared_network_lock = Lock()
     game_spawning_lock = Lock()
-    _, uncompiled_shared_network = make_untrained_iqn_network(jit=config_copy.use_jit, is_inference=False)
+    _, uncompiled_shared_network = make_untrained_iqn_network(
+        jit=config.use_jit, is_inference=False
+    )
     uncompiled_shared_network.share_memory()
 
-    # Start worker process
+    # Start worker processes (each loads config from config_path)
     collector_processes = [
         mp.Process(
             target=collector_process_fn,
             args=(
+                config_path,
                 rollout_queue,
                 uncompiled_shared_network,
                 shared_network_lock,
@@ -130,19 +131,27 @@ if __name__ == "__main__":
                 shared_steps,
                 base_dir,
                 save_dir,
-                config_copy.base_tmi_port + process_number,
+                config.base_tmi_port + process_number,
                 process_number,
             ),
         )
-        for rollout_queue, process_number in zip(rollout_queues, range(config_copy.gpu_collectors_count))
+        for rollout_queue, process_number in zip(
+            rollout_queues, range(config.gpu_collectors_count)
+        )
     ]
     for collector_process in collector_processes:
         collector_process.start()
 
-    # Start learner process
+    # Start learner process (runs in main process, config already set)
     learner_process_fn(
-        rollout_queues, uncompiled_shared_network, shared_network_lock, shared_steps, base_dir, save_dir, tensorboard_base_dir
-    )  # Turn main process into learner process instead of starting a new one, this saves 1 CUDA context
+        rollout_queues,
+        uncompiled_shared_network,
+        shared_network_lock,
+        shared_steps,
+        Path(base_dir),
+        save_dir,
+        tensorboard_base_dir,
+    )
 
     for collector_process in collector_processes:
         collector_process.join()

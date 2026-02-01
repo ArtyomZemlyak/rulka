@@ -85,8 +85,8 @@ A:
 
 .. code-block:: bash
 
-    # Check configuration
-    python scripts/check_config.py
+    # Verify config loads (from project root)
+    python -c "from config_files.config_loader import load_config; c = load_config('config_files/config_default.yaml'); print('Config OK')"
     python scripts/check_plugin.py
 
     # Verify packages
@@ -105,24 +105,14 @@ Configuration Development
 
 A:
 
-1. Add parameter to appropriate module (e.g., ``training_config.py``)
-2. Add inline comment explaining the parameter
+1. Add the parameter to the appropriate Pydantic model in ``config_files/config_schema.py``
+2. Add it to the corresponding section in ``config_files/config_default.yaml``
 3. Update ``docs/source/configuration_guide.rst`` with full documentation
-4. Test with ``python scripts/check_config.py``
-
-Example:
-
-.. code-block:: python
-
-    # In training_config.py
-    
-    # Optimizer settings
-    batch_size = 512              # Number of transitions per training step
-    adam_epsilon = 1e-4          # Adam epsilon for numerical stability
+4. Verify with: ``python -c "from config_files.config_loader import load_config; load_config('config_files/config_default.yaml')"``
 
 **Q: Can I modify config during training?**
 
-A: Yes! Edit ``config_files/config_copy.py`` (not ``config.py``) during training. Changes apply automatically without restart.
+A: Config is loaded once at startup. To change parameters, edit the YAML file and restart training. A snapshot is saved in ``save/{run_name}/config_snapshot.yaml``.
 
 .. warning::
    Don't change network architecture, input dimensions, or action space - these require restart.
@@ -188,7 +178,7 @@ A:
 A: Checklist:
 
 1. Verify TMInterface is running
-2. Check port in ``user_config.py`` (default 8478)
+2. Check port in ``.env`` (``BASE_TMI_PORT``, default 8478)
 3. Ensure ``Python_Link.as`` is copied to ``TMInterface/Plugins/``
 4. Check TMLoader profile includes TMInterface
 
@@ -199,18 +189,18 @@ Performance
 
 A:
 
-- Increase ``gpu_collectors_count`` in ``performance_config.py``
+- Increase ``gpu_collectors_count`` in the ``performance`` section
 - Increase ``running_speed`` (up to 200x)
-- Reduce image resolution in ``environment_config.py``
-- Disable visualization in ``performance_config.py``
+- Reduce image resolution (``w_downsized``, ``h_downsized``) in the ``neural_network`` section
+- Disable visualization in the ``performance`` section
 
 **Q: How can I reduce memory usage?**
 
 A:
 
-- Reduce ``memory_size_schedule`` in ``memory_config.py``
-- Reduce ``batch_size`` in ``training_config.py``
-- Reduce ``gpu_collectors_count``
+- Reduce ``memory_size_schedule`` in the ``memory`` section
+- Reduce ``batch_size`` in the ``training`` section
+- Reduce ``gpu_collectors_count`` in the ``performance`` section
 
 Virtual Checkpoints
 ===================
@@ -226,7 +216,7 @@ A:
     python scripts/tools/gbx_to_vcp.py "path/to/replay.Replay.Gbx"
 
     # 3. File is saved to maps/ folder
-    # 4. Update map_cycle_config.py to use new VCP file
+    # 4. Update map_cycle.entries in config YAML to use new VCP file
 
 **Q: What's the format of VCP files?**
 
@@ -245,16 +235,17 @@ A:
   - ``multiprocess/`` - Parallel training (collector & learner processes)
   - ``tmi_interaction/`` - Game interface (TMInterface communication)
 
-- ``config_files/`` - Modular configuration (8 modules)
+- ``config_files/`` - YAML configuration (config_default.yaml, config_schema.py, config_loader.py)
 - ``scripts/`` - Training script and tools
 
-**Q: What's the difference between config.py and config_copy.py?**
+**Q: How is configuration structured?**
 
 A:
 
-- ``config.py`` - Original configuration, tracked in git
-- ``config_copy.py`` - Copy created at training start, can be edited during training for hot-reload
-- Modifications to ``config_copy.py`` apply automatically without losing replay buffer
+- Configuration is loaded from a YAML file (e.g. ``config_files/config_default.yaml``) at startup via ``train.py --config <path>``
+- Use ``from config_files.config_loader import get_config`` and ``get_config().<attribute>`` to access settings in code
+- User-specific settings (paths, username) come from ``.env`` in the project root
+- A snapshot of the config used for each run is saved in ``save/{run_name}/config_snapshot.yaml``
 
 Build System
 ============

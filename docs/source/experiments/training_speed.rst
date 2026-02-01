@@ -146,11 +146,11 @@ Full interpretation and “what to watch for” for all metrics: ``docs/source/t
 Configuration Changes
 ----------------------
 
-**Training** (``config_files/training_config.py``): batch_size was varied (2048 baseline, 8192 in uni_6, 512 in uni_7, smaller in uni_8/uni_9). **Recommended:** 512.
+**Training** (``training`` section): batch_size was varied (2048 baseline, 8192 in uni_6, 512 in uni_7, smaller in uni_8/uni_9). **Recommended:** 512.
 
-**Performance** (``config_files/performance_config.py``): running_speed was varied (160 baseline, 512 in uni_7, higher in uni_8/uni_9). **Recommended:** 512. **gpu_collectors_count**: uni_10 used 4 with same 512/512 — throughput and GPU % drop; for maximum training speed keep 8.
+**Performance** (``performance`` section): running_speed was varied (160 baseline, 512 in uni_7, higher in uni_8/uni_9). **Recommended:** 512. **gpu_collectors_count**: uni_10 used 4 with same 512/512 — throughput and GPU % drop; for maximum training speed keep 8.
 
-**Map cycle** (``config_files/map_cycle_config.py``): uni_7 used **4 hock – 4 A01** (+ 1 eval on A01 at the end); uni_11 **256 hock – 256 A01**; uni_12 **64 hock – 64 A01** (+ 1 eval on A01 at the end). Same batch/speed as uni_7. By relative time **uni_12 (64–64)** converges faster and gives equal or better A01, loss, and Q over the common 55 min window than uni_7; clearly better than uni_11. **Recommended:** 64–64.
+**Map cycle** (``map_cycle`` section): uni_7 used **4 hock – 4 A01** (+ 1 eval on A01 at the end); uni_11 **256 hock – 256 A01**; uni_12 **64 hock – 64 A01** (+ 1 eval on A01 at the end). Same batch/speed as uni_7. By relative time **uni_12 (64–64)** converges faster and gives equal or better A01, loss, and Q over the common 55 min window than uni_7; clearly better than uni_11. **Recommended:** 64–64.
 
 .. code-block:: python
 

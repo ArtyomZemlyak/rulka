@@ -130,7 +130,7 @@ Create an **online account** in TrackMania (offline accounts are not supported b
 **2. Configure TMLoader**
 
 - Launch TMLoader
-- Create a profile named ``default`` (or use a custom name - update ``user_config.py`` accordingly)
+- Create a profile named ``default`` (or use a custom name - set ``WINDOWS_TMLOADER_PROFILE_NAME`` in ``.env`` accordingly)
 - Enable TMInterface in the profile
 
 **3. Copy Python_Link.as plugin**
@@ -157,32 +157,20 @@ On Linux:
 User config
 -----------
 
-Open the file ``config_files/user_config.py`` and make modifications relevant to your system:
+Create a ``.env`` file in the project root with machine-specific settings. The file is not tracked in git. Example:
 
-.. code-block:: python
+.. code-block:: bash
 
-    username = "tmnf_account_username"  # Username of your ONLINE TMNF account
+    # Username of your ONLINE TMNF account (required)
+    USERNAME=tmnf_account_username
 
-    # Path where Python_Link.as should be placed so that it can be loaded in TMInterface.
-    # Usually Path(os.path.expanduser("~")) / "Documents" / "TMInterface" / "Plugins" / "Python_Link.as"
-    target_python_link_path = Path(os.path.expanduser("~")) / "Documents" / "TMInterface" / "Plugins" / "Python_Link.as"
-
-    # Typically Path(os.path.expanduser("~")) / "Documents" / "TrackMania"
-    trackmania_base_path = Path(os.path.expanduser("~")) / "Documents" / "TrackMania"
-
-    # Communication port for the first TMInterface instance that will be launched.
-    # If using multiple instances, the ports used will be base_tmi_port + 1, +2, +3, etc...
-    base_tmi_port = 8478
-
-    # If on Linux, path of a shell script that launches the game, with the TMInterface port as first argument
-    linux_launch_game_path = "path_to_be_filled_only_if_on_linux"
-
-    # If on Windows, path where TMLoader can be found.
-    # Usually Path(os.path.expanduser("~")) / "AppData" / "Local" / "TMLoader" / "TMLoader.exe"
-    windows_TMLoader_path = Path(os.path.expanduser("~")) / "AppData" / "Local" / "TMLoader" / "TMLoader.exe"
-
-    # If on Windows, name of the TMLoader profile that will launch TmForever + TMInterface
-    windows_TMLoader_profile_name = "default"
+    # Optional overrides (defaults shown):
+    # BASE_TMI_PORT=8478
+    # TRACKMANIA_BASE_PATH=%USERPROFILE%/Documents/TrackMania
+    # TARGET_PYTHON_LINK_PATH=%USERPROFILE%/Documents/TMInterface/Plugins/Python_Link.as
+    # WINDOWS_TMLOADER_PATH=%LOCALAPPDATA%/TMLoader/TMLoader.exe
+    # WINDOWS_TMLOADER_PROFILE_NAME=default
+    # Linux only: LINUX_LAUNCH_GAME_PATH=path_to_be_filled_only_if_on_linux
 
 .. warning::
    **Important:** Map files and replay files must NOT be stored in OneDrive or other cloud storage directories. 
