@@ -23,12 +23,13 @@ When creating or updating an experiment page, ensure it has:
 
 1. **Experiment Overview** — what was tested, hypothesis/goal, key parameters changed  
 2. **Results** — key findings (bullet points), main conclusions  
-3. **Run Analysis** — list of runs compared, baseline vs experimental; **durations (relative time)** per run  
-4. **Detailed TensorBoard Metrics Analysis** — by **relative time** and by **steps** (see below); not only “last value” when durations differ  
-5. **Configuration Changes** — training section, performance section in config YAML, etc.  
-6. **Hardware** — GPU, parallel instances, system  
-7. **Conclusions** — what worked/didn’t, root causes, trade-offs  
-8. **Recommendations** — optimal settings, when to change, analysis tools  
+3. **Comparison plots** (optional but recommended) — JPG graphs: one metric per graph, runs as lines; generate with ``scripts/plot_experiment_comparison.py`` or ``scripts/generate_experiment_plots.py``; embed with ``.. image:: ../_static/<prefix>_<metric>.jpg`` (or ``../../_static/`` from ``experiments/models/``). See "Comparison plots (JPG)" below.  
+4. **Run Analysis** — list of runs compared, baseline vs experimental; **durations (relative time)** per run  
+5. **Detailed TensorBoard Metrics Analysis** — by **relative time** and by **steps** (see below); not only “last value” when durations differ  
+6. **Configuration Changes** — training section, performance section in config YAML, etc.  
+7. **Hardware** — GPU, parallel instances, system  
+8. **Conclusions** — what worked/didn’t, root causes, trade-offs  
+9. **Recommendations** — optimal settings, when to change, analysis tools  
 
 ---
 
@@ -37,7 +38,7 @@ When creating or updating an experiment page, ensure it has:
 **Experiments often run for different wall-clock times.** Comparing only “last value” or “final loss at step N” across runs is **invalid** when one run lasted 80 min and another 160 min.
 
 - **Compare by relative time** — minutes from run start. Use checkpoints 5, 10, 15, 20, … min; compare only up to when the **shortest** of the compared runs is still going.
-- **Script:** ``scripts/analyze_experiment_by_relative_time.py``. Primary tool; supports **2+ runs** (e.g. ``uni_5 uni_7`` or ``uni_12 uni_13 uni_14``).
+- **Script:** ``scripts/analyze_experiment_by_relative_time.py``. Primary tool; supports **2+ runs** (e.g. ``uni_5 uni_7`` or ``uni_12 uni_13 uni_14``). With ``--plot`` and ``--output-dir`` it also saves **comparison plots as JPG** (one metric per graph, multiple runs as lines; see "Comparison plots" below).
 - **At each checkpoint:**
   - **Race times (preferred):** per-race events ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` — script prints **best / mean / std**, best among finished, **finish rate**, **first finish** (one run-wide t0 per run). Use these tables for dynamics and stability.
   - **Scalar race times:** ``alltime_min_ms_{map}`` = best so far at that moment (for runs before learner_process fix, prefer per-race tables; scalar may be wrong).
@@ -60,7 +61,20 @@ When creating or updating an experiment page, ensure it has:
 - **Command:**  
   ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 50000]``  
   Use when runs had different lengths or when you care about "same wall-clock" and "same steps". Output: (1) per-race and scalar tables by **min**, then (2) same by **step** (BY STEP section).
+- **With plots:** add ``--plot --output-dir docs/source/_static --prefix exp_<name>_<runs>`` to save JPG comparison graphs (one metric per file, runs as lines). Example: ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_15 --plot --output-dir docs/source/_static --prefix exp_exploration_uni12_uni15``.
 - **Optional:** ``python scripts/analyze_experiment.py <run1> <run2> ...`` for last-value-only comparison (less meaningful when durations differ).
+
+---
+
+## Comparison plots (JPG)
+
+**Rule:** One graph = **one metric** (e.g. loss vs time, or A01 best vs time); **multiple runs** = multiple lines on the same graph. Plots are saved as **compressed JPG** to keep repo size small.
+
+- **Single comparison:** ``python scripts/plot_experiment_comparison.py <run1> <run2> [--prefix exp_<name>] [--output-dir docs/source/_static]`` — builds graphs from TensorBoard data, saves JPG. Use ``--by-step`` to also generate by-step plots.
+- **All documented experiments:** ``python scripts/generate_experiment_plots.py`` — runs plot for every experiment in ``EXPERIMENTS`` (exploration, temporal_mini_race_duration, training_speed sets, iqn pairs). Default output: ``docs/source/_static``. Use ``--experiments exploration temporal_mini_race_duration`` to limit.
+- **Embed in RST:** From ``docs/source/experiments/<file>.rst`` use ``.. image:: ../_static/<prefix>_<metric>.jpg``; from ``docs/source/experiments/models/<file>.rst`` use ``.. image:: ../../_static/<prefix>_<metric>.jpg``. Metric names: e.g. ``A01_best``, ``hock_best``, ``loss``, ``avg_q``, ``training_pct`` (from race tags and scalar keys).
+- **Generate before building docs:** Run ``generate_experiment_plots.py`` (with TensorBoard logs present) so that ``_static/*.jpg`` exist. **Commit the generated JPG files** to the repo so the built docs include the plots; TensorBoard logs and ``save/`` are not committed, but the plot images are.
+- **Run script:** Use the project venv. If PowerShell blocks ``.\.venv\Scripts\Activate.ps1``, run directly: ``.venv\Scripts\python.exe scripts/generate_experiment_plots.py`` (Windows) or ``.venv/bin/python scripts/generate_experiment_plots.py`` (Unix).
 
 ---
 
@@ -259,6 +273,9 @@ When you **only update** an existing file (e.g. training_speed.rst), do **not** 
 | Purpose | Command |
 |--------|--------|
 | **Compare by relative time and by steps** (primary when durations differ; 2+ runs) | ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 50000]`` — outputs both relative-time tables and BY STEP tables |
+| **Same + save comparison plots (JPG)** | Add ``--plot --output-dir docs/source/_static --prefix exp_<name>`` to the command above; one metric per graph, runs as lines |
+| **Build comparison plots only** (one metric per graph, runs as lines) | ``python scripts/plot_experiment_comparison.py <run1> <run2> [--prefix exp_<name>] [--output-dir docs/source/_static]`` — optional ``--by-step`` |
+| **Generate plots for all documented experiments** | ``python scripts/generate_experiment_plots.py`` (default output ``docs/source/_static``); ``--experiments exploration ...`` to limit |
 | Compare by last value only | ``python scripts/analyze_experiment.py <run1> <run2> ...`` |
 | Extract specific metrics | ``python scripts/extract_tensorboard_data.py --runs <run1> <run2> --metrics "Race/eval_race_time_robust_hock" "Training/loss"`` |
 | Batch-size–specific (legacy) | ``python scripts/analyze_batch_experiment.py`` |
@@ -283,7 +300,7 @@ When comparing, report these **at the same checkpoints** both by relative time (
 
 ## Common Pitfalls (for the agent)
 
-1. **Python/venv:** Use the project venv. Run ``.\.venv\Scripts\Activate.ps1`` (Windows) or ``source .venv/bin/activate`` (Unix) before any ``python scripts/...``.
+1. **Python/venv:** Use the project venv. Run ``.\.venv\Scripts\Activate.ps1`` (Windows) or ``source .venv/bin/activate`` (Unix) before any ``python scripts/...``. If PowerShell blocks script execution, run directly: ``.venv\Scripts\python.exe scripts/<script>.py`` (Windows).
 
 2. **PowerShell:** On Windows, ``cmd1 && cmd2`` often fails. Use ``cmd1; cmd2`` or run commands separately.
 
@@ -298,6 +315,8 @@ When comparing, report these **at the same checkpoints** both by relative time (
 7. **Language:** All experiment docs in ``docs/source/experiments/`` must be in **English**.
 
 8. **Unicode in scripts:** If you add or change scripts that print to the console on Windows, avoid characters like ``≈`` or ``—`` in output (cp1252 can fail). Use ``~`` and ``-`` instead.
+
+9. **Comparison plot JPGs:** After running ``generate_experiment_plots.py`` (with TensorBoard logs present), **commit** the new/updated ``docs/source/_static/exp_*.jpg`` files so the built docs show the graphs. TensorBoard and ``save/`` are not committed; the generated plot images are.
 
 ---
 
