@@ -42,7 +42,7 @@ You can add more YAML files (e.g. `config_uni18.yaml`) and pass them with `--con
 
 For detailed parameter descriptions, see:
 
-**📚 [Configuration Guide](../../docs/source/configuration_guide.rst)**
+**📚 [Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html)**
 
 Or build Sphinx docs:
 
@@ -103,6 +103,6 @@ Build docs: `cd docs && make html`
 
 ## Support
 
-- Documentation: [Configuration Guide](../../docs/source/configuration_guide.rst)
+- Documentation: [Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html)
 - Discord: [Join discussion](https://discord.gg/PvWYGkGKqd)
 - GitHub: [Report issues](https://github.com/ArtyomZemlyak/rulka)

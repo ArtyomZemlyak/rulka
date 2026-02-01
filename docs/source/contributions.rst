@@ -63,7 +63,7 @@ Documentation
 When contributing, please update relevant documentation:
 
 - Add docstrings to new code
-- Update ``docs/source/`` RST files for user-facing changes
+- Update RST files in ``docs/source/`` for user-facing changes (see `online docs <https://artyomzemlyak.github.io/rulka/>`_)
 - Update ``config_files/README.md`` for configuration changes
 - Update ``CHANGELOG.md`` for notable changes
 

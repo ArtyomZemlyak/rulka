@@ -61,11 +61,11 @@ The script ``analyze_experiment_by_relative_time.py`` supports **two or more run
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-Metrics below are from TensorBoard logs (``tensorboard\uni_<N>``). Baseline is uni_5 (2048 batch, 160 speed).
+Metrics below are from TensorBoard logs (``tensorboard\uni_<N>``). Baseline is uni_5 (2048 batch, 160 speed). The figures below show comparison plots (one metric per graph, runs as lines, by relative time) for the main comparisons.
 
 **Methodology — Relative time:** Experiments had different durations (see Run Analysis), so comparing by “last value” is invalid. Metrics are aligned by **relative time** — minutes from run start. Values are taken at checkpoints 5, 10, 15, 20, … min; comparison runs only until the shortest compared run is still going. Race times: use **per-race events** (script prints best/mean/std/finish rate at each checkpoint) or scalar ``alltime_min_ms_*`` (best so far at that moment). Loss / Q / GPU %: **last value at that moment**. Tables: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5]``.
 
-**Key metrics** (aligned with ``docs/source/tensorboard_metrics.rst``): Per-race: ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` (best/mean/std, finish rate). Scalars: ``alltime_min_ms_{map}``, ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``. Also: ``Performance/transitions_learned_per_second``, ``Gradients/norm_before_clip_max``. For interpretation see that file.
+**Key metrics** (aligned with :doc:`tensorboard_metrics`): Per-race: ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` (best/mean/std, finish rate). Scalars: ``alltime_min_ms_{map}``, ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``. Also: ``Performance/transitions_learned_per_second``, ``Gradients/norm_before_clip_max``. For interpretation see that file.
 
 Larger batch: uni_5 vs uni_6 (relative time, common window up to 160 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -84,6 +84,12 @@ Smaller batch + faster speed: uni_5 vs uni_7 (relative time, common window up to
 - **Training/loss**: at 85 min — uni_5 355, uni_7 77.72 → **much lower** in uni_7.
 - **RL/avg_Q_trained_A01**: at 85 min — uni_5 -0.60, uni_7 -0.41 → **better** in uni_7.
 - **Performance/learner_percentage_training**: ~53% uni_5, ~78% uni_7 → **+25%** for uni_7.
+
+.. image:: ../_static/exp_training_speed_uni5_uni7_A01_best.jpg
+   :alt: A01 best time by relative time (uni_5 vs uni_7)
+
+.. image:: ../_static/exp_training_speed_uni5_uni7_loss.jpg
+   :alt: Training loss by relative time (uni_5 vs uni_7)
 
 Over-tuning: uni_7 vs uni_8 vs uni_9 (relative time, common window up to 70 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -133,7 +139,13 @@ uni_12 — same batch_size 512 and running_speed 512 as uni_7, but map cycle **6
 
 **Conclusion for uni_12:** Over 55 min **uni_12 converges faster on A01** (24.85s by 20 min vs uni_7 by 40 min) and has **lower loss and better Q**. At 55 min uni_7 is slightly better on A01 (24.72s vs 24.85s) and Hock is close (61.94s vs 61.68s). Versus uni_11 (256–256), uni_12 is **clearly better** on A01 and convergence. **Recommendation:** Prefer **64 hock – 64 A01** over 4–4 and over 256–256 for this setup.
 
-Other metrics (from ``docs/source/tensorboard_metrics.rst``)
+.. image:: ../_static/exp_training_speed_uni7_uni12_A01_best.jpg
+   :alt: A01 best time by relative time (uni_7 vs uni_12)
+
+.. image:: ../_static/exp_training_speed_uni7_uni12_loss.jpg
+   :alt: Training loss by relative time (uni_7 vs uni_12)
+
+Other metrics (from :doc:`tensorboard_metrics`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When comparing batch/speed setups, also check in TensorBoard or via ``scripts/extract_tensorboard_data.py``:
@@ -141,7 +153,7 @@ When comparing batch/speed setups, also check in TensorBoard or via ``scripts/ex
 - **Performance/transitions_learned_per_second** — training throughput; higher is better; reflects efficiency of the pipeline.
 - **Gradients/norm_before_clip_max** — training stability; spikes >100 indicate gradient explosion; should stay relatively stable. Compare runs to ensure no setup introduces instability.
 
-Full interpretation and “what to watch for” for all metrics: ``docs/source/tensorboard_metrics.rst``.
+Full interpretation and “what to watch for” for all metrics: :doc:`tensorboard_metrics`.
 
 Configuration Changes
 ----------------------
@@ -206,4 +218,4 @@ Recommendations
 - **By relative time** (compare at the same minutes from start; **2+ runs**): ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 --interval 5`` or ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_6 uni_7 uni_10 uni_11 uni_12 --interval 5`` (``--logdir "<path>"`` if not from project root). Output: per-race tables (best/mean/std, finish rate, first finish) then scalar metrics.
 - By “last value” (less meaningful when durations differ): ``python scripts/analyze_experiment.py uni_5 uni_6 uni_7 ...``
 - ``scripts/extract_tensorboard_data.py`` — selective metrics (``Gradients/norm_before_clip_max``, ``Performance/transitions_learned_per_second``, etc.).
-- **Key metrics** (see ``docs/source/tensorboard_metrics.rst``): Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Gradients/norm_before_clip_max`` (stability).
+- **Key metrics** (see :doc:`tensorboard_metrics`): Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Gradients/norm_before_clip_max`` (stability).

@@ -38,7 +38,7 @@ TensorBoard logs: ``tensorboard\uni_12``, ``tensorboard\uni_15``. Reproduce: ``p
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time:** Metrics at checkpoints 5, 10, 15, …, 55 min; common window up to 55 min. Race times from per-race tables; loss/Q/GPU% = last value at that moment.
+**Methodology — Relative time:** Metrics at checkpoints 5, 10, 15, …, 55 min; common window up to 55 min. Race times from per-race tables; loss/Q/GPU% = last value at that moment. The figures below show one metric per graph (runs as lines, by relative time).
 
 A01 (per-race eval_race_time_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -47,12 +47,18 @@ A01 (per-race eval_race_time_trained_A01)
 - **uni_15**: at 10 min 33.98s; at 40 min 27.03s; at 55 min **26.73s**.
 - **uni_12** reaches best A01 by 20 min and is better at 55 min (24.85s vs 26.73s).
 
+.. image:: ../_static/exp_exploration_uni12_uni15_A01_best.jpg
+   :alt: A01 eval best time by relative time (uni_12 vs uni_15)
+
 Hock (per-race explo_race_time_trained_hock)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **uni_12**: at 20 min 69.61s; at 55 min **61.68s**.
 - **uni_15**: first finish at ~44 min (85.89s); at 55 min **83.75s**.
 - **uni_12** much better on Hock over the common window (61.68s vs 83.75s at 55 min).
+
+.. image:: ../_static/exp_exploration_uni12_uni15_hock_best.jpg
+   :alt: Hock explo best time by relative time (uni_12 vs uni_15)
 
 Training loss
 ~~~~~~~~~~~~~
@@ -61,12 +67,18 @@ Training loss
 - **uni_15**: at 55 min 144.12; higher through most of the window.
 - **uni_12** lower (better) at end of common window.
 
+.. image:: ../_static/exp_exploration_uni12_uni15_loss.jpg
+   :alt: Training loss by relative time (uni_12 vs uni_15)
+
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **uni_12**: at 20 min -0.83; at 55 min -0.71.
 - **uni_15**: at 55 min -1.27; more negative over the run.
 - **uni_12** better (less negative) at 55 min.
+
+.. image:: ../_static/exp_exploration_uni12_uni15_avg_q.jpg
+   :alt: Avg Q by relative time (uni_12 vs uni_15)
 
 GPU utilization (Performance/learner_percentage_training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -127,4 +139,4 @@ Recommendations
 **Analysis tools:**
 
 - **By relative time** (2+ runs): ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_15 --interval 5`` (``--logdir "<path>"`` if not from project root).
-- Key metrics: Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``alltime_min_ms_hock``, ``alltime_min_ms_A01``, ``Training/loss``, ``RL/avg_Q_trained_A01``, ``Performance/learner_percentage_training`` (see ``docs/source/tensorboard_metrics.rst``).
+- Key metrics: Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``alltime_min_ms_hock``, ``alltime_min_ms_A01``, ``Training/loss``, ``RL/avg_Q_trained_A01``, ``Performance/learner_percentage_training`` (see :doc:`tensorboard_metrics`).

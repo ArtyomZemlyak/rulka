@@ -52,7 +52,7 @@ Same as in ``training_speed``: the script uses **per-race events** (``Race/eval_
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time:** Metrics at checkpoints 5, 10, 15, …, 55 min; common window up to 55 min. Race times from per-race tables (Hock ~55–70 s, A01 ~24–25 s); loss/Q/GPU% = last value at that moment.
+**Methodology — Relative time:** Metrics at checkpoints 5, 10, 15, …, 55 min; common window up to 55 min. Race times from per-race tables (Hock ~55–70 s, A01 ~24–25 s); loss/Q/GPU% = last value at that moment. The figures below illustrate each metric (one graph per metric, runs as lines, by relative time).
 
 Hock (per-race explo_race_time_trained_hock)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -61,6 +61,9 @@ Hock (per-race explo_race_time_trained_hock)
 - **uni_13**: at 10 min 80.54s; at 15 min 83.92s; at 55 min **78.73s**.
 - **uni_12** reaches good Hock earlier and is better at 55 min (61.68s vs 78.73s).
 
+.. image:: ../_static/exp_temporal_uni12_uni13_uni14_hock_best.jpg
+   :alt: Hock explo best time by relative time (temporal duration experiment)
+
 A01 (per-race eval_race_time_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -68,12 +71,18 @@ A01 (per-race eval_race_time_trained_A01)
 - **uni_13**: at 55 min 26.87s (best in window).
 - **uni_12** better on A01: reaches 24.85s by 20 min; at 55 min uni_12 24.85s, uni_13 26.87s.
 
+.. image:: ../_static/exp_temporal_uni12_uni13_uni14_A01_best.jpg
+   :alt: A01 eval best time by relative time (temporal duration experiment)
+
 Training loss
 ~~~~~~~~~~~~~
 
 - **uni_12**: at 55 min 102.84.
 - **uni_13**: at 55 min 454.31; higher throughout the window.
 - **uni_12** much lower (better); uni_13 loss remains high over the common 55 min.
+
+.. image:: ../_static/exp_temporal_uni12_uni13_uni14_loss.jpg
+   :alt: Training loss by relative time (temporal duration experiment)
 
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -169,4 +178,4 @@ Recommendations
 **Analysis tools:**
 
 - **By relative time** (2+ runs): ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_13 uni_14 --interval 5`` (``--logdir "<path>"`` if not from project root). Output: per-race tables (best/mean/std, finish rate, first finish) then scalar metrics.
-- **Key metrics:** Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``alltime_min_ms_hock``, ``alltime_min_ms_A01``, ``Training/loss``, ``RL/avg_Q_trained_A01``, ``Performance/learner_percentage_training`` (see ``docs/source/tensorboard_metrics.rst``).
+- **Key metrics:** Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``alltime_min_ms_hock``, ``alltime_min_ms_A01``, ``Training/loss``, ``RL/avg_Q_trained_A01``, ``Performance/learner_percentage_training`` (see :doc:`tensorboard_metrics`).

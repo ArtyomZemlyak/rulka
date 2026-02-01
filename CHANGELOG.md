@@ -20,8 +20,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - Modern `pyproject.toml` with hatchling build backend
 - Support for `uv` package manager - single command installation
-- Comprehensive [User FAQ](docs/source/user_faq.rst) with 30+ questions
-- Comprehensive [Dev FAQ](docs/source/dev_faq.rst) for contributors
+- Comprehensive [User FAQ](https://artyomzemlyak.github.io/rulka/user_faq.html) with 30+ questions
+- Comprehensive [Dev FAQ](https://artyomzemlyak.github.io/rulka/dev_faq.html) for contributors
 - Hot-reload configuration system documentation
 
 ### Changed

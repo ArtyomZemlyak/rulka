@@ -66,12 +66,14 @@ Compared to original Linesight:
 
 ## Documentation
 
-- **[Installation Guide](docs/source/installation.rst)** - detailed setup instructions
-- **[First Training](docs/source/first_training.rst)** - get started with training
-- **[Configuration Guide](docs/source/configuration_guide.rst)** - all config parameters
-- **[User FAQ](docs/source/user_faq.rst)** - 30+ common questions
-- **[Dev FAQ](docs/source/dev_faq.rst)** - developer questions
-- **[Troubleshooting](docs/source/troubleshooting.rst)** - common issues
+**Online:** [https://artyomzemlyak.github.io/rulka/](https://artyomzemlyak.github.io/rulka/)
+
+- **[Installation Guide](https://artyomzemlyak.github.io/rulka/installation.html)** - detailed setup instructions
+- **[First Training](https://artyomzemlyak.github.io/rulka/first_training.html)** - get started with training
+- **[Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html)** - all config parameters
+- **[User FAQ](https://artyomzemlyak.github.io/rulka/user_faq.html)** - 30+ common questions
+- **[Dev FAQ](https://artyomzemlyak.github.io/rulka/dev_faq.html)** - developer questions
+- **[Troubleshooting](https://artyomzemlyak.github.io/rulka/troubleshooting.html)** - common issues
 
 **Build HTML docs:**
 ```bash

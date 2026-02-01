@@ -1,12 +1,51 @@
 """
 Plot comparison data from compute_comparison_data (analyze_experiment_by_relative_time).
 One graph per metric; multiple runs as lines. Saves compressed JPG files.
+Y-axis uses robust scaling (percentiles) so outliers (e.g. 300s at start) don't squash the readable range.
 """
 
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import matplotlib.pyplot as plt
+
+
+def _all_y_from_run_series(
+    run_series: Dict[str, List[Tuple[float, float]]],
+) -> List[float]:
+    """Collect all y values from run_series (metric_id -> run -> [(x,y), ...])."""
+    ys: List[float] = []
+    for points in run_series.values():
+        ys.extend(p[1] for p in points)
+    return ys
+
+
+def _robust_ylim(
+    run_series: Dict[str, List[Tuple[float, float]]],
+    low_pct: float = 2.0,
+    high_pct: float = 98.0,
+    margin: float = 0.05,
+    min_span_ratio: float = 0.02,
+) -> Tuple[float, float]:
+    """Compute y-axis limits from percentiles so outliers don't dominate.
+    E.g. race times 300s -> 30s: focus on the main range, not the initial spike.
+    """
+    ys = _all_y_from_run_series(run_series)
+    if not ys:
+        return (0.0, 1.0)
+    ys_sorted = sorted(ys)
+    n = len(ys_sorted)
+    lo_idx = max(0, int(n * low_pct / 100.0))
+    hi_idx = min(n - 1, int(n * high_pct / 100.0))
+    y_lo = ys_sorted[lo_idx]
+    y_hi = ys_sorted[hi_idx]
+    span = y_hi - y_lo
+    if span <= 0 or (abs(y_hi) > 1e-9 and span / abs(y_hi) < min_span_ratio):
+        # Single value or nearly constant: add padding
+        pad = abs(y_lo) * 0.05 + 0.01 if abs(y_lo) > 1e-9 else 0.01
+        return (y_lo - pad, y_lo + pad)
+    pad = span * margin
+    return (y_lo - pad, y_hi + pad)
 
 
 def _tag_to_slug(tag: str) -> str:
@@ -60,6 +99,8 @@ def plot_comparison(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
+        y_lo, y_hi = _robust_ylim(run_series)
+        plt.ylim(y_lo, y_hi)
         plt.xlabel("Time (min from run start)")
         plt.ylabel("Best race time (s)")
         plt.title(f"Best race time by relative time — {_tag_to_slug(tag)}")
@@ -80,6 +121,8 @@ def plot_comparison(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
+        y_lo, y_hi = _robust_ylim(run_series)
+        plt.ylim(max(0, y_lo), min(100, y_hi))  # clamp to 0–100%
         plt.xlabel("Time (min from run start)")
         plt.ylabel("Finish rate (%)")
         plt.title(f"Finish rate by relative time — {_tag_to_slug(tag)}")
@@ -98,12 +141,14 @@ def plot_comparison(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
+        y_lo, y_hi = _robust_ylim(run_series)
+        plt.ylim(y_lo, y_hi)
         plt.xlabel("Time (min from run start)")
         if key == "training_pct":
             plt.ylabel("Learner % training")
         elif key == "avg_q":
             plt.ylabel("Avg Q (trained A01)")
-        elif "time" in key:
+        elif "time" in key or "time_ms" in key:
             plt.ylabel("Best time (s)")
         else:
             plt.ylabel(key)
@@ -125,6 +170,8 @@ def plot_comparison(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 plt.plot(xs, ys, label=run, marker="o", markersize=3)
+            y_lo, y_hi = _robust_ylim(run_series)
+            plt.ylim(y_lo, y_hi)
             plt.xlabel("Training step")
             plt.ylabel("Best race time (s)")
             plt.title(f"Best race time by step — {_tag_to_slug(tag)}")
@@ -146,12 +193,14 @@ def plot_comparison(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 plt.plot(xs, ys, label=run, marker="o", markersize=3)
+            y_lo, y_hi = _robust_ylim(run_series)
+            plt.ylim(y_lo, y_hi)
             plt.xlabel("Training step")
             if key == "training_pct":
                 plt.ylabel("Learner % training")
             elif key == "avg_q":
                 plt.ylabel("Avg Q (trained A01)")
-            elif "time" in key:
+            elif "time" in key or "time_ms" in key:
                 plt.ylabel("Best time (s)")
             else:
                 plt.ylabel(key)

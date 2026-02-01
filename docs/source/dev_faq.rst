@@ -107,7 +107,7 @@ A:
 
 1. Add the parameter to the appropriate Pydantic model in ``config_files/config_schema.py``
 2. Add it to the corresponding section in ``config_files/config_default.yaml``
-3. Update ``docs/source/configuration_guide.rst`` with full documentation
+3. Update the Configuration Guide (:doc:`configuration_guide`) with full documentation
 4. Verify with: ``python -c "from config_files.config_loader import load_config; load_config('config_files/config_default.yaml')"``
 
 **Q: Can I modify config during training?**
@@ -144,7 +144,7 @@ A:
 A:
 
 1. Create ``.rst`` file in ``docs/source/``
-2. Add to ``docs/source/index.rst`` toctree
+2. Add it to the toctree in ``docs/source/index.rst``
 3. Build and verify: ``make html``
 4. Check links: ``make linkcheck``
 

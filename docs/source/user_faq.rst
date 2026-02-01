@@ -208,7 +208,7 @@ Configuration
 A: Configuration is split across modules in ``config_files/``:
 
 - Quick reference: Inline comments in each module
-- Full docs: ``docs/source/configuration_guide.rst``
+- Full docs: :doc:`configuration_guide`
 - Overview: ``config_files/README.md``
 
 **Q: What's the recommended configuration for my first training?**
@@ -406,8 +406,8 @@ A: Yes! Model weights are in ``save/{run_name}/weights*.torch``. Share with the 
 Additional Resources
 --------------------
 
-- **Documentation**: ``docs/source/``
-- **Configuration Guide**: ``docs/source/configuration_guide.rst``
+- **Documentation**: `online docs <https://artyomzemlyak.github.io/rulka/>`_
+- **Configuration Guide**: :doc:`configuration_guide`
 - **Original Linesight**: https://github.com/pb4git/linesight
 - **TMInterface**: https://donadigo.com/tminterface/
 - **TMNF Exchange**: https://tmnf.exchange/

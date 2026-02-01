@@ -2,6 +2,8 @@
 Documentation
 =============
 
+**Published at:** https://artyomzemlyak.github.io/rulka/
+
 To contribute to the documentation, install documentation-related packages.
 
 .. code-block:: bash
@@ -18,4 +20,4 @@ Build the updated documentation:
     make clean
     make html
 
-Commit **both** the `/docs/source` and `/docs/build` folders.
+Commit changes in ``docs/source/``. The ``docs/build/`` output is built by GitHub Actions and is not committed.

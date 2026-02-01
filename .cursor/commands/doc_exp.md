@@ -23,7 +23,7 @@ When creating or updating an experiment page, ensure it has:
 
 1. **Experiment Overview** — what was tested, hypothesis/goal, key parameters changed  
 2. **Results** — key findings (bullet points), main conclusions  
-3. **Comparison plots** (optional but recommended) — JPG graphs: one metric per graph, runs as lines; generate with ``scripts/plot_experiment_comparison.py`` or ``scripts/generate_experiment_plots.py``; embed with ``.. image:: ../_static/<prefix>_<metric>.jpg`` (or ``../../_static/`` from ``experiments/models/``). See "Comparison plots (JPG)" below.  
+3. **Comparison plots** (optional but recommended) — JPG graphs: one metric per graph, runs as lines; generate with ``scripts/plot_experiment_comparison.py`` or ``scripts/generate_experiment_plots.py``; **embed in the right context with ``:alt:`` captions**. See "Comparison plots (JPG)" and **"Embedding plots in RST (quality)"** below.  
 4. **Run Analysis** — list of runs compared, baseline vs experimental; **durations (relative time)** per run  
 5. **Detailed TensorBoard Metrics Analysis** — by **relative time** and by **steps** (see below); not only “last value” when durations differ  
 6. **Configuration Changes** — training section, performance section in config YAML, etc.  
@@ -68,13 +68,54 @@ When creating or updating an experiment page, ensure it has:
 
 ## Comparison plots (JPG)
 
-**Rule:** One graph = **one metric** (e.g. loss vs time, or A01 best vs time); **multiple runs** = multiple lines on the same graph. Plots are saved as **compressed JPG** to keep repo size small.
+**Rule:** One graph = **one metric** (e.g. loss vs time, or A01 best vs time); **multiple runs** = multiple lines on the same graph. Plots are saved as **compressed JPG** to keep repo size small. The plotting script uses **robust y-axis scaling** (percentiles) so outliers (e.g. 300s at start dropping to 30s) do not squash the readable range.
 
 - **Single comparison:** ``python scripts/plot_experiment_comparison.py <run1> <run2> [--prefix exp_<name>] [--output-dir docs/source/_static]`` — builds graphs from TensorBoard data, saves JPG. Use ``--by-step`` to also generate by-step plots.
 - **All documented experiments:** ``python scripts/generate_experiment_plots.py`` — runs plot for every experiment in ``EXPERIMENTS`` (exploration, temporal_mini_race_duration, training_speed sets, iqn pairs). Default output: ``docs/source/_static``. Use ``--experiments exploration temporal_mini_race_duration`` to limit.
-- **Embed in RST:** From ``docs/source/experiments/<file>.rst`` use ``.. image:: ../_static/<prefix>_<metric>.jpg``; from ``docs/source/experiments/models/<file>.rst`` use ``.. image:: ../../_static/<prefix>_<metric>.jpg``. Metric names: e.g. ``A01_best``, ``hock_best``, ``loss``, ``avg_q``, ``training_pct`` (from race tags and scalar keys).
+- **Regenerate after script changes:** If the plotting script (e.g. ``experiment_plot_utils.py`` or ``analyze_experiment_by_relative_time.py``) was updated (e.g. better scaling, new metrics), run ``generate_experiment_plots.py`` again and **commit** the updated ``docs/source/_static/exp_*.jpg`` so the docs use the new graphs.
 - **Generate before building docs:** Run ``generate_experiment_plots.py`` (with TensorBoard logs present) so that ``_static/*.jpg`` exist. **Commit the generated JPG files** to the repo so the built docs include the plots; TensorBoard logs and ``save/`` are not committed, but the plot images are.
 - **Run script:** Use the project venv. If PowerShell blocks ``.\.venv\Scripts\Activate.ps1``, run directly: ``.venv\Scripts\python.exe scripts/generate_experiment_plots.py`` (Windows) or ``.venv/bin/python scripts/generate_experiment_plots.py`` (Unix).
+
+---
+
+## Embedding plots in RST (quality)
+
+When adding or updating comparison plots in experiment pages, follow these rules so the next agent and readers get **correct, contextual, and explained** figures.
+
+**1. Place each image next to the metric it illustrates**
+
+- Insert the ``.. image::`` block **immediately after** the subsection that describes that metric (e.g. after "A01 (per-race eval_race_time_trained_A01)", after "Training loss", after "Average Q-values").
+- Do **not** group all images at the end of the page; each figure should sit right under the text that discusses the same metric.
+
+**2. Every image must have an alt caption (``:alt:``)**
+
+- Add ``:alt:`` under ``.. image::`` with a **short descriptive caption**: metric name, runs compared, and optionally experiment context.
+- Example: ``:alt: A01 eval best time by relative time (uni_12 vs uni_15)`` or ``:alt: Training loss by relative time (uni_5 vs uni_7)`` or ``:alt: Avg Q by relative time (uni_12 vs uni_16, DDQN reduces overestimation)``.
+- This improves accessibility and makes it clear what the figure shows when the image is missing or in a different build.
+
+**3. Intro sentence in "Detailed TensorBoard Metrics Analysis"**
+
+- At the **start** of the "Detailed TensorBoard Metrics Analysis" section (right after the methodology paragraph), add **one sentence** explaining that the figures below show one metric per graph, runs as lines, by relative time.
+- Example: "The figures below show one metric per graph (runs as lines, by relative time)." or "The figures below illustrate each metric (one graph per metric, runs as lines, by relative time)."
+
+**4. Paths and file names**
+
+- From ``docs/source/experiments/<file>.rst`` use ``.. image:: ../_static/<prefix>_<metric>.jpg``.
+- From ``docs/source/experiments/models/<file>.rst`` use ``.. image:: ../../_static/<prefix>_<metric>.jpg``.
+- File names are generated by the script: e.g. ``exp_exploration_uni12_uni15_A01_best.jpg``, ``exp_exploration_uni12_uni15_loss.jpg``, ``exp_iqn_uni12_uni16_avg_q.jpg``. Metric slugs: ``A01_best``, ``hock_best``, ``loss``, ``avg_q``, ``training_pct``, ``A01_rate``, ``hock_rate``, etc. (see ``scripts/experiment_plot_utils.py`` and generated files in ``_static``).
+
+**5. Which plots to embed**
+
+- Prefer embedding **key metrics** discussed in the text: e.g. A01 best, Hock best, loss, avg_q for the runs being compared in that subsection. If the page has multiple comparisons (e.g. uni_5 vs uni_7 and uni_7 vs uni_12), add the **relevant** plot after each comparison (e.g. ``exp_training_speed_uni5_uni7_*`` after uni_5 vs uni_7, ``exp_training_speed_uni7_uni12_*`` after uni_7 vs uni_12).
+- For multi-experiment pages (e.g. ``models/iqn.rst`` with Exp 1–5), add images for **each** experiment in the right subsection (Exp 1: uni_12 vs uni_16; Exp 2: uni_16 vs uni_17; etc.).
+
+**6. Checklist before finishing**
+
+- [ ] Every ``.. image::`` has a ``:alt:`` line.
+- [ ] Each image is placed right after the metric subsection it illustrates.
+- [ ] "Detailed TensorBoard Metrics Analysis" starts with a sentence that the figures below show one metric per graph, runs as lines, by relative time.
+- [ ] Paths are correct (``../_static/`` vs ``../../_static/`` depending on file location).
+- [ ] File names match the generated JPGs (run ``generate_experiment_plots.py`` if new experiments were added).
 
 ---
 
@@ -174,7 +215,7 @@ Run Analysis
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time and by steps:** Metrics are compared (1) at checkpoints 5, 10, 15, 20, … min (only up to the shortest run) and (2) at step checkpoints 50k, 100k, … (only up to the smallest max step). For race times — best so far at that checkpoint; for loss/Q/GPU% — last value at that moment. Tables: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5] [--step_interval 50000]`` (outputs both relative-time and BY STEP tables).
+**Methodology — Relative time and by steps:** Metrics are compared (1) at checkpoints 5, 10, 15, 20, … min (only up to the shortest run) and (2) at step checkpoints 50k, 100k, … (only up to the smallest max step). For race times — best so far at that checkpoint; for loss/Q/GPU% — last value at that moment. Tables: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5] [--step_interval 50000]`` (outputs both relative-time and BY STEP tables). The figures below show one metric per graph (runs as lines, by relative time).
 
 <Map> Map Performance (e.g. common window up to 85 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -182,17 +223,26 @@ Detailed TensorBoard Metrics Analysis
 - **<baseline>**: at 60 min — X.XXs; at 85 min — X.XXs
 - **<experimental>**: at 60 min — X.XXs; at 85 min — X.XXs
 
+.. image:: ../_static/exp_<name>_<runs>_<map_slug>_best.jpg
+   :alt: <Map> best time by relative time (<run1> vs <run2>)
+
 Training Loss
 ~~~~~~~~~~~~~~
 
 - **<baseline>**: at 85 min — XXX.X
 - **<experimental>**: at 85 min — XXX.X
 
+.. image:: ../_static/exp_<name>_<runs>_loss.jpg
+   :alt: Training loss by relative time (<run1> vs <run2>)
+
 Average Q-values
 ~~~~~~~~~~~~~~~~
 
 - **<baseline>**: at 85 min — -X.XX
 - **<experimental>**: at 85 min — -X.XX
+
+.. image:: ../_static/exp_<name>_<runs>_avg_q.jpg
+   :alt: Avg Q by relative time (<run1> vs <run2>)
 
 GPU Utilization
 ~~~~~~~~~~~~~~~
@@ -265,6 +315,7 @@ When you **only update** an existing file (e.g. training_speed.rst), do **not** 
 - Wording uses “at X min”, “common window up to X min”, “by relative time” when run durations differed.
 - Docs are in **English**.
 - RST formatting is correct.
+- **Comparison plots:** Every ``.. image::`` has ``:alt:``; each image is placed right after the metric subsection it illustrates; "Detailed TensorBoard Metrics Analysis" has an intro sentence that the figures show one metric per graph, runs as lines, by relative time; paths are correct (``../_static/`` from ``experiments/*.rst``, ``../../_static/`` from ``experiments/models/*.rst``). See "Embedding plots in RST (quality)".
 
 ---
 
@@ -316,7 +367,9 @@ When comparing, report these **at the same checkpoints** both by relative time (
 
 8. **Unicode in scripts:** If you add or change scripts that print to the console on Windows, avoid characters like ``≈`` or ``—`` in output (cp1252 can fail). Use ``~`` and ``-`` instead.
 
-9. **Comparison plot JPGs:** After running ``generate_experiment_plots.py`` (with TensorBoard logs present), **commit** the new/updated ``docs/source/_static/exp_*.jpg`` files so the built docs show the graphs. TensorBoard and ``save/`` are not committed; the generated plot images are.
+9. **Comparison plot JPGs:** After running ``generate_experiment_plots.py`` (with TensorBoard logs present), **commit** the new/updated ``docs/source/_static/exp_*.jpg`` files so the built docs show the graphs. TensorBoard and ``save/`` are not committed; the generated plot images are. After **any change to the plotting script** (e.g. robust y-axis, new metrics), regenerate all plots with ``generate_experiment_plots.py`` and commit the updated JPGs.
+
+10. **Embedding plots:** When adding or updating experiment docs, **embed** comparison plots correctly: place each image **right after** the metric subsection it illustrates; add **``:alt:``** to every image with a short caption (metric + runs); add **one intro sentence** at the start of "Detailed TensorBoard Metrics Analysis" that the figures show one metric per graph, runs as lines, by relative time. See "Embedding plots in RST (quality)".
 
 ---
 
@@ -339,3 +392,4 @@ User: “Document experiment on learning rate, runs lr_1 and lr_2.”
 2. **Create** ``docs/source/experiments/learning_rate.rst`` from the template.
 3. **Add** ``learning_rate`` to the toctree in ``docs/source/experiments/index.rst``.
 4. Fill metrics and conclusions; use relative time if run lengths differ.
+5. **Add comparison plots:** Run ``plot_experiment_comparison.py lr_1 lr_2 --prefix exp_learning_rate --output-dir docs/source/_static`` (or add the run pair to ``generate_experiment_plots.py`` and run it). Embed each JPG in the RST **right after** the metric subsection it illustrates, with **``:alt:``** caption; add the intro sentence at the start of "Detailed TensorBoard Metrics Analysis". See "Embedding plots in RST (quality)".

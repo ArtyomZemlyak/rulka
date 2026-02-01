@@ -53,7 +53,7 @@ Comparison is over the **common window up to 55 min**.
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time (and by steps):** Metrics are compared at checkpoints 5, 10, 15, 20, … 55 min; the same script also prints **BY STEP** tables (e.g. 50k, 100k steps) for equal-update comparison. Race times use per-race events (best/mean/std, finish rate); loss/Q/GPU use last value at that checkpoint. Source: ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_16 --interval 5 [--step_interval 50000]``.
+**Methodology — Relative time (and by steps):** Metrics are compared at checkpoints 5, 10, 15, 20, … 55 min; the same script also prints **BY STEP** tables (e.g. 50k, 100k steps) for equal-update comparison. Race times use per-race events (best/mean/std, finish rate); loss/Q/GPU use last value at that checkpoint. Source: ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_16 --interval 5 [--step_interval 50000]``. The figures below show one metric per graph (runs as lines, by relative time).
 
 trained_A01 — Eval (common window up to 55 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -61,6 +61,9 @@ trained_A01 — Eval (common window up to 55 min)
 - **Best time:** uni_12 24.850s (from 20 min); uni_16 26.410s (from 40 min) → **uni_12 better**.
 - **Finish rate at 55 min:** uni_12 50%, uni_16 30% → **uni_12 better**.
 - **Mean race time at 55 min:** uni_12 164.49s, uni_16 218.53s (among finished+DNF) → uni_12 better.
+
+.. image:: ../../_static/exp_iqn_uni12_uni16_A01_best.jpg
+   :alt: A01 eval best time by relative time (uni_12 vs uni_16, DDQN experiment)
 
 trained_A01 — Explo (common window up to 55 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -81,10 +84,16 @@ Training Loss
 - At 40 min: uni_12 144.92, uni_16 125.57 → uni_16 lower in mid training.
 - At 55 min: uni_12 **102.84**, uni_16 109.16 → **uni_12 lower** at end of common window.
 
+.. image:: ../../_static/exp_iqn_uni12_uni16_loss.jpg
+   :alt: Training loss by relative time (uni_12 vs uni_16)
+
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - At 55 min: uni_12 **-0.71**, uni_16 **-1.33** → uni_16 more negative. This is **consistent with Double DQN reducing Q overestimation** (lower, less optimistic Q).
+
+.. image:: ../../_static/exp_iqn_uni12_uni16_avg_q.jpg
+   :alt: Avg Q by relative time (uni_12 vs uni_16, DDQN reduces overestimation)
 
 GPU Utilization (Performance/learner_percentage_training)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -168,6 +177,9 @@ trained_A01 — Eval (common window up to 70 min)
 - **Best time:** uni_17 24.80s from 40 min, 24.71s at 65–70 min; uni_16 26.41s until 70 min when 24.69s → **uni_17 reached good eval times earlier**.
 - **Finish rate at 70 min:** uni_16 36%, uni_17 52% → **uni_17 better**.
 
+.. image:: ../../_static/exp_iqn_uni16_uni17_A01_best.jpg
+   :alt: A01 eval best time by relative time (uni_16 vs uni_17, embedding 64 vs 128)
+
 trained_A01 — Explo (common window up to 70 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -186,10 +198,16 @@ Training Loss
 - At 40 min: uni_16 125.57, uni_17 146.63.
 - At 70 min: uni_16 **81.73**, uni_17 109.87 → **uni_16 lower**.
 
+.. image:: ../../_static/exp_iqn_uni16_uni17_loss.jpg
+   :alt: Training loss by relative time (uni_16 vs uni_17, embedding 64 vs 128)
+
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - At 70 min: uni_16 -0.90, uni_17 -1.03 — similar.
+
+.. image:: ../../_static/exp_iqn_uni16_uni17_avg_q.jpg
+   :alt: Avg Q by relative time (uni_16 vs uni_17)
 
 GPU Utilization
 ~~~~~~~~~~~~~~~
@@ -268,6 +286,9 @@ trained_A01 — Eval (common window up to 90 min)
 - **Finish rate at 90 min:** uni_17 **59%**, uni_18 44% → **uni_17 better**.
 - **First finish:** uni_17 ~7.6 min, uni_18 ~32.2 min → **uni_17 converged much earlier**.
 
+.. image:: ../../_static/exp_iqn_uni17_uni18_A01_best.jpg
+   :alt: A01 eval best time by relative time (uni_17 vs uni_18, image 128×128 vs 256×256)
+
 trained_A01 — Explo (common window up to 90 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -285,6 +306,9 @@ Training Loss
 
 - At 85 min: uni_17 78.84, uni_18 126.49.
 - At 90 min: uni_17 **78.86**, uni_18 116.27 → **uni_17 lower**.
+
+.. image:: ../../_static/exp_iqn_uni17_uni18_loss.jpg
+   :alt: Training loss by relative time (uni_17 vs uni_18, image 128×128 vs 256×256)
 
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -396,6 +420,9 @@ trained_A01 — Eval (common window up to 90 min)
 - **Finish rate at 90 min:** uni_17 **59%**, uni_19 47% → **uni_17 better**.
 - **First finish:** uni_17 ~7.6 min, uni_19 ~23.5 min → **uni_17 converged much earlier**.
 
+.. image:: ../../_static/exp_iqn_uni17_uni19_A01_best.jpg
+   :alt: A01 eval best time by relative time (uni_17 vs uni_19, 128×128 vs 64×64 downsized model)
+
 trained_A01 — Explo (common window up to 90 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -413,6 +440,9 @@ Training Loss
 ~~~~~~~~~~~~~
 
 - At 90 min: uni_17 **78.86**, uni_19 108.72 → **uni_17 lower**.
+
+.. image:: ../../_static/exp_iqn_uni17_uni19_loss.jpg
+   :alt: Training loss by relative time (uni_17 vs uni_19, downsized model)
 
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -508,6 +538,9 @@ trained_A01 — Eval (common window up to 90 min)
 - **Finish rate at 90 min:** uni_17 59%, uni_20 **70%** → **uni_20 better**.
 - **First finish:** uni_17 ~7.6 min, uni_20 ~15.5 min → uni_17 converged earlier.
 
+.. image:: ../../_static/exp_iqn_uni17_uni20_A01_best.jpg
+   :alt: A01 eval best time by relative time (uni_17 vs uni_20, 128×128 vs 64×64 with embedding 128)
+
 trained_A01 — Explo (common window up to 90 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -524,6 +557,9 @@ Training Loss
 ~~~~~~~~~~~~~
 
 - At 90 min: uni_17 78.86, uni_20 **77.84** → **uni_20 lower**.
+
+.. image:: ../../_static/exp_iqn_uni17_uni20_loss.jpg
+   :alt: Training loss by relative time (uni_17 vs uni_20, 64×64 with embedding 128)
 
 Average Q-values (RL/avg_Q_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -573,4 +609,4 @@ Analysis tools (all IQN experiments)
 
 - By **relative time and by steps:** ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_16 --interval 5 [--step_interval 50000]`` (Exp 1); ``uni_16 uni_17`` (Exp 2); ``uni_17 uni_18`` (Exp 3); ``uni_17 uni_19`` (Exp 4); ``uni_17 uni_20`` (Exp 5). Script outputs both relative-time and BY STEP tables. Use ``--logdir "<path>"`` if not from project root.
 - By last value: ``python scripts/analyze_experiment.py <run1> <run2> ...`` (less meaningful when durations differ).
-- Key metrics: Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training`` (see ``docs/source/tensorboard_metrics.rst``).
+- Key metrics: Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training`` (see :doc:`tensorboard_metrics`).
