@@ -229,6 +229,9 @@ class MapCycleConfig(BaseModel):
 class PerformanceConfig(BaseModel):
     gpu_collectors_count: int = 4
     max_rollout_queue_size: int = 1
+    # Learner: warn when wait(workers) took longer than this (s). 0 = disable. Rate-limited by next.
+    warn_learner_wait_s: float = 5.0
+    warn_learner_wait_rate_limit_s: float = 60.0  # at most one warning per this many seconds
     send_shared_network_every_n_batches: int = 8
     update_inference_network_every_n_actions: int = 8
     plot_race_time_left_curves: bool = False
@@ -240,6 +243,7 @@ class PerformanceConfig(BaseModel):
     threshold_to_save_all_runs_ms: int = -1
     running_speed: int = 512
     force_window_focus_on_input: bool = False
+    use_gymnasium_env: bool = True  # If False, use legacy tmi.rollout() in collector
 
 
 # --- Input Action ---

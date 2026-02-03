@@ -86,12 +86,47 @@ class TMInterface:
     def reset_camera(self):
         self.sock.sendall(struct.pack("i", MessageType.C_RESET_CAMERA))
 
+    # Reasonable upper bounds for checkpoint counts (avoids out-of-bounds when TMI sends garbage)
+    _CP_STATES_MAX = 2000
+    _CP_TIMES_MAX = 2000
+
     def get_simulation_state(self):
         self.sock.sendall(struct.pack("i", MessageType.C_GET_SIMULATION_STATE))
         state_length = self._read_int32()
+        if state_length < 0 or state_length > 10 * 1024 * 1024:
+            raise ConnectionError(
+                f"get_simulation_state: invalid state_length={state_length} (likely TMI out of sync). Reconnect."
+            )
+        if state_length < SimStateData.min_size:
+            # Drain state_length bytes so we don't leave them for the next read. Caller must close
+            # and reconnect: the game may send more than 4+state_length bytes when in menus/loading,
+            # so retrying get_simulation_state() on the same socket can read garbage as state_length.
+            if state_length > 0:
+                self.sock.recv(state_length, socket.MSG_WAITALL)
+            raise ConnectionError(
+                f"get_simulation_state: state_length={state_length} < SimStateData.min_size={SimStateData.min_size} "
+                "(likely TMI out of sync or game in menus/loading). Reconnect."
+            )
         state = SimStateData(self.sock.recv(state_length, socket.MSG_WAITALL))
-        state.cp_data.resize(CheckpointData.cp_states_field, state.cp_data.cp_states_length)
-        state.cp_data.resize(CheckpointData.cp_times_field, state.cp_data.cp_times_length)
+        try:
+            n_cp_states = state.cp_data.cp_states_length
+            n_cp_times = state.cp_data.cp_times_length
+            if (
+                n_cp_states < 0
+                or n_cp_states > self._CP_STATES_MAX
+                or n_cp_times < 0
+                or n_cp_times > self._CP_TIMES_MAX
+            ):
+                raise ConnectionError(
+                    f"get_simulation_state: invalid cp lengths (cp_states={n_cp_states}, cp_times={n_cp_times}), "
+                    "likely TMI out of sync. Reconnect."
+                )
+            state.cp_data.resize(CheckpointData.cp_states_field, n_cp_states)
+            state.cp_data.resize(CheckpointData.cp_times_field, n_cp_times)
+        except (IndexError, Exception) as e:
+            raise ConnectionError(
+                f"get_simulation_state: state data invalid (likely TMI out of sync): {e}"
+            ) from e
         return state
 
     def set_input_state(self, left: bool, right: bool, accelerate: bool, brake: bool):
@@ -110,7 +145,16 @@ class TMInterface:
         self.sock.sendall(command.encode())  # https://www.delftstack.com/howto/python/python-socket-send-string/
 
     def set_timeout(self, new_timeout: int):
+        """Tell the game the response timeout (ms) and set Python socket timeout to match (avoids 500s block from register())."""
         self.sock.sendall(struct.pack("iI", MessageType.C_SET_TIMEOUT, np.uint32(new_timeout)))
+        # So recv() doesn't block for tmi_protection_timeout_s (500s); use same timeout as game + 2s buffer
+        timeout_ms = min(new_timeout + 2000, 120_000)  # cap 2 min
+        if get_config().is_linux:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("ll", timeout_ms // 1000, (timeout_ms % 1000) * 1000))
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("ll", timeout_ms // 1000, (timeout_ms % 1000) * 1000))
+        else:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("q", timeout_ms))
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("q", timeout_ms))
 
     def set_speed(self, new_speed):
         self.sock.sendall(struct.pack("if", MessageType.C_SET_SPEED, np.float32(new_speed)))

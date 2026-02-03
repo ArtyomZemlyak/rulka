@@ -822,6 +822,18 @@ class GameInstanceManager:
                     self.iface._respond_to_call(msgtype)
                 else:
                     pass
+        except (ConnectionError, ValueError, IndexError, OSError) as err:
+            # Same as gym: state_length too small, TMI out of sync, etc. Must close and reconnect.
+            err_str = str(err)
+            if "state_length" in err_str or "SimStateData.min_size" in err_str or "out of sync" in err_str.lower():
+                print("TMI/socket error in legacy rollout, reconnecting:", err)
+            if self.iface is not None:
+                try:
+                    self.iface.close()
+                except Exception:
+                    pass
+                self.iface = None
+            self.last_rollout_crashed = True
         except socket.timeout as err:
             print("Cutoff rollout due to TMI timeout", err)
             self.iface.close()

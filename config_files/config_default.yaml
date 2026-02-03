@@ -47,7 +47,7 @@ neural_network:
   use_jit: true
 
 training:
-  run_name: "uni_20"
+  run_name: "test_gym"
   batch_size: 512
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -122,6 +122,9 @@ map_cycle:
 performance:
   gpu_collectors_count: 4
   max_rollout_queue_size: 1
+  # Learner: warn when wait(workers) > warn_learner_wait_s (0 = disable). Rate-limit: at most one per warn_learner_wait_rate_limit_s.
+  warn_learner_wait_s: 5.0
+  warn_learner_wait_rate_limit_s: 60.0
   send_shared_network_every_n_batches: 8
   update_inference_network_every_n_actions: 8
   plot_race_time_left_curves: false
@@ -133,6 +136,7 @@ performance:
   threshold_to_save_all_runs_ms: -1
   running_speed: 512
   force_window_focus_on_input: false
+  use_gymnasium_env: false  # If false, collector uses legacy GameInstanceManager.rollout()
 
 inputs:
   actions:

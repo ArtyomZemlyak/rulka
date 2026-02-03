@@ -137,6 +137,7 @@ def learner_process_fn(
     time_waited_for_workers_since_last_tensorboard_write = 0
     time_training_since_last_tensorboard_write = 0
     time_testing_since_last_tensorboard_write = 0
+    last_learner_wait_warn_time = 0.0  # rate-limit "Learner waited" warning
 
     # ========================================================
     # Load existing stuff
@@ -225,10 +226,19 @@ def learner_process_fn(
 
     while True:  # Trainer loop
         before_wait_time = time.perf_counter()
-        wait(rollout_queue_readers)
+        wait(rollout_queue_readers)  # blocks until at least one collector puts a rollout in its queue
         time_waited = time.perf_counter() - before_wait_time
-        if time_waited > 5:  # Only warn if waited more than 5 seconds
-            print(f"[WARNING] Learner waited {time_waited:.1f}s for workers (workers might be slow)")
+        cfg = get_config()
+        warn_threshold = getattr(cfg, "warn_learner_wait_s", 5.0)
+        rate_limit_s = getattr(cfg, "warn_learner_wait_rate_limit_s", 60.0)
+        if warn_threshold > 0 and time_waited > warn_threshold:
+            now = time.perf_counter()
+            if now - last_learner_wait_warn_time >= rate_limit_s:
+                print(
+                    f"[WARNING] Learner waited {time_waited:.1f}s for workers "
+                    "(collectors busy: long rollout, TMI delay, or reset/step failed and retrying)"
+                )
+                last_learner_wait_warn_time = now
         time_waited_for_workers_since_last_tensorboard_write += time_waited
         for idx in queue_check_order:
             if not rollout_queues[idx].empty():
