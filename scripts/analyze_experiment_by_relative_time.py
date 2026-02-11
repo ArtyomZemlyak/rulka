@@ -32,6 +32,9 @@ METRICS = {
     'training_pct': 'Performance/learner_percentage_training',  # 0..1
 }
 
+# tensorboard_suffix_schedule creates run_2, run_3, ... at step thresholds; we merge all
+SUFFIXES = ["", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9", "_10"]
+
 # Per-race event tags: best/mean/std at checkpoint = min/mean/std of events up to that time
 RACE_TIME_PREFIXES = ("Race/eval_race_time_", "Race/explo_race_time_")
 # Exclude "race_time_finished" (subset) so we get every race
@@ -39,36 +42,69 @@ RACE_TIME_EXCLUDE = ("race_time_finished",)
 RACE_FINISHED_PREFIXES = ("Race/eval_race_finished_", "Race/explo_race_finished_")
 
 
+def discover_run_paths(base_dir: Path, run_name: str) -> List[Path]:
+    """Find all TensorBoard log dirs for a run (run_name, run_name_2, run_name_3, ...).
+    Matches tensorboard_suffix_schedule: logs split at 6M, 15M, 30M, ... steps."""
+    paths: List[Path] = []
+    for suf in SUFFIXES:
+        p = base_dir / (run_name + suf)
+        if p.exists():
+            paths.append(p)
+        elif suf == "":
+            break  # base run missing
+    return paths
+
+
 def load_run_metrics(
     run_path: Path,
     tags_to_load: Optional[List[str]] = None,
 ) -> Dict[str, List[Tuple[float, int, float]]]:
-    """Load run once, return {tag: [(relative_minutes, step, value), ...]} for requested tags.
-    If tags_to_load is None, loads METRICS.values(). Otherwise loads only tags_to_load (any TensorBoard scalar tag).
-    """
-    if not run_path.exists():
+    """Load run from one path. Prefer load_run_metrics_from_paths for runs with suffix schedule."""
+    return load_run_metrics_from_paths([run_path], tags_to_load)
+
+
+def load_run_metrics_from_paths(
+    run_paths: List[Path],
+    tags_to_load: Optional[List[str]] = None,
+) -> Dict[str, List[Tuple[float, int, float]]]:
+    """Load run from one or more paths (e.g. uni_20, uni_20_2, uni_20_3) and merge.
+    Uses global t0 = min wall_time across all chunks for consistent relative_min."""
+    if not run_paths:
         return {}
     requested = tags_to_load if tags_to_load is not None else list(METRICS.values())
-    try:
-        ea = EventAccumulator(str(run_path))
-        ea.Reload()
-        available = ea.Tags().get('scalars', [])
-        out = {}
-        for tag in requested:
-            if tag not in available:
-                continue
-            events = ea.Scalars(tag)
-            if not events:
-                continue
-            t0 = events[0].wall_time
-            out[tag] = [
-                ((e.wall_time - t0) / 60.0, e.step, e.value)
-                for e in events
-            ]
-        return out
-    except Exception as e:
-        print(f"Error loading {run_path}: {e}")
+    global_t0: Optional[float] = None
+    all_events: Dict[str, List[Tuple[float, int, float]]] = {}
+
+    for run_path in run_paths:
+        if not run_path.exists():
+            continue
+        try:
+            ea = EventAccumulator(str(run_path))
+            ea.Reload()
+            available = ea.Tags().get('scalars', [])
+            for tag in requested:
+                if tag not in available:
+                    continue
+                events = ea.Scalars(tag)
+                if not events:
+                    continue
+                for e in events:
+                    if global_t0 is None or e.wall_time < global_t0:
+                        global_t0 = e.wall_time
+                lst = all_events.setdefault(tag, [])
+                for e in events:
+                    lst.append((e.wall_time, e.step, e.value))
+        except Exception as e:
+            print(f"Error loading {run_path}: {e}")
+
+    if global_t0 is None:
         return {}
+    out: Dict[str, List[Tuple[float, int, float]]] = {}
+    for tag, raw in all_events.items():
+        merged = [((w - global_t0) / 60.0, s, v) for (w, s, v) in raw]
+        merged.sort(key=lambda x: x[1])
+        out[tag] = merged
+    return out
 
 
 def _is_race_time_tag(tag: str) -> bool:
@@ -90,22 +126,28 @@ def _race_time_to_finished_tag(tag: str) -> Optional[str]:
 
 def get_available_scalar_tags(run_path: Path) -> List[str]:
     """Return all scalar tag names in the run, excluding race-time and race-finished (handled separately)."""
-    if not run_path.exists():
-        return []
-    try:
-        ea = EventAccumulator(str(run_path))
-        ea.Reload()
-        tags = ea.Tags().get('scalars', [])
-        out = []
-        for tag in tags:
-            if _is_race_time_tag(tag):
-                continue
-            if any(tag.startswith(p) for p in RACE_FINISHED_PREFIXES):
-                continue
-            out.append(tag)
-        return out
-    except Exception:
-        return []
+    return get_available_scalar_tags_from_paths([run_path])
+
+
+def get_available_scalar_tags_from_paths(run_paths: List[Path]) -> List[str]:
+    """Union of scalar tags from all run paths."""
+    seen: Set[str] = set()
+    out: List[str] = []
+    for run_path in run_paths:
+        if not run_path.exists():
+            continue
+        try:
+            ea = EventAccumulator(str(run_path))
+            ea.Reload()
+            for tag in ea.Tags().get('scalars', []):
+                if _is_race_time_tag(tag) or any(tag.startswith(p) for p in RACE_FINISHED_PREFIXES):
+                    continue
+                if tag not in seen:
+                    seen.add(tag)
+                    out.append(tag)
+        except Exception:
+            pass
+    return out
 
 
 def load_race_events(
@@ -114,45 +156,62 @@ def load_race_events(
     Dict[str, List[Tuple[float, int, float]]],
     Dict[str, List[Tuple[float, int, float]]],
 ]:
-    """Load per-race time and finished events. All rel_min use ONE run-wide t0 so comparison is by relative time."""
-    if not run_path.exists():
+    """Load per-race time and finished events from one path."""
+    return load_race_events_from_paths([run_path])
+
+
+def load_race_events_from_paths(
+    run_paths: List[Path],
+) -> Tuple[
+    Dict[str, List[Tuple[float, int, float]]],
+    Dict[str, List[Tuple[float, int, float]]],
+]:
+    """Load per-race time and finished events from all paths, merge, use global t0."""
+    if not run_paths:
         return {}, {}
-    try:
-        ea = EventAccumulator(str(run_path))
-        ea.Reload()
-        tags = ea.Tags().get('scalars', [])
-        time_tags = [t for t in tags if _is_race_time_tag(t)]
-        finished_tags = [t for t in tags if any(t.startswith(p) for p in RACE_FINISHED_PREFIXES)]
-        # One t0 for the whole run = min wall_time across all race-related events
-        run_t0: Optional[float] = None
-        for tag in time_tags + finished_tags:
-            for e in ea.Scalars(tag):
-                if run_t0 is None or e.wall_time < run_t0:
-                    run_t0 = e.wall_time
-        if run_t0 is None:
-            return {}, {}
-        time_events: Dict[str, List[Tuple[float, int, float]]] = {}
-        for tag in time_tags:
-            events = ea.Scalars(tag)
-            if not events:
-                continue
-            time_events[tag] = [
-                ((e.wall_time - run_t0) / 60.0, e.step, e.value)
-                for e in events
-            ]
-        finished_events: Dict[str, List[Tuple[float, int, float]]] = {}
-        for tag in finished_tags:
-            events = ea.Scalars(tag)
-            if not events:
-                continue
-            finished_events[tag] = [
-                ((e.wall_time - run_t0) / 60.0, e.step, e.value)
-                for e in events
-            ]
-        return time_events, finished_events
-    except Exception as e:
-        print(f"Error loading race events from {run_path}: {e}")
+    run_t0: Optional[float] = None
+    raw_time: Dict[str, List[Tuple[float, int, float]]] = {}
+    raw_finished: Dict[str, List[Tuple[float, int, float]]] = {}
+
+    for run_path in run_paths:
+        if not run_path.exists():
+            continue
+        try:
+            ea = EventAccumulator(str(run_path))
+            ea.Reload()
+            tags = ea.Tags().get('scalars', [])
+            time_tags = [t for t in tags if _is_race_time_tag(t)]
+            finished_tags = [t for t in tags if any(t.startswith(p) for p in RACE_FINISHED_PREFIXES)]
+            for tag in time_tags + finished_tags:
+                for e in ea.Scalars(tag):
+                    if run_t0 is None or e.wall_time < run_t0:
+                        run_t0 = e.wall_time
+            for tag in time_tags:
+                events = ea.Scalars(tag)
+                if events:
+                    lst = raw_time.setdefault(tag, [])
+                    lst.extend([(e.wall_time, e.step, e.value) for e in events])
+            for tag in finished_tags:
+                events = ea.Scalars(tag)
+                if events:
+                    lst = raw_finished.setdefault(tag, [])
+                    lst.extend([(e.wall_time, e.step, e.value) for e in events])
+        except Exception as e:
+            print(f"Error loading race events from {run_path}: {e}")
+
+    if run_t0 is None:
         return {}, {}
+    time_events: Dict[str, List[Tuple[float, int, float]]] = {}
+    for tag, raw in raw_time.items():
+        merged = [((w - run_t0) / 60.0, s, v) for (w, s, v) in raw]
+        merged.sort(key=lambda x: x[1])
+        time_events[tag] = merged
+    finished_events: Dict[str, List[Tuple[float, int, float]]] = {}
+    for tag, raw in raw_finished.items():
+        merged = [((w - run_t0) / 60.0, s, v) for (w, s, v) in raw]
+        merged.sort(key=lambda x: x[1])
+        finished_events[tag] = merged
+    return time_events, finished_events
 
 
 def race_stats_at_checkpoint(
@@ -318,7 +377,10 @@ def compute_comparison_data(
     tags_to_load: List[str] = list(METRICS.values())
     if use_all_scalars:
         for name in run_names:
-            tags_to_load = list(set(tags_to_load) | set(get_available_scalar_tags(base_dir / name)))
+            paths = discover_run_paths(base_dir, name)
+            if not paths:
+                paths = [base_dir / name]
+            tags_to_load = list(set(tags_to_load) | set(get_available_scalar_tags_from_paths(paths)))
     if extra_scalar_tags:
         tags_to_load = list(set(tags_to_load) | set(extra_scalar_tags))
 
@@ -326,9 +388,13 @@ def compute_comparison_data(
     race_time: Dict[str, Dict[str, List[Tuple[float, int, float]]]] = {}
     race_finished: Dict[str, Dict[str, List[Tuple[float, int, float]]]] = {}
     for name in run_names:
-        p = base_dir / name
-        cache[name] = load_run_metrics(p, tags_to_load=tags_to_load)
-        race_time[name], race_finished[name] = load_race_events(p)
+        paths = discover_run_paths(base_dir, name)
+        if not paths:
+            paths = [base_dir / name]
+        if len(paths) > 1:
+            print(f"[INFO] {name}: merging {len(paths)} log dirs ({', '.join(p.name for p in paths)})")
+        cache[name] = load_run_metrics_from_paths(paths, tags_to_load=tags_to_load)
+        race_time[name], race_finished[name] = load_race_events_from_paths(paths)
 
     durations: Dict[str, float] = {}
     for name in run_names:

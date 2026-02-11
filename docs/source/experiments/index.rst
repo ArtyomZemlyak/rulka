@@ -14,6 +14,8 @@ Contents
    :maxdepth: 2
 
    training_speed
+   extended_training
    temporal_mini_race_duration
    exploration
+   network_size_long_training
    models/iqn

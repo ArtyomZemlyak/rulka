@@ -816,6 +816,7 @@ class GameInstanceManager:
                     self.iface.execute_command("set disable_forced_camera true")
                     self.iface.execute_command("set autorewind false")
                     self.iface.execute_command("set auto_reload_plugins false")
+                    self.iface.execute_command("set use_valseed false")
                     if self.iface.is_in_menus() and map_path != self.latest_map_path_requested:
                         print("Requested map load")
                         self.request_map(map_path, zone_centers)

@@ -36,6 +36,9 @@ EXPERIMENTS = [
     {"name": "iqn_uni17_uni18", "runs": ["uni_17", "uni_18"], "prefix": "exp_iqn_uni17_uni18"},
     {"name": "iqn_uni17_uni19", "runs": ["uni_17", "uni_19"], "prefix": "exp_iqn_uni17_uni19"},
     {"name": "iqn_uni17_uni20", "runs": ["uni_17", "uni_20"], "prefix": "exp_iqn_uni17_uni20"},
+    {"name": "extended_training", "runs": ["uni_20", "uni_20_long"], "prefix": "exp_extended_training_uni20_uni20long"},
+    {"name": "extended_training_triple", "runs": ["A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_extended_training_A01_uni20_uni20long"},
+    {"name": "network_size_big_long", "runs": ["A01_as20_big_long", "A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_network_size_big_long"},
 ]
 
 

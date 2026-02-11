@@ -97,6 +97,49 @@ start build/html/index.html
 - **RAM:** 20 GB+
 - **Python:** 3.10 or 3.11
 
+## Visual pretraining (replays from leaderboard)
+
+To pretrain the visual backbone on top players’ replays:
+
+Activate the environment first (Windows: `.\.venv\Scripts\activate`; Linux/macOS: `source .venv/bin/activate`).
+
+1. **Download top replays**:
+   - **TMNF (Nations Forever):** ManiaExchange (TMNF-X), no auth:
+     ```bash
+     python scripts/download_top_replays_tmnf.py --track-id 100 --output-dir ./replays_tmnf --top 50
+     python scripts/download_top_replays_tmnf.py --track-name "A01" --output-dir ./replays_tmnf
+     ```
+     **Many popular tracks at once:** discover tracks with good replays and optionally download:
+     ```bash
+     python scripts/list_popular_tracks_tmnf.py --output track_ids.txt --pages 200 --per-page 100
+     python scripts/list_popular_tracks_tmnf.py --output track_ids.txt --min-replays 10
+     python scripts/list_popular_tracks_tmnf.py --output maps/track_ids.txt --download-replays --replays-dir ./maps/replays --replays-per-track 10
+     ```
+     Track IDs from [tmnf.exchange](https://tmnf.exchange). Replays saved as `.replay.gbx`.
+   - **TrackMania 2020:** Nadeo API (Ubisoft auth):
+     ```bash
+     set NADEO_UBI_EMAIL=your@email
+     set NADEO_UBI_PASSWORD=your_password
+     python scripts/download_top_replays.py --map-uid "MAP_UID" --output-dir ./replays_downloaded --top 50
+     ```
+     Use [Openplanet API](https://webservices.openplanet.dev/) for map UIDs.
+
+2. **Capture frames** from replays:
+   - For `.replay.gbx`: in game, load the map, watch the replay, record the screen (e.g. OBS), then extract frames: `ffmpeg -i video.mp4 -vf fps=10 frames/%05d.png`.
+   - For `.inputs` files: `python scripts/capture_frames_from_replays.py --inputs-dir ./best_runs --output-dir ./parsed_actions` (parses to action lists; capture via game + TMI or training pipeline).
+
+3. **Pretrain the backbone** (unsupervised: AE, VAE, SimCLR):
+   ```bash
+   python scripts/pretrain_visual_backbone.py --data-dir ./frames --task ae --epochs 50 --batch-size 128
+   python scripts/pretrain_visual_backbone.py --data-dir ./frames --task simclr --framework lightly  # optional: pip install lightly
+   ```
+   **Stacked frames** (several consecutive images; temporal order = file sort):
+   ```bash
+   python scripts/pretrain_visual_backbone.py --data-dir ./frames --n-stack 4 --stack-mode concat --task ae
+   ```
+   `--stack-mode channel`: N input channels (saves N-ch encoder). `--stack-mode concat`: 1-ch encoder per frame + fusion (saves IQN-compatible 1-ch encoder).
+   Saves `encoder.pt` loadable into `IQN_Network.img_head`.
+
 ## Project Structure
 
 ```

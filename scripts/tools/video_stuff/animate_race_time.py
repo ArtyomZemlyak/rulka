@@ -41,6 +41,8 @@ if __name__ == "__main__":
     parser.add_argument("--inputs", "-i", type=str, required=True)
     args = parser.parse_args()
     df = pandas.read_csv(args.inputs)
+    if df.empty or len(df) < 1:
+        raise SystemExit("CSV is empty or has no rows. Need at least one row with 'Wall time' and 'Value'.")
     df["Wall time"] -= df["Wall time"].iloc[0]
     df["Wall time"] /= 60 * 60  # seconds to hours
     df["Race time min"] = np.minimum.accumulate(df["Value"])

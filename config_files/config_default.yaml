@@ -25,13 +25,13 @@ environment:
   sync_virtual_and_real_checkpoints: true
 
 neural_network:
-  w_downsized: 64
-  h_downsized: 64
+  w_downsized: 128
+  h_downsized: 128
   float_hidden_dim: 256
   dense_hidden_dimension: 1024
-  iqn_embedding_dimension: 128
-  iqn_n: 8
-  iqn_k: 32
+  iqn_embedding_dimension: 256
+  iqn_n: 16
+  iqn_k: 64
   iqn_kappa: 0.005
   use_ddqn: true
   clip_grad_value: 1000
@@ -47,7 +47,7 @@ neural_network:
   use_jit: true
 
 training:
-  run_name: "uni_20"
+  run_name: "A01_as20_big_long"
   batch_size: 512
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -115,7 +115,7 @@ rewards:
 
 map_cycle:
   entries:
-    - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: true, fill_buffer: true, repeat: 64}
+    # - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: true, fill_buffer: true, repeat: 64}
     - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 64}
     - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 

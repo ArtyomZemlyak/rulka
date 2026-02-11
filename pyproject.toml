@@ -55,6 +55,10 @@ dependencies = [
 dev = [
     "ruff>=0.8.0",
 ]
+# For pretrain_visual_backbone.py --framework lightly (SimCLR, etc.)
+pretrain = [
+    "lightly>=1.5.0",
+]
 doc = [
     "sphinx>=8.0.0",
     "sphinx_rtd_theme>=3.0.0",
