@@ -126,7 +126,9 @@ The script **scripts/capture_replays_tmnf.py** runs replays from `maps/replays` 
 python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img
 
 # Two game windows, 128x128, 10 FPS
-python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --fps 100  --running-speed 1 --input-time-offset-ms "-10" --step-ms 10
+python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --running-speed 1  --fps 1  --exclude-respawn-maps --respawn-after-cp-ms 50 --input-time-offset-ms "-10" --step-ms 10
+
+python scripts/capture_replays_tmnf_validate.py --replay-path maps/replays/924307/pos1_ben3847_89250ms.replay.gbx --output-dir maps/img_validate --fps 10 --step-ms 10
 
 # With per-frame JSON files for each screenshot
 python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir out --per-frame-json

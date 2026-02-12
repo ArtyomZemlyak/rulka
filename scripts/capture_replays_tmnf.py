@@ -164,14 +164,22 @@ def group_replay_tasks_by_track(
 
 
 # ---------- 2. Extract inputs from .replay.gbx (pygbx) ----------
+#
+# Conversion logic aligned with:
+#   - gbxtools generate_input_file.py (donadigo): https://github.com/donadigo/gbxtools
+#   - TM-Gbx-input-visualizer inputs.py: get_event_time, event_to_analog_value, _FakeDontInverseAxis
+# TMInterface script format: https://donadigo.com/tminterface/script-syntax
 
 # --- Control name mapping ---
 # Binary (keyboard) events: each name maps to one input key.
+# AccelerateReal/BrakeReal: only when flags==1 (see _should_skip_event).
 _BINARY_EVENT_TO_KEY: dict[str, str] = {
     "accelerate": "accelerate",
+    "acceleratereal": "accelerate",
     "gas": "accelerate",
     "up": "accelerate",
     "brake": "brake",
+    "brakereal": "brake",
     "down": "brake",
     "steerleft": "left",
     "steer_left": "left",
@@ -181,6 +189,10 @@ _BINARY_EVENT_TO_KEY: dict[str, str] = {
     "steer_right": "right",
     "steer right": "right",
     "right": "right",
+    # TMNF checkpoint respawn (ingame key: Backspace; TMInterface command: enter)
+    "respawn": "respawn",
+    "enter": "respawn",
+    # Horn is intentionally not mapped (skipped, same as gbxtools)
 }
 # Analog steer axis names: value from (flags<<16)|enabled, interpreted as signed int32.
 # Convention (matches TM-Gbx-input-visualizer): value > 0 = right, value < 0 = left.
@@ -194,8 +206,8 @@ _DEBUG_POLICY_ACTIONS_TO_LOG = 40
 
 def _event_to_analog_value(ce) -> int:
     """
-    Compute signed analog value from ControlEntry (matches TM-Gbx-input-visualizer).
-    Value = -sign_extend24((flags << 16) | enabled)
+    Compute signed analog value from ControlEntry.
+    Matches gbxtools/TM-Gbx-input-visualizer: val = -sign_extend24((flags << 16) | enabled)
     """
     flags_raw = int(getattr(ce, "flags", getattr(ce, "Flags", 0)))
     enabled_raw = int(getattr(ce, "enabled", getattr(ce, "Enabled", 0)))
@@ -209,14 +221,17 @@ def _event_to_analog_value(ce) -> int:
 def convert_replay_to_tmi_script(
     replay_path: Path,
     output_txt_path: Path,
+    input_time_offset_ms: int = 0,
+    respawn_action: str = "enter",
+    respawn_after_cp_ms: int = 0,
 ) -> dict[str, Any] | None:
     """
     Convert .replay.gbx to TMInterface script format (.txt).
     
-    TMInterface script format (time in seconds):
-        0 press up              # Start accelerating at t=0s
-        0.68 press right        # Steer right at t=0.68s
-        0.83 rel right          # Release right at t=0.83s
+    TMInterface script format (time in milliseconds):
+        0 press up              # Start accelerating at t=0ms
+        680 press right         # Steer right at t=680ms
+        830 rel right           # Release right at t=830ms
         ...
     
     Returns metadata dict {race_time_ms, n_events, ghost_uid, game_version} or None on error.
@@ -227,6 +242,8 @@ def convert_replay_to_tmi_script(
         log.warning("pygbx not available")
         return None
 
+    _UNBOUND_SENTINEL = 4294967295  # 0xFFFFFFFF, gbxtools: treat as key never released
+
     import logging as _logmod
     _saved = []
     for _name in ("pygbx", "pygbx.gbx"):
@@ -236,7 +253,7 @@ def convert_replay_to_tmi_script(
     
     try:
         gbx = Gbx(str(replay_path))
-        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST])
+        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST, GbxType.CTN_GHOST_OLD])
         if not ghosts:
             return None
         ghost = min(ghosts, key=lambda g: getattr(g, "cp_times", [0])[-1] if getattr(g, "cp_times", None) else 0)
@@ -266,55 +283,137 @@ def convert_replay_to_tmi_script(
         for ce in control_entries
     )
 
-    # Convert events to TMInterface script commands
-    commands: list[tuple[float, str]] = []  # (time_seconds, command_string)
-    key_state: dict[str, bool] = {
-        "accelerate": False, "brake": False, "left": False, "right": False,
-    }
-    
-    for ce in control_entries:
-        t_ms = getattr(ce, "time", getattr(ce, "Time", None))
-        if t_ms is None or t_ms < 0:
+    # Replay dumped from TMInterface validate can carry a time offset in events.
+    # Match gbxtools behavior and normalize when this marker is present.
+    is_iface_timing = any(
+        (
+            str(getattr(ce, "event_name", getattr(ce, "EventName", ""))) == "_FakeIsRaceRunning"
+            and int(getattr(ce, "time", getattr(ce, "Time", 0)) or 0) % 10 == 5
+        )
+        for ce in control_entries
+    )
+    iface_time_shift = 0xFFFF if is_iface_timing else 0
+
+    def _event_name_raw(ce: Any) -> str:
+        return str(getattr(ce, "event_name", getattr(ce, "EventName", "")) or "").strip()
+
+    def _event_name_lc(ce: Any) -> str:
+        return _event_name_raw(ce).lower()
+
+    def _event_time_ms(ce: Any) -> int:
+        t_raw = int(getattr(ce, "time", getattr(ce, "Time", 0)) or 0) - iface_time_shift
+        name = _event_name_lc(ce)
+        if name == "respawn":
+            t = int(t_raw / 10) * 10
+            if t_raw % 10 == 0:
+                t -= 10
+        else:
+            t = int(t_raw / 10) * 10 - 10
+        t += input_time_offset_ms
+        return int(t / 10) * 10
+
+    def _should_skip_event(ce: Any) -> bool:
+        name = _event_name_lc(ce)
+        enabled = int(getattr(ce, "enabled", getattr(ce, "Enabled", 0)) or 0)
+        flags = int(getattr(ce, "flags", getattr(ce, "Flags", 0)) or 0)
+        if name in ("acceleratereal", "brakereal"):
+            return flags != 1
+        if name in _ANALOG_STEER_NAMES or name == "gas":
+            return False
+        if name.startswith("_fake"):
+            return True
+        return enabled == 0
+
+    def _find_event_end(from_index: int, target_name: str) -> Any | None:
+        for j in range(from_index, len(control_entries)):
+            if _event_name_lc(control_entries[j]) == target_name:
+                return control_entries[j]
+        return None
+
+    # CP times from replay are used to avoid sending respawn too early.
+    cp_times_ms = sorted(int(t) for t in cp_times if int(t) >= 0)
+    respawn_shifted = 0
+
+    # Convert events to TMInterface commands while preserving source order.
+    commands: list[tuple[int, str]] = []  # (time_ms_for_log, command_line)
+
+    for i, ce in enumerate(control_entries):
+        if _should_skip_event(ce):
             continue
-        
-        event_name = getattr(ce, "event_name", getattr(ce, "EventName", "")).lower().strip()
-        if not event_name or event_name.startswith("_fake"):
-            continue
-        
-        t_sec = t_ms / 1000.0  # Convert milliseconds to seconds
-        
-        # Binary keys
-        key = _BINARY_EVENT_TO_KEY.get(event_name)
-        if key is not None:
-            pressed = _event_to_analog_value(ce) != 0
-            old_state = key_state[key]
-            if pressed != old_state:
-                key_state[key] = pressed
-                action = "press" if pressed else "rel"
-                tmi_key = {"accelerate": "up", "brake": "down", "left": "left", "right": "right"}[key]
-                commands.append((t_sec, f"{action} {tmi_key}"))
-            continue
-        
-        # Analog steer - use TMInterface 'steer' command with analog value
+
+        event_name = _event_name_lc(ce)
+        t_from = _event_time_ms(ce)
+
+        # Analog events are immediate samples.
         if event_name in _ANALOG_STEER_NAMES:
             analog_val = _event_to_analog_value(ce)
             if cancel_default_steer_inversion:
                 analog_val = -analog_val
-            
-            # Use steer command with analog value (range: -65536 to 65536)
-            # TMInterface expects integer values in this range
-            steer_val = int(analog_val)
-            commands.append((t_sec, f"steer {steer_val}"))
+            commands.append((max(0, t_from), f"{max(0, t_from)} steer {int(analog_val)}"))
             continue
 
-    # Sort by time
-    commands.sort(key=lambda x: x[0])
+        if event_name == "gas":
+            analog_val = _event_to_analog_value(ce)
+            if cancel_default_steer_inversion:
+                analog_val = -analog_val
+            commands.append((max(0, t_from), f"{max(0, t_from)} gas {int(analog_val)}"))
+            continue
+
+        # Binary keys are emitted as range commands (from-to press key), matching gbxtools.
+        key = _BINARY_EVENT_TO_KEY.get(event_name)
+        if key is None:
+            continue
+        tmi_key = {
+            "accelerate": "up",
+            "brake": "down",
+            "left": "left",
+            "right": "right",
+            "respawn": respawn_action,
+        }[key]
+
+        to_event = _find_event_end(i + 1, event_name)
+        is_unbound = to_event is None
+        if to_event is not None:
+            t_to = _event_time_ms(to_event)
+            if t_to >= _UNBOUND_SENTINEL:
+                is_unbound = True
+        else:
+            t_to = int((int(race_time) + input_time_offset_ms) / 10) * 10
+            if t_to >= _UNBOUND_SENTINEL:
+                is_unbound = True
+
+        if t_from < 0:
+            if t_to < 0 and not is_unbound:
+                continue
+            t_from = 0
+
+        # In TMNF, respawn before CP registration effectively becomes restart.
+        # When replay has CP metadata, keep respawn at least a little after
+        # the latest reached checkpoint time.
+        if key == "respawn" and respawn_after_cp_ms > 0 and cp_times_ms:
+            latest_cp = next((cp for cp in reversed(cp_times_ms) if cp <= t_from), None)
+            if latest_cp is not None:
+                min_respawn_time = int((latest_cp + respawn_after_cp_ms) / 10) * 10
+                if t_from < min_respawn_time:
+                    delta = min_respawn_time - t_from
+                    t_from = min_respawn_time
+                    if not is_unbound:
+                        t_to += delta
+                    respawn_shifted += 1
+
+        t_from = int(t_from / 10) * 10
+        t_to = int(t_to / 10) * 10
+
+        if is_unbound or t_to <= t_from:
+            commands.append((max(0, t_from), f"{max(0, t_from)} press {tmi_key}"))
+        else:
+            commands.append((max(0, t_from), f"{max(0, t_from)}-{max(0, t_to)} press {tmi_key}"))
     
-    # Write TMInterface script (time in seconds with 2 decimal places)
+    # Write TMInterface script in integer-millisecond format.
     output_txt_path.parent.mkdir(parents=True, exist_ok=True)
     with output_txt_path.open("w", encoding="utf-8") as f:
-        for t_sec, cmd in commands:
-            f.write(f"{t_sec:.2f} {cmd}\n")
+        for _, cmd_line in commands:
+            f.write(f"{cmd_line}\n")
     
     # Log first few commands for verification
     log.info(
@@ -323,8 +422,10 @@ def convert_replay_to_tmi_script(
     )
     if commands:
         log.info("  First 10 commands:")
-        for i, (t_sec, cmd) in enumerate(commands[:10]):
-            log.info("    %d: %.2f %s", i, t_sec, cmd)
+        for i, (t_cmd_ms, cmd) in enumerate(commands[:10]):
+            log.info("    %d: %d %s", i, t_cmd_ms, cmd)
+    if respawn_shifted:
+        log.info("  Shifted %d respawn events to be after checkpoint times", respawn_shifted)
     
     metadata = {
         "race_time_ms": race_time,
@@ -517,13 +618,47 @@ def get_sample_period_from_replay(replay_path: Path) -> int:
         _log.setLevel(_logmod.CRITICAL)
     try:
         gbx = Gbx(str(replay_path))
-        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST])
+        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST, GbxType.CTN_GHOST_OLD])
         if not ghosts:
             return 10
         ghost = min(ghosts, key=lambda g: getattr(g, "cp_times", [0])[-1] if getattr(g, "cp_times", None) else 0)
         return int(getattr(ghost, "sample_period", 10) or 10)
     except Exception:
         return 10
+    finally:
+        for _log, _lev in _saved:
+            _log.setLevel(_lev)
+
+
+def replay_has_respawn(replay_path: Path) -> bool:
+    """
+    Return True if the replay file contains any respawn (or enter) control events.
+    Used with --exclude-respawn-maps to skip tracks that have respawn in any replay.
+    """
+    try:
+        from pygbx import Gbx, GbxType
+    except ImportError:
+        return False
+    import logging as _logmod
+    _saved = []
+    for _name in ("pygbx", "pygbx.gbx"):
+        _log = _logmod.getLogger(_name)
+        _saved.append((_log, _log.level))
+        _log.setLevel(_logmod.CRITICAL)
+    try:
+        gbx = Gbx(str(replay_path))
+        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST, GbxType.CTN_GHOST_OLD])
+        if not ghosts:
+            return False
+        ghost = min(ghosts, key=lambda g: getattr(g, "cp_times", [0])[-1] if getattr(g, "cp_times", None) else 0)
+        control_entries = list(getattr(ghost, "control_entries", []) or [])
+        for ce in control_entries:
+            name = (str(getattr(ce, "event_name", getattr(ce, "EventName", ""))) or "").strip().lower()
+            if name in ("respawn", "enter"):
+                return True
+        return False
+    except Exception:
+        return False
     finally:
         for _log, _lev in _saved:
             _log.setLevel(_lev)
@@ -558,7 +693,7 @@ def extract_inputs_from_replay_gbx(
         _log.setLevel(_logmod.CRITICAL)
     try:
         gbx = Gbx(str(replay_path))
-        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST])
+        ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST, GbxType.CTN_GHOST_OLD])
         if not ghosts:
             return None
         ghost = min(ghosts, key=lambda g: getattr(g, "cp_times", [0])[-1] if getattr(g, "cp_times", None) else 0)
@@ -1054,6 +1189,8 @@ def worker_process(
     run_steps_per_action: int,
     step_ms: int,
     input_time_offset_ms: int,
+    respawn_action: str,
+    respawn_after_cp_ms: int,
     running_speed: int,
     config_path: Path,
     per_frame_json: bool = False,
@@ -1112,7 +1249,13 @@ def worker_process(
 
                 # 1. Convert replay to TMInterface script format
                 script_path = scripts_dir / f"replay_{track_id}_{replay_name}.txt"
-                replay_metadata = convert_replay_to_tmi_script(replay_path, script_path)
+                replay_metadata = convert_replay_to_tmi_script(
+                    replay_path,
+                    script_path,
+                    input_time_offset_ms=input_time_offset_ms,
+                    respawn_action=respawn_action,
+                    respawn_after_cp_ms=respawn_after_cp_ms,
+                )
                 if replay_metadata is None:
                     log.warning("Skip (conversion failed): %s", replay_path)
                     continue
@@ -1298,6 +1441,23 @@ def main() -> None:
         default=0,
         help="Global timing offset for replay input events in ms (e.g. -10, 0, +10). Must be multiple of 10.",
     )
+    parser.add_argument(
+        "--respawn-action",
+        type=str,
+        default="enter",
+        help="TMInterface action used for replay Respawn events (e.g. enter, delete, backspace).",
+    )
+    parser.add_argument(
+        "--respawn-after-cp-ms",
+        type=int,
+        default=0,
+        help="Optional delay after latest replay checkpoint before Respawn (ms). 0 = exact replay timing.",
+    )
+    parser.add_argument(
+        "--exclude-respawn-maps",
+        action="store_true",
+        help="Skip tracks that have at least one replay with respawn (checkpoint respawn) events.",
+    )
     parser.add_argument("--running-speed", type=int, default=None, help="Override running_speed from config (e.g. 512 = 512x, 1 = real-time).")
     parser.add_argument("--config", type=Path, default=_default_yaml, help="Config YAML")
     args = parser.parse_args()
@@ -1323,6 +1483,25 @@ def main() -> None:
     if not tasks:
         log.info("No replay tasks found under %s", args.replays_dir)
         return
+
+    if args.exclude_respawn_maps:
+        track_ids_with_respawn: set[str] = set()
+        for track_id, replay_path in tasks:
+            if replay_has_respawn(replay_path):
+                track_ids_with_respawn.add(track_id)
+        if track_ids_with_respawn:
+            tasks = [(tid, path) for tid, path in tasks if tid not in track_ids_with_respawn]
+            log.info(
+                "Excluded %d tracks with respawn (--exclude-respawn-maps): %s",
+                len(track_ids_with_respawn),
+                sorted(track_ids_with_respawn)[:20],
+            )
+            if len(track_ids_with_respawn) > 20:
+                log.info("  ... and %d more", len(track_ids_with_respawn) - 20)
+        if not tasks:
+            log.info("No replay tasks left after excluding respawn maps.")
+            return
+
     grouped = group_replay_tasks_by_track(tasks)
     log.info(
         "Filtered to %d replay tasks (%d tracks, max %d replays/track)",
@@ -1348,6 +1527,11 @@ def main() -> None:
         raise ValueError(
             f"Invalid --input-time-offset-ms={args.input_time_offset_ms}. "
             "It must be a multiple of 10."
+        )
+    if args.respawn_after_cp_ms < 0 or args.respawn_after_cp_ms % 10 != 0:
+        raise ValueError(
+            f"Invalid --respawn-after-cp-ms={args.respawn_after_cp_ms}. "
+            "It must be a non-negative multiple of 10."
         )
     log.info("Using input_time_offset_ms=%d", args.input_time_offset_ms)
 
@@ -1385,6 +1569,8 @@ def main() -> None:
                 run_steps_per_action,
                 step_ms,
                 args.input_time_offset_ms,
+                args.respawn_action,
+                args.respawn_after_cp_ms,
                 running_speed,
                 args.config.resolve(),
                 getattr(args, "per_frame_json", False),
