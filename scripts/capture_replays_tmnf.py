@@ -45,6 +45,14 @@ Usage:
   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir out --step-ms 10  # finer TMNF timing
   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir out --workers 2 --fps 100
   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir out --max-replays-per-track 5  # top 5 only
+  # Custom track list (order = processing order). E.g. after filtering out respawn maps:
+  python scripts/filter_track_ids_no_respawn.py -o maps/track_ids_no_respawn.txt
+  python scripts/capture_replays_tmnf.py --track-ids maps/track_ids_no_respawn.txt --replays-dir maps/replays --output-dir out
+  # Карты с превью/intro автоматически обрабатываются: disable_forced_camera + skip_map_load_screens.
+  # Если гонка не стартовала за 3с (нет RUN_STEP), скрипт шлёт TMInterface give_up/press_delete
+  # для рестарта (retry каждые 3с, всего до 25с). Флаг --press-enter-after-map-load убран.
+  # --write-enter-maps собирает track_id карт, которые так и не стартовали.
+  # --exclude-enter-maps чтобы пропустить эти карты при следующем запуске.
 """
 
 from __future__ import annotations
@@ -55,21 +63,29 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import re
 import queue
 import signal
 import sys
+import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _safe_script_basename(replay_name: str) -> str:
+    """Safe filename for TMInterface script: no quotes/spaces (breaks 'load' command)."""
+    return re.sub(r"[\s'\"]+", "_", replay_name).strip("_") or "replay"
 
 import cv2
 import numpy as np
 
 # Project root and config
 _script_root = Path(__file__).resolve().parents[1]
+_scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_script_root))
-sys.path.insert(0, str(_script_root / "scripts"))
+sys.path.insert(0, str(_scripts_dir))
 
 from config_files.config_loader import get_config, load_config, set_config
 
@@ -77,8 +93,15 @@ _default_yaml = _script_root / "config_files" / "config_default.yaml"
 if _default_yaml.exists():
     set_config(load_config(_default_yaml))
 
-# Reuse action mapping from the existing capture_frames_from_replays script
-from capture_frames_from_replays import action_dict_to_index
+# Reuse action mapping from capture_frames_from_replays (same directory)
+try:
+    from capture_frames_from_replays import action_dict_to_index
+except ModuleNotFoundError:
+    from importlib.util import spec_from_file_location, module_from_spec
+    _spec = spec_from_file_location("capture_frames_from_replays", _scripts_dir / "capture_frames_from_replays.py")
+    _mod = module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    action_dict_to_index = _mod.action_dict_to_index
 
 log = logging.getLogger(__name__)
 
@@ -830,6 +853,36 @@ def get_challenge_path_for_track(
     return None
 
 
+def get_map_filename_for_task(
+    task: tuple[str, list[Path]],
+    tracks_dir: Path,
+    extract_challenge_from_replay: Any,
+) -> str | None:
+    """Имя файла карты для первой реплеи задачи (то, что уйдёт в game Challenges)."""
+    track_id, replay_paths = task
+    if not replay_paths:
+        return None
+    replay_path = replay_paths[0]
+    challenge_path = get_challenge_path_for_track(
+        track_id, replay_path, tracks_dir, extract_challenge_from_replay,
+    )
+    forced_out_dir = tracks_dir / str(track_id)
+    forced_out_dir.mkdir(parents=True, exist_ok=True)
+    embedded_challenge = forced_out_dir / f"{track_id}__from_replay.Challenge.Gbx"
+    embedded_ok = extract_challenge_from_replay(replay_path, embedded_challenge)
+    if challenge_path is None and not embedded_ok:
+        return None
+    if challenge_path is None and embedded_ok:
+        return embedded_challenge.name
+    if challenge_path is not None and embedded_ok:
+        try:
+            if challenge_path.read_bytes() != embedded_challenge.read_bytes():
+                return embedded_challenge.name
+        except Exception:
+            return embedded_challenge.name
+    return challenge_path.name
+
+
 # ---------- 4. Replay policy & helpers for direct rollout() reuse ----------
 
 
@@ -1024,7 +1077,10 @@ def rollout_with_tmi_script(
     height: int,
     fps: float,
     step_ms: int,
-) -> dict[str, Any] | None:
+    last_map_requested: list[str | None],
+    next_map_name: str | None = None,
+    next_script_path: Path | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
     """
     Replay using TMInterface native script loading (deterministic, no drift).
     
@@ -1035,7 +1091,8 @@ def rollout_with_tmi_script(
       3. TMInterface natively injects inputs (fully deterministic!)
       4. We only capture frames via on_step + request_frame
     
-    Returns rollout_results dict with frames, times, or None on error.
+    Returns (rollout_results dict with frames, times, or None on error, need_enter).
+    need_enter is True when the run was aborted because the map did not start (e.g. "Press Enter to start").
     """
     from trackmania_rl.tmi_interaction.tminterface2 import MessageType
     
@@ -1054,11 +1111,12 @@ def rollout_with_tmi_script(
             except ConnectionRefusedError:
                 if time.perf_counter() - start > 30:
                     log.error("Cannot connect to TMInterface")
-                    return None
+                    return (None, False)
                 time.sleep(0.5)
     
-    # Prepare frame capture state
-    capture_interval_ms = 1000.0 / fps if fps > 0 else float(step_ms)
+    # Prepare frame capture state. FPS = кадров в реальном времени в секунду; при running_speed > 1
+    # в симе за 1 реальную секунду проходит running_speed секунд сима → интервал в симе больше.
+    capture_interval_ms = (1000.0 * gim.running_speed) / fps if fps > 0 else float(step_ms)
     next_capture_time_ms = 0.0
     frames = []
     frame_times_ms = []
@@ -1068,62 +1126,219 @@ def rollout_with_tmi_script(
     race_start_requested = False
     current_time = -3000
     timeout_start = None
+    connect_seen_this_rollout = False
+    console_hidden = False  # Флаг: консоль скрыта один раз
+    max_cp_reached = 0  # Для диагностики: 0 чекпоинтов = машина не ехала
+    # После смены карты TMInterface может ещё присылать run step с временем предыдущей гонки (51s).
+    # Не считать время "нашим" пока не увидели countdown/старт новой карты (current_time <= 0).
+    time_from_current_map = False
+    # Финиш по таймингу: переключаемся до пересечения финиша, чтобы успеть до экрана медалей.
+    FINISH_MARGIN_MS = -800  # минус = за N ms до race_time_ms делаем unload и переход на след. реплей/карту
+    # Короткий таймаут сокета для retry-loop: при каждом таймауте шлём TMInterface команды (give_up, press delete)
+    # чтобы скипнуть превью средствами самого движка, а не симуляцией клавиатуры.
+    ENTER_SOCKET_TIMEOUT_S = 3.0
+    # Полный таймаут после которого сдаёмся и пропускаем карту.
+    ENTER_TOTAL_TIMEOUT_S = 25.0
+    map_load_wall_time = 0.0
+    need_enter = False
     import time as time_module
     import socket
-    
+
+    # Спам Enter в отдельном потоке: скипает превью на картах, где RUN_STEP не приходят во время превью.
+    # Спам начинается через 1.5с после map (на картах без превью countdown уже начнётся и спам не отправится).
+    # Останавливается при первом RUN_STEP с countdown (current_time <= 0).
+    # После остановки спама — give_up() перезапускает гонку, чтобы TMI скрипт выполнился чисто.
+    enter_spam_stop_event = threading.Event()
+    enter_spam_thread = None
+
+    def enter_spam_worker():
+        """Spam Enter every 100ms until stopped by first RUN_STEP countdown.
+        
+        Starts with a 1.5s delay so maps without previews reach countdown
+        before any Enter is sent (avoiding spurious keypresses during countdown).
+        Maps WITH previews still get Enter after the delay.
+        """
+        from trackmania_rl.tmi_interaction import game_instance_manager
+        log.info("  Enter spam: started (1.5s initial delay)")
+        if enter_spam_stop_event.wait(1.5):
+            log.info("  Enter spam: stopped during initial delay (0 sends)")
+            return
+        attempt = 0
+        while not enter_spam_stop_event.is_set():
+            attempt += 1
+            game_instance_manager.send_enter_to_game_window(gim, log)
+            if attempt <= 3 or attempt % 20 == 0:
+                log.info("    Enter #%d", attempt)
+            enter_spam_stop_event.wait(0.1)  # 100ms between sends, instant wake on stop
+        log.info("  Enter spam: stopped after %d sends", attempt)
+
+    default_socket_timeout_s = get_config().tmi_protection_timeout_s
+    skip_retry_count = 0  # сколько раз пытались скипнуть превью через TMInterface команды
     try:
         while not race_finished:
-            msgtype = gim.iface._read_int32()
+            # Короткий таймаут сокета, когда ждём старт после map — если RUN_STEP перестали приходить, не висеть 500 сек.
+            if map_load_wall_time > 0 and not race_started:
+                gim.iface.set_socket_timeout(ENTER_SOCKET_TIMEOUT_S)
+            else:
+                gim.iface.set_socket_timeout(default_socket_timeout_s)
+
+            try:
+                msgtype = gim.iface._read_int32()
+            except socket.timeout:
+                # Сокет не получил данных за ENTER_SOCKET_TIMEOUT_S секунд.
+                # Если ждём старт гонки — возможно карта показывает превью/intro.
+                # Пробуем скипнуть средствами TMInterface (give_up, press delete) —
+                # это работает на уровне движка, не зависит от клавиатуры.
+                if map_load_wall_time > 0 and not race_started:
+                    elapsed = time_module.perf_counter() - map_load_wall_time
+                    if elapsed > ENTER_TOTAL_TIMEOUT_S:
+                        log.warning("  Race did not start within %.0fs — skipping map", ENTER_TOTAL_TIMEOUT_S)
+                        need_enter = True
+                        try:
+                            gim.iface.execute_command("unload")
+                        except Exception:
+                            pass
+                        break
+                    skip_retry_count += 1
+                    log.info("  No messages for %.0fs (retry #%d), Enter spam running", elapsed, skip_retry_count)
+                    continue  # retry _read_int32
+                else:
+                    # Timeout during race or other state — propagate as before
+                    raise
             
             if msgtype == int(MessageType.SC_ON_CONNECT_SYNC):
-                # Initial connection - configure TMInterface
-                gim.iface.execute_command(f"set countdown_speed {gim.running_speed}")
-                gim.iface.execute_command("set use_valseed false")
+                connect_seen_this_rollout = True
+                # skip_map_load_screens: пропускает "Press any key to continue" (docs: donadigo.com/tminterface/variables)
                 gim.iface.execute_command("set skip_map_load_screens true")
+                gim.iface.execute_command("set disable_forced_camera true")
+                # Скрываем консоль TMInterface один раз при первом подключении
+                if not console_hidden:
+                    time_module.sleep(0.3)
+                    from trackmania_rl.tmi_interaction import game_instance_manager
+                    if game_instance_manager.send_tilde_to_game_window(gim, log):
+                        log.info("  TMInterface console hidden")
+                        console_hidden = True
+                # Переменные и скрипт — каждый connect. Map шлём только если в меню (is_in_menus).
+                gim.iface.execute_command(f"set countdown_speed {gim.running_speed}")
+                gim.request_speed(gim.running_speed)  # скорость гонки (speed); countdown_speed — только обратный отсчёт
+                try:
+                    gim.iface.execute_command("set use_valseed false")
+                except Exception:
+                    pass
                 gim.iface.execute_command("set unfocused_fps_limit false")
                 gim.iface.execute_command(f"cam {get_config().game_camera_number}")
                 gim.iface.set_on_step_period(step_ms)
-                
-                # CRITICAL: Load script BEFORE entering map
-                # TMInterface docs: script must be loaded before starting race
-                # Also verify execute_commands is enabled
+                # Каждый connect — load скрипта реплея для текущей карты (важно для 2-й и далее карт).
                 log.info("  Loading TMI script: %s", script_path.name)
-                gim.iface.execute_command("set execute_commands true")
                 gim.iface.execute_command(f"load {script_path.name}")
-                time_module.sleep(0.3)
-                
-                # Load map (script already loaded, will auto-inject)
-                log.info("  Loading map: %s", map_name)
-                gim.iface.execute_command(f"map {map_name}")
-                
+                gim.iface.execute_command("set execute_commands true")
+                if gim.iface.is_in_menus() and map_name != last_map_requested[0]:
+                    last_map_requested[0] = map_name
+                    race_start_requested = False  # give_up должен сработать для новой карты
+                    max_cp_reached = 0
+                    map_load_wall_time = time_module.perf_counter()
+                    time_module.sleep(0.2)
+                    log.info("  Loading map: %s", map_name)
+                    # ВАЖНО: disable_forced_camera и skip_map_load_screens должны быть установлены ДО map команды
+                    # (переустанавливаем на всякий случай, хотя они уже были в ON_CONNECT)
+                    gim.iface.execute_command("set skip_map_load_screens true")
+                    gim.iface.execute_command("set disable_forced_camera true")
+                    gim.iface.execute_command(f"map {map_name}")
+                    # Запускаем спам Enter (1.5с задержка, потом каждые 100мс)
+                    if enter_spam_thread is None or not enter_spam_thread.is_alive():
+                        enter_spam_stop_event.clear()
+                        enter_spam_thread = threading.Thread(target=enter_spam_worker, daemon=True)
+                        enter_spam_thread.start()
+                elif map_name != last_map_requested[0]:
+                    log.info("  Not in menus, will request map in run step: %s", map_name)
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_RUN_STEP_SYNC):
                 current_time = gim.iface._read_int32()
+                # Как только видим время countdown/старта (<= 0), считаем что приходят тики уже от текущей карты.
+                if current_time <= 0 and not time_from_current_map:
+                    # Первый RUN_STEP с countdown — СТОП спам немедленно
+                    time_from_current_map = True
+                    skip_retry_count = 0
+                    if enter_spam_thread is not None and enter_spam_thread.is_alive():
+                        enter_spam_stop_event.set()
+                        log.info("  Spam stopped (countdown t=%d)", current_time)
+                    # Активируем скрипт: reload + give_up перезапускает гонку.
+                    # Без give_up TMInterface может не активировать скрипт для первого
+                    # обратного отсчёта (скрипт загружен в ON_CONNECT, но команды могут
+                    # не применяться до перезапуска). give_up() гарантирует чистый старт.
+                    if not race_start_requested:
+                        log.info("  Activating script (reload + give_up at t=%d)...", current_time)
+                        gim.request_speed(gim.running_speed)
+                        gim.iface.execute_command(f"load {script_path.name}")
+                        gim.iface.execute_command("set execute_commands true")
+                        gim.iface.give_up()
+                        race_start_requested = True
                 
-                # Start race (give_up restarts countdown)
-                if current_time <= -2990 and not race_start_requested:
-                    log.info("  Starting race (give_up)...")
-                    gim.iface.give_up()
-                    race_start_requested = True
-                
-                if not race_started and current_time >= 0:
-                    race_started = True
-                    timeout_start = time_module.perf_counter()
-                    log.info("  Race started (t=0), capturing frames...")
-                
-                # Capture frames at specified FPS
-                if race_started and current_time >= next_capture_time_ms:
-                    if not frame_expected:
-                        gim.iface.request_frame(width, height)
-                        frame_expected = True
-                        next_capture_time_ms += capture_interval_ms
-                
-                # Timeout protection
-                if race_started and timeout_start:
-                    if time_module.perf_counter() - timeout_start > (race_time_ms / 1000.0) + 30:
-                        log.warning("  Timeout after %.1fs - race did not finish", time_module.perf_counter() - timeout_start)
+                # По документации: load скрипта — до map. Карту шлём из run step (не из callback финиша).
+                # Для второй карты: сначала load скрипта реплея этой карты, потом map.
+                if map_name != last_map_requested[0]:
+                    log.info("  Map changed, loading script then map: %s", map_name)
+                    time_from_current_map = False  # после смены карты ждём снова countdown/старт
+                    race_start_requested = False  # give_up должен сработать для новой карты
+                    max_cp_reached = 0
+                    map_load_wall_time = time_module.perf_counter()
+                    # ВАЖНО: disable_forced_camera и skip_map_load_screens должны быть установлены ДО map команды
+                    gim.iface.execute_command("set skip_map_load_screens true")
+                    gim.iface.execute_command("set disable_forced_camera true")
+                    gim.iface.execute_command(f"load {script_path.name}")
+                    gim.iface.execute_command("set execute_commands true")
+                    last_map_requested[0] = map_name
+                    time_module.sleep(0.1)
+                    gim.iface.execute_command(f"map {map_name}")
+                    # Остановим старый спам и запустим новый
+                    if enter_spam_thread is not None and enter_spam_thread.is_alive():
+                        enter_spam_stop_event.set()
+                        enter_spam_thread.join(timeout=0.5)
+                    enter_spam_stop_event.clear()
+                    enter_spam_thread = threading.Thread(target=enter_spam_worker, daemon=True)
+                    enter_spam_thread.start()
+                elif map_name == last_map_requested[0]:
+                    # Карты с "Press Enter to start": гонка не стартует, current_time не доходит до 0. Таймаут → пропуск.
+                    if not race_started and map_load_wall_time > 0 and (time_module.perf_counter() - map_load_wall_time) > ENTER_TOTAL_TIMEOUT_S:
+                        log.warning("  Race did not start within %.0fs (e.g. 'Press Enter to start') — skipping", ENTER_TOTAL_TIMEOUT_S)
+                        need_enter = True
+                        try:
+                            gim.iface.execute_command("unload")
+                        except Exception:
+                            pass
                         break
+                    # Финиш по таймингу: только если время уже от текущей карты (не старый тик после смены карты).
+                    if time_from_current_map and race_started and current_time >= race_time_ms + FINISH_MARGIN_MS:
+                        log.info("  Race finished by time (t=%dms >= %dms), switching...", current_time, race_time_ms + FINISH_MARGIN_MS)
+                        race_finished = True
+                        try:
+                            gim.iface.execute_command("unload")
+                        except Exception:
+                            pass
+                        # Не шлём press enter: мы переключаемся до финиша (negative margin), медалей нет.
+                        # Enter в момент гонки мог приводить к обрыву соединения TMInterface.
+                    # give_up() fired at first countdown tick (see above) — not here.
+                    # Old condition (current_time <= -2990) never triggered because the
+                    # first RUN_STEP arrives at ~-2600 due to ON_CONNECT processing time.
+                    
+                    if not race_started and time_from_current_map and current_time >= 0:
+                        race_started = True
+                        timeout_start = time_module.perf_counter()
+                        log.info("  Race started (t=0), capturing frames...")
+                    
+                    # Capture frames at specified FPS
+                    if race_started and time_from_current_map and current_time >= next_capture_time_ms:
+                        if not frame_expected:
+                            gim.iface.request_frame(width, height)
+                            frame_expected = True
+                            next_capture_time_ms += capture_interval_ms
+                    
+                    # Timeout protection
+                    if race_started and timeout_start:
+                        if time_module.perf_counter() - timeout_start > (race_time_ms / 1000.0) + 30:
+                            log.warning("  Timeout after %.1fs - race did not finish", time_module.perf_counter() - timeout_start)
+                            break
                 
                 gim.iface._respond_to_call(msgtype)
                 
@@ -1138,9 +1353,11 @@ def rollout_with_tmi_script(
             elif msgtype == int(MessageType.SC_CHECKPOINT_COUNT_CHANGED_SYNC):
                 current_cp = gim.iface._read_int32()
                 target_cp = gim.iface._read_int32()
-                if current_cp == target_cp:
-                    log.info("  Race finished at t=%dms!", current_time)
-                    race_finished = True
+                if race_started and current_cp > max_cp_reached:
+                    max_cp_reached = current_cp
+                    log.info("  Checkpoint %d/%d at t=%dms", current_cp, target_cp, current_time)
+                if current_cp == target_cp and race_started:
+                    log.debug("  Checkpoint finish event at t=%dms (we use time-based finish)", current_time)
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_LAP_COUNT_CHANGED_SYNC):
@@ -1150,29 +1367,51 @@ def rollout_with_tmi_script(
                 
             elif msgtype == int(MessageType.C_SHUTDOWN):
                 gim.iface.close()
-                return None
+                return (None, False)
             else:
                 pass
                 
     except socket.timeout:
-        log.warning("  TMInterface timeout")
-        return None
+        # Таймаут вне фазы ожидания старта — фатальная ошибка
+        log.warning("  TMInterface socket timeout (not during map load wait)")
+        return (None, False)
+    except ConnectionError as e:
+        log.warning("  TMInterface connection closed: %s", e)
+        try:
+            if gim.iface is not None:
+                gim.iface.close()
+        except Exception:
+            pass
+        gim.iface = None
+        return (None, False)
     except Exception as e:
         log.exception("  Rollout failed: %s", e)
-        return None
+        return (None, False)
     finally:
-        # Unload script
-        try:
-            gim.iface.execute_command("unload")
-        except:
-            pass
-    
-    return {
+        if enter_spam_thread is not None and enter_spam_thread.is_alive():
+            enter_spam_stop_event.set()
+            enter_spam_thread.join(timeout=0.5)
+    # Не вызываем unload: следующий реплей загрузит свой скрипт поверх; unload после первого
+    # реплея даёт "unknown message 3" и к моменту загрузки карты скрипта уже нет — машина не едет.
+
+    # --- Диагностика: машина ехала? ---
+    if race_started and max_cp_reached == 0:
+        log.warning(
+            "  CAR STUCK? Race started but 0 checkpoints reached (t=%dms, %d frames). "
+            "Script may not have executed. Check TMI console for 'File does not exist'.",
+            current_time, len(frames),
+        )
+    elif race_started:
+        log.info("  Race summary: %d checkpoints, %d frames, final t=%dms", max_cp_reached, len(frames), current_time)
+
+    if need_enter:
+        return (None, True)
+    return ({
         "frames": frames,
         "frame_times_ms": frame_times_ms,
         "race_finished": race_finished,
         "final_time_ms": current_time,
-    }
+    }, False)
 
 
 def worker_process(
@@ -1194,6 +1433,7 @@ def worker_process(
     running_speed: int,
     config_path: Path,
     per_frame_json: bool = False,
+    track_ids_need_enter: Any = None,
 ) -> None:
     """Single worker: convert .replay.gbx → TMI script, load via TMInterface, capture frames."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
@@ -1229,159 +1469,217 @@ def worker_process(
         max_minirace_duration_ms=600_000,
         tmi_port=tmi_port,
     )
+    # Как в training: latest_map_path_requested — при смене трека запрашиваем новую карту.
+    last_map_requested: list[str | None] = [None]
 
     try:
-        while True:
-            try:
-                task = task_queue.get(timeout=2.0)
-            except queue.Empty:
-                continue
-            if task is None:
-                break
-
-            track_id, replay_paths = task
-            for replay_path in replay_paths:
-                replay_name = replay_path.stem
-                out_dir = output_dir / str(track_id) / replay_name
-                if (out_dir / "manifest.json").exists():
-                    log.info("Skip (already done): %s / %s", track_id, replay_name)
-                    continue
-
-                # 1. Convert replay to TMInterface script format
-                script_path = scripts_dir / f"replay_{track_id}_{replay_name}.txt"
-                replay_metadata = convert_replay_to_tmi_script(
-                    replay_path,
-                    script_path,
-                    input_time_offset_ms=input_time_offset_ms,
-                    respawn_action=respawn_action,
-                    respawn_after_cp_ms=respawn_after_cp_ms,
-                )
-                if replay_metadata is None:
-                    log.warning("Skip (conversion failed): %s", replay_path)
-                    continue
-                
-                race_time_ms = replay_metadata["race_time_ms"]
-                if replay_metadata.get("game_version"):
-                    log.info("  Game version: %s", replay_metadata["game_version"])
-
-                # 2. Ensure challenge is in the game folder
-                challenge_path = get_challenge_path_for_track(
-                    track_id, replay_path, tracks_dir, extract_challenge_from_replay,
-                )
-                # Byte-level verification
-                forced_out_dir = tracks_dir / str(track_id)
-                forced_out_dir.mkdir(parents=True, exist_ok=True)
-                embedded_challenge = forced_out_dir / f"{track_id}__from_replay.Challenge.Gbx"
-                embedded_ok = extract_challenge_from_replay(replay_path, embedded_challenge)
-
-                if challenge_path is None and not embedded_ok:
-                    log.warning("Skip (no challenge): %s", replay_path)
-                    continue
-                if challenge_path is None and embedded_ok:
-                    challenge_path = embedded_challenge
-                elif challenge_path is not None and embedded_ok:
-                    try:
-                        local_bytes = challenge_path.read_bytes()
-                        embedded_bytes = embedded_challenge.read_bytes()
-                        if local_bytes != embedded_bytes:
-                            log.warning("Map bytes differ - using embedded")
-                            challenge_path = embedded_challenge
-                        else:
-                            log.info("  Map bytes match")
-                    except Exception:
-                        challenge_path = embedded_challenge
-
-                # Copy challenge to game directory
-                game_challenges = Path(cfg.trackmania_base_path) / "Tracks" / "Challenges"
-                game_challenges.mkdir(parents=True, exist_ok=True)
-                dest_challenge = game_challenges / challenge_path.name
-                if dest_challenge != challenge_path.resolve():
-                    import shutil
-                    shutil.copy2(challenge_path, dest_challenge)
-
-                # 3. Run replay with TMInterface native input loading (DETERMINISTIC!)
+        try:
+            task = task_queue.get(timeout=2.0)
+        except queue.Empty:
+            task = None
+        if task is None:
+            pass  # no tasks
+        else:
+            while True:
                 try:
-                    rollout_results = rollout_with_tmi_script(
-                        gim=gim,
-                        script_path=script_path,
-                        map_name=dest_challenge.name,
-                        race_time_ms=race_time_ms,
-                        width=width,
-                        height=height,
-                        fps=fps,
-                        step_ms=step_ms,
+                    next_task = task_queue.get(timeout=2.0)
+                except queue.Empty:
+                    next_task = None
+                track_id, replay_paths = task
+                runs_done_this_track = 0  # only count actually run rollouts (skipped "already done" don't count)
+                for replay_idx, replay_path in enumerate(replay_paths):
+                    is_last_replay_this_task = replay_idx == len(replay_paths) - 1
+                    replay_name = replay_path.stem
+                    out_dir = output_dir / str(track_id) / replay_name
+                    if (out_dir / "manifest.json").exists():
+                        log.info("Skip (already done): %s / %s", track_id, replay_name)
+                        # Ограничение: после skip игра остаётся на карте пропущенного реплея (её запросили в конце прошлого заезда). Следующий rollout может быть для другой карты — тогда в connect не шлём map (не в меню), получается неверная карта. Не skip'айте подряд реплеи на разных треках.
+                        continue
+
+                    # 1. Convert replay to TMInterface script format (safe name: no apostrophe/spaces for TMI load)
+                    script_basename = f"replay_{track_id}_{_safe_script_basename(replay_name)}.txt"
+                    script_path = scripts_dir / script_basename
+                    replay_metadata = convert_replay_to_tmi_script(
+                        replay_path,
+                        script_path,
+                        input_time_offset_ms=input_time_offset_ms,
+                        respawn_action=respawn_action,
+                        respawn_after_cp_ms=respawn_after_cp_ms,
                     )
-                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
-                    log.warning("TMI connection broken: %s", e)
-                    if gim.iface is not None:
-                        try:
-                            gim.iface.close()
-                        except:
-                            pass
-                    gim.iface = None
-                    gim.last_rollout_crashed = True
-                    continue
-                except Exception as e:
-                    log.exception("Rollout failed: %s", e)
-                    if gim.iface is not None:
-                        try:
-                            gim.iface.close()
-                        except:
-                            pass
-                    gim.iface = None
-                    gim.last_rollout_crashed = True
-                    continue
+                    if replay_metadata is None:
+                        log.warning("Skip (conversion failed): %s", replay_path)
+                        continue
+                    
+                    race_time_ms = replay_metadata["race_time_ms"]
+                    if replay_metadata.get("game_version"):
+                        log.info("  Game version: %s", replay_metadata["game_version"])
 
-                if rollout_results is None:
-                    log.warning("Replay %s: rollout returned None", replay_path)
-                    continue
+                    # 2. Ensure challenge is in the game folder
+                    challenge_path = get_challenge_path_for_track(
+                        track_id, replay_path, tracks_dir, extract_challenge_from_replay,
+                    )
+                    # Byte-level verification
+                    forced_out_dir = tracks_dir / str(track_id)
+                    forced_out_dir.mkdir(parents=True, exist_ok=True)
+                    embedded_challenge = forced_out_dir / f"{track_id}__from_replay.Challenge.Gbx"
+                    embedded_ok = extract_challenge_from_replay(replay_path, embedded_challenge)
 
-                # 4. Save frames
-                out_dir.mkdir(parents=True, exist_ok=True)
-                manifest_entries = []
-                for i, (frame, t_ms) in enumerate(zip(rollout_results["frames"], rollout_results["frame_times_ms"])):
-                    fname = f"frame_{i:05d}_{t_ms}ms.jpeg"
-                    cv2.imwrite(str(out_dir / fname), frame[0], [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    entry = {
-                        "file": fname,
-                        "step": i,
-                        "time_ms": t_ms,
-                        "capture_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                    }
-                    manifest_entries.append(entry)
-                    if per_frame_json:
-                        (out_dir / f"frame_{i:05d}_{t_ms}ms.json").write_text(
-                            json.dumps(entry, indent=2), encoding="utf-8",
+                    if challenge_path is None and not embedded_ok:
+                        log.warning("Skip (no challenge): %s", replay_path)
+                        continue
+                    if challenge_path is None and embedded_ok:
+                        challenge_path = embedded_challenge
+                    elif challenge_path is not None and embedded_ok:
+                        try:
+                            local_bytes = challenge_path.read_bytes()
+                            embedded_bytes = embedded_challenge.read_bytes()
+                            if local_bytes != embedded_bytes:
+                                log.warning("Map bytes differ - using embedded")
+                                challenge_path = embedded_challenge
+                            else:
+                                log.info("  Map bytes match")
+                        except Exception:
+                            challenge_path = embedded_challenge
+
+                    # Copy challenge to game directory
+                    game_challenges = Path(cfg.trackmania_base_path) / "Tracks" / "Challenges"
+                    game_challenges.mkdir(parents=True, exist_ok=True)
+                    dest_challenge = game_challenges / challenge_path.name
+                    if dest_challenge != challenge_path.resolve():
+                        import shutil
+                        shutil.copy2(challenge_path, dest_challenge)
+
+                    # Следующая карта и скрипт после финиша: для цепочки unload → load → map.
+                    if is_last_replay_this_task and next_task is not None:
+                        next_map_name = get_map_filename_for_task(
+                            next_task, tracks_dir, extract_challenge_from_replay
                         )
-                
-                (out_dir / "manifest.json").write_text(
-                    json.dumps(manifest_entries, indent=2), encoding="utf-8",
-                )
-                
-                metadata = {
-                    "track_id": track_id,
-                    "replay_name": replay_name,
-                    "challenge_name": dest_challenge.name,
-                    "fps": fps,
-                    "width": width,
-                    "height": height,
-                    "step_ms": step_ms,
-                    "race_time_ms": race_time_ms,
-                    "total_frames": len(rollout_results["frames"]),
-                    "race_finished": rollout_results["race_finished"],
-                    "tmi_script_used": script_path.name,
-                }
-                if rollout_results["race_finished"]:
-                    metadata["actual_race_time_ms"] = rollout_results["final_time_ms"]
-                
-                (out_dir / "metadata.json").write_text(
-                    json.dumps(metadata, indent=2), encoding="utf-8",
-                )
-                
-                log.info(
-                    "Captured %s / %s: %d frames, finished=%s",
-                    track_id, replay_name, len(rollout_results["frames"]), rollout_results["race_finished"],
-                )
+                        next_track_id, next_replay_paths = next_task
+                        next_replay_path = next_replay_paths[0]
+                    elif not is_last_replay_this_task:
+                        next_map_name = dest_challenge.name
+                        next_track_id = track_id
+                        next_replay_path = replay_paths[replay_idx + 1]
+                    else:
+                        next_map_name = None
+                        next_track_id = None
+                        next_replay_path = None
+
+                    next_script_path = None
+                    if next_replay_path is not None:
+                        next_script_basename = f"replay_{next_track_id}_{_safe_script_basename(next_replay_path.stem)}.txt"
+                        next_script_path = scripts_dir / next_script_basename
+                        if convert_replay_to_tmi_script(
+                            next_replay_path,
+                            next_script_path,
+                            input_time_offset_ms=input_time_offset_ms,
+                            respawn_action=respawn_action,
+                            respawn_after_cp_ms=respawn_after_cp_ms,
+                        ) is None:
+                            next_script_path = None
+
+                    # 3. Run replay with TMInterface native input loading (DETERMINISTIC!)
+                    try:
+                        rollout_results, need_enter = rollout_with_tmi_script(
+                            gim=gim,
+                            script_path=script_path,
+                            map_name=dest_challenge.name,
+                            race_time_ms=race_time_ms,
+                            width=width,
+                            height=height,
+                            fps=fps,
+                            step_ms=step_ms,
+                            last_map_requested=last_map_requested,
+                            next_map_name=next_map_name,
+                            next_script_path=next_script_path,
+                        )
+                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
+                        log.warning("TMI connection broken: %s", e)
+                        if gim.iface is not None:
+                            try:
+                                gim.iface.close()
+                            except:
+                                pass
+                        gim.iface = None
+                        gim.last_rollout_crashed = True
+                        continue
+                    except Exception as e:
+                        log.exception("Rollout failed: %s", e)
+                        if gim.iface is not None:
+                            try:
+                                gim.iface.close()
+                            except:
+                                pass
+                        gim.iface = None
+                        gim.last_rollout_crashed = True
+                        continue
+
+                    if need_enter and track_ids_need_enter is not None:
+                        track_ids_need_enter.append(track_id)
+                        log.info("Track %s: needs 'Press Enter to start' (added to list)", track_id)
+                    if rollout_results is None:
+                        log.warning("Replay %s: rollout returned None", replay_path)
+                        if gim.iface is not None:
+                            try:
+                                gim.iface.close()
+                            except Exception:
+                                pass
+                            gim.iface = None
+                        continue
+
+                    runs_done_this_track += 1
+                    # 4. Save frames
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    manifest_entries = []
+                    for i, (frame, t_ms) in enumerate(zip(rollout_results["frames"], rollout_results["frame_times_ms"])):
+                        fname = f"frame_{i:05d}_{t_ms}ms.jpeg"
+                        cv2.imwrite(str(out_dir / fname), frame[0], [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        entry = {
+                            "file": fname,
+                            "step": i,
+                            "time_ms": t_ms,
+                            "capture_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        }
+                        manifest_entries.append(entry)
+                        if per_frame_json:
+                            (out_dir / f"frame_{i:05d}_{t_ms}ms.json").write_text(
+                                json.dumps(entry, indent=2), encoding="utf-8",
+                            )
+                    
+                    (out_dir / "manifest.json").write_text(
+                        json.dumps(manifest_entries, indent=2), encoding="utf-8",
+                    )
+                    
+                    capture_interval_ms = (1000.0 * running_speed) / fps if fps > 0 else float(step_ms)
+                    metadata = {
+                        "track_id": track_id,
+                        "replay_name": replay_name,
+                        "challenge_name": dest_challenge.name,
+                        "fps": fps,
+                        "running_speed": running_speed,
+                        "capture_interval_ms": capture_interval_ms,
+                        "width": width,
+                        "height": height,
+                        "step_ms": step_ms,
+                        "race_time_ms": race_time_ms,
+                        "total_frames": len(rollout_results["frames"]),
+                        "race_finished": rollout_results["race_finished"],
+                        "tmi_script_used": script_path.name,
+                    }
+                    if rollout_results["race_finished"]:
+                        metadata["actual_race_time_ms"] = rollout_results["final_time_ms"]
+                    
+                    (out_dir / "metadata.json").write_text(
+                        json.dumps(metadata, indent=2), encoding="utf-8",
+                    )
+                    
+                    log.info(
+                        "Captured %s / %s: %d frames, finished=%s",
+                        track_id, replay_name, len(rollout_results["frames"]), rollout_results["race_finished"],
+                    )
+                task = next_task
+                if task is None:
+                    break
     except KeyboardInterrupt:
         log.info("Worker %d: interrupted", worker_id)
     finally:
@@ -1422,12 +1720,23 @@ def main() -> None:
     parser.add_argument("--tracks-dir", type=Path, default=Path("maps/tracks"), help="Extracted challenges or place to extract")
     parser.add_argument("--width", type=int, default=None, help="Frame width (default: config w_downsized)")
     parser.add_argument("--height", type=int, default=None, help="Frame height (default: config h_downsized)")
-    parser.add_argument("--fps", type=float, default=10.0, help="Capture FPS (interval in sim time)")
+    parser.add_argument("--fps", type=float, default=10.0, help="Capture FPS (frames per real second; respects --running-speed)")
     parser.add_argument("--workers", type=int, default=1, help="Number of game instances (TMI ports)")
     parser.add_argument("--base-tmi-port", type=int, default=None, help="Base TMI port (default: from config)")
-    parser.add_argument("--track-ids", type=Path, default=Path("maps/track_ids.txt"), help="File with track IDs (one per line, ordered by popularity). Default: maps/track_ids.txt")
+    parser.add_argument(
+        "--track-ids",
+        type=Path,
+        default=Path("maps/track_ids.txt"),
+        help=".txt file with track IDs, one per line. Order of lines = processing order. Default: maps/track_ids.txt",
+    )
     parser.add_argument("--track-id", type=str, default=None, help="Single track ID to process")
-    parser.add_argument("--max-replays-per-track", type=int, default=10, help="Max replays per track (top N by filename: pos1, pos2, ...). Default: 10")
+    parser.add_argument(
+        "--max-replays-per-track",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max replays per track (top N by filename: pos1, pos2, ...). If not set, process all replays per track.",
+    )
     parser.add_argument("--per-frame-json", action="store_true", help="Write one JSON file per frame (same content as manifest entry) for quick single-frame lookup")
     parser.add_argument(
         "--step-ms",
@@ -1458,11 +1767,33 @@ def main() -> None:
         action="store_true",
         help="Skip tracks that have at least one replay with respawn (checkpoint respawn) events.",
     )
+    parser.add_argument(
+        "--exclude-enter-maps",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Skip track IDs listed in FILE (one per line). Use with --write-enter-maps to build the list.",
+    )
+    parser.add_argument(
+        "--write-enter-maps",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Append track IDs that did not start (e.g. 'Press Enter to start') to FILE. Next run use --exclude-enter-maps FILE.",
+    )
     parser.add_argument("--running-speed", type=int, default=None, help="Override running_speed from config (e.g. 512 = 512x, 1 = real-time).")
     parser.add_argument("--config", type=Path, default=_default_yaml, help="Config YAML")
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level (default: INFO). Use DEBUG for detailed Enter spam logs.",
+    )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    log_level = getattr(logging, args.log_level.upper())
+    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
 
     if _default_yaml.exists():
         set_config(load_config(args.config))
@@ -1502,11 +1833,22 @@ def main() -> None:
             log.info("No replay tasks left after excluding respawn maps.")
             return
 
+    if args.exclude_enter_maps is not None and args.exclude_enter_maps.exists():
+        exclude_enter: set[str] = set()
+        for line in args.exclude_enter_maps.read_text(encoding="utf-8").splitlines():
+            tid = line.strip()
+            if tid and not tid.startswith("#"):
+                exclude_enter.add(tid)
+        if exclude_enter:
+            tasks = [(tid, path) for tid, path in tasks if tid not in exclude_enter]
+            log.info("Excluded %d tracks (--exclude-enter-maps %s)", len(exclude_enter), args.exclude_enter_maps)
+        if not tasks:
+            log.info("No replay tasks left after excluding enter-maps.")
+            return
+
     grouped = group_replay_tasks_by_track(tasks)
-    log.info(
-        "Filtered to %d replay tasks (%d tracks, max %d replays/track)",
-        len(tasks), len(grouped), args.max_replays_per_track,
-    )
+    replays_limit_str = f"max {args.max_replays_per_track} replays/track" if args.max_replays_per_track is not None else "all replays/track"
+    log.info("Filtered to %d replay tasks (%d tracks, %s)", len(tasks), len(grouped), replays_limit_str)
 
     # step_ms and run_steps_per_action must match: step_ms = run_steps_per_action * 10
     if args.step_ms is not None:
@@ -1550,6 +1892,7 @@ def main() -> None:
 
     manager = mp.Manager()
     game_spawning_lock = manager.Lock()
+    track_ids_need_enter_list = manager.list() if args.write_enter_maps is not None else None
 
     procs = []
     for w in range(args.workers):
@@ -1574,6 +1917,7 @@ def main() -> None:
                 running_speed,
                 args.config.resolve(),
                 getattr(args, "per_frame_json", False),
+                track_ids_need_enter_list,
             ),
         )
         p.start()
@@ -1581,6 +1925,21 @@ def main() -> None:
 
     for p in procs:
         p.join()
+
+    if args.write_enter_maps is not None and track_ids_need_enter_list is not None and len(track_ids_need_enter_list) > 0:
+        existing: set[str] = set()
+        if args.write_enter_maps.exists():
+            for line in args.write_enter_maps.read_text(encoding="utf-8").splitlines():
+                tid = line.strip()
+                if tid and not tid.startswith("#"):
+                    existing.add(tid)
+        to_append = sorted(set(track_ids_need_enter_list) - existing)
+        if to_append:
+            args.write_enter_maps.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.write_enter_maps, "a", encoding="utf-8") as f:
+                for tid in to_append:
+                    f.write(tid + "\n")
+            log.info("Appended %d track IDs (need Enter) to %s", len(to_append), args.write_enter_maps)
 
     log.info("Done.")
 

@@ -42,6 +42,7 @@ if get_config().is_linux:
     from xdo import Xdo
 else:
     import win32.lib.win32con as win32con
+    import win32api
     import win32com.client
     import win32gui
     import win32process
@@ -107,6 +108,168 @@ def ensure_window_focused(trackmania_window):
     except Exception:
         # If focus restoration fails, at least ensure window is not minimized
         ensure_not_minimized(trackmania_window)
+
+
+def _make_lparam(scan_code: int, is_up: bool = False, repeat: int = 1) -> int:
+    """Build lParam for WM_KEYDOWN / WM_KEYUP PostMessage."""
+    lp = repeat & 0xFFFF
+    lp |= (scan_code & 0xFF) << 16
+    if is_up:
+        lp |= (1 << 30) | (1 << 31)  # previous key state + transition state
+    return lp
+
+
+def send_key_to_game_window(gim: "GameInstanceManager", vk_code: int, key_name: str = "key", log=None) -> bool:
+    """
+    Send a key press to the game window using multiple methods simultaneously.
+    
+    TrackMania Nations Forever (2006) may use DirectInput, GetAsyncKeyState, or
+    standard Windows messages depending on game state (menu vs race vs preview).
+    We fire all three delivery mechanisms to maximise the chance of the game
+    actually seeing the keystroke:
+    
+      1. PostMessage  WM_KEYDOWN / WM_KEYUP  (delivered to the window procedure)
+      2. keybd_event  with hardware scan-code (goes through the low-level input queue)
+      3. SendInput    with hardware scan-code (same queue, but newer API)
+    
+    Returns True if at least one method succeeded, False otherwise.
+    Windows only.
+    """
+    if get_config().is_linux:
+        return False
+    try:
+        if getattr(gim, "tm_window_id", None) is None and getattr(gim, "tm_process_id", None) is not None:
+            gim.get_tm_window_id()
+        hwnd = getattr(gim, "tm_window_id", None)
+        if hwnd is None:
+            return False
+
+        ensure_window_focused(hwnd)
+
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        MAPVK_VK_TO_VSC = 0
+        scan = user32.MapVirtualKeyW(vk_code, MAPVK_VK_TO_VSC) & 0xFF
+
+        ok = False
+
+        # --- Method 1: PostMessage WM_KEYDOWN / WM_KEYUP ---
+        # This goes directly into the window's message queue and does NOT require
+        # the window to be foreground.  Works for standard Windows message loops.
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        try:
+            lp_down = _make_lparam(scan, is_up=False)
+            lp_up = _make_lparam(scan, is_up=True)
+            win32api.PostMessage(hwnd, WM_KEYDOWN, vk_code, lp_down)
+            win32api.PostMessage(hwnd, WM_KEYUP, vk_code, lp_up)
+            ok = True
+        except Exception:
+            pass
+
+        # --- Method 2: keybd_event with scan-code ---
+        # Old API but some games / hooks only see keybd_event, not SendInput.
+        KEYEVENTF_SCANCODE = 0x0008
+        KEYEVENTF_KEYUP = 0x0002
+        try:
+            if scan:
+                win32api.keybd_event(0, scan, KEYEVENTF_SCANCODE, 0)
+                time.sleep(0.01)
+                win32api.keybd_event(0, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0)
+                ok = True
+        except Exception:
+            pass
+
+        # --- Method 3: SendInput with correct INPUT layout ---
+        ULONG_PTR = ctypes.c_size_t
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR),
+            ]
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR),
+            ]
+
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [
+                ("uMsg", wintypes.DWORD),
+                ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD),
+            ]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [
+                ("ki", KEYBDINPUT),
+                ("mi", MOUSEINPUT),
+                ("hi", HARDWAREINPUT),
+            ]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ("u",)
+            _fields_ = [
+                ("type", wintypes.DWORD),
+                ("u", INPUT_UNION),
+            ]
+
+        INPUT_KEYBOARD = 1
+        try:
+            if scan:
+                flags_dn = KEYEVENTF_SCANCODE
+                flags_up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP
+                kd = KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags_dn, time=0, dwExtraInfo=0)
+                ku = KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags_up, time=0, dwExtraInfo=0)
+            else:
+                kd = KEYBDINPUT(wVk=vk_code, wScan=0, dwFlags=0, time=0, dwExtraInfo=0)
+                ku = KEYBDINPUT(wVk=vk_code, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=0)
+            inputs = (INPUT * 2)(
+                INPUT(type=INPUT_KEYBOARD, ki=kd),
+                INPUT(type=INPUT_KEYBOARD, ki=ku),
+            )
+            sent = user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+            if sent == 2:
+                ok = True
+        except Exception:
+            pass
+
+        return ok
+    except Exception as e:
+        if log:
+            log.warning(f"send_key ({key_name}) failed: {e}")
+        return False
+
+
+def send_enter_to_game_window(gim: "GameInstanceManager", log=None) -> bool:
+    """Send Enter key (0x0D) to game window."""
+    return send_key_to_game_window(gim, 0x0D, "Enter", log)
+
+
+def send_escape_to_game_window(gim: "GameInstanceManager", log=None) -> bool:
+    """Send Escape key (0x1B) to game window to skip previews."""
+    return send_key_to_game_window(gim, 0x1B, "Escape", log)
+
+
+def send_space_to_game_window(gim: "GameInstanceManager", log=None) -> bool:
+    """Send Space key (0x20) to game window to skip previews."""
+    return send_key_to_game_window(gim, 0x20, "Space", log)
+
+
+def send_tilde_to_game_window(gim: "GameInstanceManager", log=None) -> bool:
+    """Send Tilde key (0xC0, ~) to game window to toggle TMInterface console."""
+    return send_key_to_game_window(gim, 0xC0, "Tilde", log)
 
 
 @numba.njit
@@ -243,11 +406,12 @@ class GameInstanceManager:
                     break
             self.tm_process_id = list(tmi_pid_candidates)[0]
         else:
+            configstr = f"set custom_port {self.tmi_port}; set skip_map_load_screens true; set disable_forced_camera true"
             launch_string = (
                 'powershell -executionPolicy bypass -command "& {'
                 f" $process = start-process -FilePath '{get_config().windows_TMLoader_path}'"
                 " -PassThru -ArgumentList "
-                f'\'run TmForever "{get_config().windows_TMLoader_profile_name}" /configstring=\\"set custom_port {self.tmi_port}\\"\';'
+                f'\'run TmForever "{get_config().windows_TMLoader_profile_name}" /configstring=\\"{configstr}\\"\';'
                 ' echo exit $process.id}"'
             )
 

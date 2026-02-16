@@ -71,6 +71,7 @@ Compared to original Linesight:
 - **[Installation Guide](https://artyomzemlyak.github.io/rulka/installation.html)** - detailed setup instructions
 - **[First Training](https://artyomzemlyak.github.io/rulka/first_training.html)** - get started with training
 - **[Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html)** - all config parameters
+- **[TMNF replay download & frame capture](https://artyomzemlyak.github.io/rulka/tmnf_replays.html)** - download replays from TMNF-X, capture frames via TMInterface
 - **[User FAQ](https://artyomzemlyak.github.io/rulka/user_faq.html)** - 30+ common questions
 - **[Dev FAQ](https://artyomzemlyak.github.io/rulka/dev_faq.html)** - developer questions
 - **[Troubleshooting](https://artyomzemlyak.github.io/rulka/troubleshooting.html)** - common issues
@@ -103,7 +104,9 @@ To pretrain the visual backbone on top players’ replays:
 
 Activate the environment first (Windows: `.\.venv\Scripts\activate`; Linux/macOS: `source .venv/bin/activate`).
 
-1. **Download top replays**:
+**TMNF (recommended):** Download replays from TMNF-X and capture frames via TMInterface (deterministic). Full guide: [TMNF replay download & frame capture](https://artyomzemlyak.github.io/rulka/tmnf_replays.html). Quick run: `set PYTHONPATH=scripts & python -m replays_tmnf.download --list-popular --output maps/track_ids.txt --per-page 1000`, then pipeline with `--track-ids` and `--extract-tracks-from-replays`; filter with `python scripts/filter_track_ids_no_respawn.py` and optionally `python scripts/filter_track_ids_custom_maptype.py` (removes non-standard MapType/environment); fix replay filenames with `python scripts/fix_replay_filenames.py` (replaces non-ASCII and spaces with `_`); capture with `python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --running-speed 10`. Map previews are handled automatically via TMInterface retry (give_up/press_delete every 3s). Use `--running-speed 10`–`20` (higher values cause the game to skip inputs).
+
+1. **Download top replays** (alternative scripts):
    - **TMNF (Nations Forever):** ManiaExchange (TMNF-X), no auth:
      ```bash
      python scripts/download_top_replays_tmnf.py --track-id 100 --output-dir ./replays_tmnf --top 50

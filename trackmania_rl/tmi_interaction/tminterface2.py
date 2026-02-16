@@ -59,18 +59,26 @@ class TMInterface:
         print("Shutting down...")
         self.close()
 
+    def _pack_socket_timeout(self, seconds: float):
+        if get_config().is_linux:  # https://stackoverflow.com/questions/46477448/python-setsockopt-what-is-worng
+            return struct.pack("ll", int(seconds), int((seconds % 1) * 1_000_000))
+        return struct.pack("q", int(seconds * 1000))
+
+    def set_socket_timeout(self, seconds: float):
+        """Change socket recv/send timeout. Use when waiting for race start to detect 'no RUN_STEP' stuck state."""
+        pack = self._pack_socket_timeout(seconds)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, pack)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, pack)
+
     def register(self, timeout=None):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         signal.signal(signal.SIGINT, self.signal_handler)
         # https://stackoverflow.com/questions/45864828/msg-waitall-combined-with-so-rcvtimeo
         # https://stackoverflow.com/questions/2719017/how-to-set-timeout-on-pythons-socket-recv-method
         if timeout is not None:
-            if get_config().is_linux:  # https://stackoverflow.com/questions/46477448/python-setsockopt-what-is-worng
-                timeout_pack = struct.pack("ll", timeout, 0)
-            else:
-                timeout_pack = struct.pack("q", timeout * 1000)
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, timeout_pack)
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, timeout_pack)
+            pack = self._pack_socket_timeout(timeout)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, pack)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, pack)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.sock.connect((HOST, self.port))
         self.registered = True
@@ -149,4 +157,10 @@ class TMInterface:
         self.sock.sendall(struct.pack("i", np.int32(response_type)))
 
     def _read_int32(self):
-        return struct.unpack("i", self.sock.recv(4, socket.MSG_WAITALL))[0]
+        data = self.sock.recv(4, socket.MSG_WAITALL)
+        if len(data) < 4:
+            raise ConnectionError(
+                "TMInterface connection closed (got %d bytes, expected 4). "
+                "Game may have closed or TMInterface disconnected." % len(data)
+            )
+        return struct.unpack("i", data)[0]
