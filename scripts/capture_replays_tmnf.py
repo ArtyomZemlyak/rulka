@@ -176,7 +176,10 @@ def group_replay_tasks_by_track(
 ) -> list[tuple[str, list[Path]]]:
     """
     Group (track_id, replay_path) into (track_id, [replay_path, ...]).
-    Ensures only one worker processes a track at a time (no Autosaves overwrite).
+
+    Each element is a single task for the queue; each worker gets whole tasks via
+    task_queue.get(). So no two workers ever process the same track (no shared
+    Autosaves/Challenges overwrite, no duplicate work).
     """
     from itertools import groupby
     grouped: list[tuple[str, list[Path]]] = []
@@ -1114,9 +1117,9 @@ def rollout_with_tmi_script(
                     return (None, False)
                 time.sleep(0.5)
     
-    # Prepare frame capture state. FPS = кадров в реальном времени в секунду; при running_speed > 1
-    # в симе за 1 реальную секунду проходит running_speed секунд сима → интервал в симе больше.
-    capture_interval_ms = (1000.0 * gim.running_speed) / fps if fps > 0 else float(step_ms)
+    # Prepare frame capture state. FPS = кадров в секунду гонки (simulation second), не в реальном времени.
+    # Интервал в симе: 1000/fps мс (e.g. 64 fps → ~15.6 ms между кадрами).
+    capture_interval_ms = 1000.0 / fps if fps > 0 else float(step_ms)
     next_capture_time_ms = 0.0
     frames = []
     frame_times_ms = []
@@ -1434,8 +1437,11 @@ def worker_process(
     config_path: Path,
     per_frame_json: bool = False,
     track_ids_need_enter: Any = None,
+    multi_instance: bool = False,
 ) -> None:
-    """Single worker: convert .replay.gbx → TMI script, load via TMInterface, capture frames."""
+    """Single worker: convert .replay.gbx → TMI script, load via TMInterface, capture frames.
+    When multi_instance is True, keys (Enter, Tilde) are sent only via PostMessage to this
+    worker's window, so other game instances are not affected by focus stealing."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     set_config(load_config(config_path))
     cfg = get_config()
@@ -1468,6 +1474,7 @@ def worker_process(
         max_overall_duration_ms=600_000,
         max_minirace_duration_ms=600_000,
         tmi_port=tmi_port,
+        send_keys_to_window_only=multi_instance,
     )
     # Как в training: latest_map_path_requested — при смене трека запрашиваем новую карту.
     last_map_requested: list[str | None] = [None]
@@ -1650,7 +1657,7 @@ def worker_process(
                         json.dumps(manifest_entries, indent=2), encoding="utf-8",
                     )
                     
-                    capture_interval_ms = (1000.0 * running_speed) / fps if fps > 0 else float(step_ms)
+                    capture_interval_ms = 1000.0 / fps if fps > 0 else float(step_ms)
                     metadata = {
                         "track_id": track_id,
                         "replay_name": replay_name,
@@ -1918,6 +1925,7 @@ def main() -> None:
                 args.config.resolve(),
                 getattr(args, "per_frame_json", False),
                 track_ids_need_enter_list,
+                args.workers > 1,
             ),
         )
         p.start()

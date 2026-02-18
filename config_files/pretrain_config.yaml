@@ -1,0 +1,263 @@
+# =============================================================================
+# Level 0 visual pretraining configuration
+# config_files/pretrain_config.yaml
+#
+# All values here are defaults.  Override priority (highest first):
+#   1. CLI arguments   (scripts/pretrain_visual_backbone.py)
+#   2. Env vars        PRETRAIN_<FIELD>  e.g.  PRETRAIN_TASK=simclr
+#                      Nested fields:   PRETRAIN_LIGHTNING__PATIENCE=5
+#   3. This file       (pretrain_config.yaml)
+#
+# Schema and validation: config_files/pretrain_schema.py
+# Artifact contract   : trackmania_rl/pretrain_visual/contract.py
+# Experiment roadmap  : docs/source/experiments/pretrain_replay_roadmap.rst
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+# Root of the frame tree: maps/img/<track_id>/<replay_name>/*.jpeg
+data_dir: maps/img
+
+# Base output directory.  Each run creates its own versioned subdirectory inside.
+output_dir: output/ptretrain/vis
+
+# Subdirectory name for this specific run, created inside output_dir.
+#   null   — auto-increment: output/ptretrain/vis/run_001/, run_002/, ...
+#   string — fixed name (e.g. ae_baseline, simclr_v2) for labelled experiments.
+#            An existing directory will be reused (useful for resuming / comparing).
+run_name: v1
+
+
+# ---------------------------------------------------------------------------
+# Preprocessed data cache  (optional — significantly speeds up data loading)
+# ---------------------------------------------------------------------------
+
+# Directory to store preprocessed frame cache files (train.npy, val.npy,
+# cache_meta.json).  When set, the training pipeline checks whether the cache
+# matches the current configuration (image_size, n_stack, val_fraction, seed
+# and source data fingerprint).  If the cache is valid it is used directly;
+# otherwise it is rebuilt automatically from data_dir.
+#
+# Set to null (or omit) to disable caching and load raw images on-the-fly
+# (original behaviour).
+#
+# Workflow example:
+#   1. Set preprocess_cache_dir to a writable directory, e.g. cache/pretrain_64.
+#   2. Run training as usual: python scripts/pretrain_visual_backbone.py
+#      → on first run the cache is built automatically, then training starts.
+#   3. Subsequent runs reuse the cache with no extra work.
+#
+# Alternatively, build the cache manually before training:
+#   python scripts/prepare_pretrain_data.py \
+#       --data-dir maps/img --output-dir cache/pretrain_64 \
+#       --image-size 64 --n-stack 1 --val-fraction 0.1 --seed 42
+#
+preprocess_cache_dir: null
+
+# Load cache arrays fully into RAM before training.
+# True  — fast random I/O; only use when total cache size fits comfortably in RAM.
+# False — memory-mapped reads (OS page cache); safe for any dataset size.
+cache_load_in_ram: false
+
+# Number of threads for parallel frame decoding during cache construction.
+# 0 = single-threaded (safe default).  Increase (e.g. 4) on fast SSDs.
+cache_build_workers: 0
+
+
+# ---------------------------------------------------------------------------
+# Task
+# ---------------------------------------------------------------------------
+
+# Pretraining objective:
+#   ae      — autoencoder (MSE reconstruction loss)
+#   vae     — variational autoencoder (ELBO = MSE + kl_weight * KL)
+#   simclr  — contrastive self-supervised (NT-Xent; two augmented views per image)
+task: ae
+
+# Training backend:
+#   native    — pure PyTorch, no extra dependencies (recommended)
+#   lightly   — Lightly SimCLR transforms/loss  →  pip install lightly
+#               (only for task=simclr, n_stack=1)
+#   lightning — PyTorch Lightning loop with AMP, gradient clipping, early stopping,
+#               TensorBoard  →  pip install lightning
+framework: lightning
+
+
+# ---------------------------------------------------------------------------
+# Image / temporal stacking
+# ---------------------------------------------------------------------------
+
+# Square input resolution in pixels.
+# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_default.yaml.
+image_size: 64
+
+# Number of consecutive frames per sample.  1 = single frame (recommended default).
+n_stack: 1
+
+# How to combine N stacked frames:
+#   channel — stack as N input channels (encoder input: N×H×W).
+#             N-ch encoder is NOT directly loadable into IQN img_head (1-ch).
+#             init_iqn_from_encoder.py auto-averages the first Conv2d layer.
+#   concat  — run 1-ch encoder on each frame, concatenate features, linear fusion.
+#             Saves a 1-ch encoder that IS directly IQN-compatible (recommended for n_stack > 1).
+stack_mode: channel
+
+
+# ---------------------------------------------------------------------------
+# Training loop (common to native and lightning paths)
+# ---------------------------------------------------------------------------
+
+# Number of full passes over the dataset.
+epochs: 50
+
+# Mini-batch size.
+batch_size: 4096
+
+# Adam learning rate.
+lr: 0.001
+
+# DataLoader worker processes for parallel image loading.
+# 0 = main process only (CPU bottleneck → GPU starvation; only use for debugging).
+# Recommended: set to (CPU cores / 2) but leave at least 1 core free.
+# Note: on Windows, workers > 0 uses spawn (not fork).  Startup is slower, but
+#       persistent_workers=true (below) keeps them alive across epochs.
+workers: 4
+
+# Pin CPU tensors to page-locked memory for faster host→GPU transfers.
+# Recommended: true on CUDA, harmless on CPU (wastes a small amount of RAM).
+pin_memory: true
+
+# DataLoader prefetch factor: each worker pre-fetches this many batches.
+# Only effective when workers > 0.  Higher = more RAM used but better GPU utilisation.
+prefetch_factor: 4
+
+# Gradient clipping value.  Applied in both native (manual) and Lightning Trainer.  0 = disabled.
+grad_clip: 1.0
+
+
+# ---------------------------------------------------------------------------
+# Task-specific hyperparameters
+# ---------------------------------------------------------------------------
+
+# [VAE] Latent space dimension.
+vae_latent: 64
+
+# [SimCLR] Projection head output dimension.
+proj_dim: 128
+
+# [SimCLR] NT-Xent softmax temperature.  Lower = harder negatives.
+temperature: 0.5
+
+# [VAE] KL divergence coefficient β.  Increase for better disentanglement
+# at the cost of reconstruction quality.
+kl_weight: 0.001
+
+
+# ---------------------------------------------------------------------------
+# Data split
+# ---------------------------------------------------------------------------
+
+# Fraction of track IDs reserved for validation.
+#   0.0  — no split; all data used for training (no val_loss in metrics).
+#   0.1  — 10 % of tracks held out (recommended; enables val_loss tracking and
+#           early stopping on val_loss instead of train_loss).
+# Split is at the TRACK level to prevent leakage (same track never in both splits).
+val_fraction: 0.1
+
+# RNG seed for the deterministic track-level split.
+seed: 42
+
+
+# ---------------------------------------------------------------------------
+# Miscellaneous
+# ---------------------------------------------------------------------------
+
+# Show tqdm progress bars during native training.
+use_tqdm: true
+
+
+# ---------------------------------------------------------------------------
+# PyTorch Lightning settings  (used only when framework: lightning)
+# ---------------------------------------------------------------------------
+lightning:
+
+  # --- Loggers ---
+
+  # Write TensorBoard event files to output_dir/tensorboard_dir/.
+  # View with:  tensorboard --logdir pretrain_visual_out/tb
+  tensorboard: true
+  tensorboard_dir: tensorboard
+
+  # Write per-epoch CSV metrics to output_dir/csv_dir/version_*/metrics.csv.
+  csv_logger: true
+  csv_dir: csv
+
+  # --- Checkpoints ---
+
+  # Subdirectory (relative to output_dir) where .ckpt files are saved.
+  checkpoint_dir: checkpoints
+
+  # Number of best checkpoints to keep:  -1 = all,  0 = none,  1 = best only.
+  save_top_k: 1
+
+  # Metric to monitor for ModelCheckpoint and EarlyStopping.
+  # 'auto' = 'val_loss' when val_fraction > 0, otherwise 'train_loss'.
+  checkpoint_monitor: auto
+
+  # --- Early stopping ---
+
+  # Stop training automatically when the monitored metric stops improving.
+  early_stopping: true
+
+  # Number of epochs with no improvement before stopping.
+  patience: 10
+
+  # Minimum change in the monitored metric to count as an improvement.
+  min_delta: 0.0
+
+  # --- Hardware / precision ---
+
+  # PyTorch Lightning accelerator:  auto | cpu | gpu | tpu | mps
+  # 'auto' = best available device.
+  accelerator: auto
+
+  # Training precision:
+  #   auto      — 16-mixed if CUDA available, otherwise 32-true
+  #   16-mixed  — mixed FP16 (fast, less VRAM; recommended for most CUDA setups)
+  #   bf16-mixed — BF16 (RTX 30xx+, more numerically stable than FP16)
+  #   32-true   — full FP32 (safe for CPU and debugging)
+  precision: auto
+
+  # Number of devices to use.  null = let Lightning decide (uses all available GPUs).
+  devices: null
+
+  # --- Logging frequency ---
+
+  # Log metrics to TensorBoard / CSV every N training steps.
+  # Automatically capped to max(1, n_batches // 4) to avoid sparse-step warnings.
+  log_every_n_steps: 50
+
+  # --- Misc ---
+
+  # Use deterministic algorithms (reproducible but ~10–30 % slower on GPU).
+  # Combine with seed: <int> for full reproducibility.
+  deterministic: false
+
+  # Print a parameter summary table before training starts.
+  enable_model_summary: true
+
+  # PyTorch Lightning profiler:  null | simple | advanced | pytorch
+  # 'simple' adds per-step timing with low overhead.
+  profiler: null
+
+  # torch.set_float32_matmul_precision — enables Tensor Core utilisation on
+  # RTX 30xx / 40xx / 50xx (Ampere / Ada / Blackwell) GPUs.
+  # Without this, PyTorch leaves Tensor Cores unused for FP32 matmuls.
+  #   medium  — recommended default (best speed, tiny precision loss on FP32 matmuls)
+  #   high    — still fast, slightly more precise than medium
+  #   highest — full FP32 precision; slowest; same as not setting this at all
+  #   null    — do not call set_float32_matmul_precision (Lightning default behaviour)
+  float32_matmul_precision: medium

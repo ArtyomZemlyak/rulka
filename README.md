@@ -131,26 +131,84 @@ Activate the environment first (Windows: `.\.venv\Scripts\activate`; Linux/macOS
    - For `.replay.gbx`: in game, load the map, watch the replay, record the screen (e.g. OBS), then extract frames: `ffmpeg -i video.mp4 -vf fps=10 frames/%05d.png`.
    - For `.inputs` files: `python scripts/capture_frames_from_replays.py --inputs-dir ./best_runs --output-dir ./parsed_actions` (parses to action lists; capture via game + TMI or training pipeline).
 
-3. **Pretrain the backbone** (unsupervised: AE, VAE, SimCLR):
+3. **Pretrain the backbone** (Level 0 — unsupervised: AE, VAE, SimCLR):
+
+   All settings live in `config_files/pretrain_config.yaml` (`framework: lightning` by default).
+   Install the pretrain dependencies once:
    ```bash
-   python scripts/pretrain_visual_backbone.py --data-dir ./frames --task ae --epochs 50 --batch-size 128
-   python scripts/pretrain_visual_backbone.py --data-dir ./frames --task simclr --framework lightly  # optional: pip install lightly
+   pip install -e ".[pretrain]"   # lightning, lightly, timm
    ```
-   **Stacked frames** (several consecutive images; temporal order = file sort):
+
+   **AE (YAML defaults, auto-versioned run dir):**
    ```bash
-   python scripts/pretrain_visual_backbone.py --data-dir ./frames --n-stack 4 --stack-mode concat --task ae
+   python scripts/pretrain_visual_backbone.py --data-dir maps/img
    ```
-   `--stack-mode channel`: N input channels (saves N-ch encoder). `--stack-mode concat`: 1-ch encoder per frame + fusion (saves IQN-compatible 1-ch encoder).
-   Saves `encoder.pt` loadable into `IQN_Network.img_head`.
+   **SimCLR with track-level val split:**
+   ```bash
+   python scripts/pretrain_visual_backbone.py \
+       --data-dir maps/img --task simclr --val-fraction 0.1
+   ```
+   **Stacked frames** (IQN-compatible 1-ch encoder):
+   ```bash
+   python scripts/pretrain_visual_backbone.py \
+       --data-dir maps/img --n-stack 4 --stack-mode concat
+   ```
+   Override any field via env var (PowerShell: `$env:PRETRAIN_TASK='simclr'`) or `--config my.yaml`.
+
+   Each run creates a versioned subdirectory:
+   ```
+   output/ptretrain/vis/run_001/
+       encoder.pt          ← CNN weights only → goes into IQN
+       pretrain_meta.json  ← reproducibility record
+       metrics.csv         ← per-epoch loss
+       checkpoints/        ← Lightning .ckpt for resuming (not for IQN)
+       tensorboard/
+       csv/
+   ```
+   Use `--run-name ae_baseline` for a fixed name instead of `run_001`.
+
+4. **Inject encoder into IQN** (creates `weights1.torch` / `weights2.torch`):
+   ```bash
+   python scripts/init_iqn_from_encoder.py \
+       --encoder-pt output/ptretrain/vis/run_001/encoder.pt \
+       --save-dir   save/
+   ```
+   Multi-channel encoders are automatically averaged to 1-channel.
+   Start the learner normally afterwards — it loads the checkpoint on startup.
+
+   Dry-run validation (no files written):
+   ```bash
+   python scripts/init_iqn_from_encoder.py \
+       --encoder-pt output/ptretrain/vis/run_001/encoder.pt --dry-run
+   ```
+
+   See `docs/source/experiments/pretrain_replay_roadmap.rst` for the full experiment
+   matrix and KPI tracking guide (Level 0 → Level 1/2/4 roadmap).
 
 ## Project Structure
 
 ```
 rulka/
-├── config_files/       # YAML configuration (config_default.yaml, config_schema.py)
-├── trackmania_rl/      # Core RL code (IQN agent, multiprocess)
-├── scripts/            # train.py and utilities
-├── maps/               # Reference lines (.npy)
+├── config_files/
+│   ├── config_default.yaml           # RL training config
+│   ├── config_schema.py              # Pydantic schema for RL config
+│   ├── config_loader.py              # loader + get_config()
+│   ├── pretrain_config.yaml          # Level 0 pretrain config (edit defaults here)
+│   └── pretrain_schema.py            # PretrainConfig(BaseSettings) + load_pretrain_config()
+├── trackmania_rl/
+│   ├── pretrain_visual/       # Level 0 pretraining package
+│   │   ├── contract.py        #   artifact schema constants
+│   │   ├── datasets.py        #   ReplayFrameDataset + Lightning DataModule
+│   │   ├── models.py          #   encoder/decoder factories (IQN-compatible)
+│   │   ├── tasks.py           #   Lightning modules: AE, VAE, SimCLR
+│   │   ├── train.py           #   PretrainConfig + train_pretrain dispatcher
+│   │   └── export.py          #   save/load/validate artifact
+│   └── ...                    # IQN agent, multiprocess, utilities
+├── scripts/
+│   ├── pretrain_visual_backbone.py   # Level 0 train entry point (CLI)
+│   ├── init_iqn_from_encoder.py      # inject encoder.pt into IQN checkpoint
+│   └── ...                           # train.py and other utilities
+├── maps/               # Reference lines (.npy) + captured frames (maps/img/)
 ├── docs/               # Documentation
 └── save/               # Checkpoints and replays
 ```

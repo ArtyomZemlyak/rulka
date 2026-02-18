@@ -61,7 +61,9 @@ This removes maps with non-standard environments (e.g., not Stadium/Speed/Alpine
 
 .. code-block:: bash
 
-   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --running-speed 16 --fps 1 --track-ids maps/track_ids_no_respawn.txt --max-replays-per-track 1
+   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --running-speed 16 --fps 64 --track-ids maps/track_ids_no_respawn.txt --max-replays-per-track 1
+
+**Multi-worker capture:** Running with ``--workers N`` (N > 1) is **not yet working reliably** (multiple game windows, key input and preview handling are not coordinated). Use **``--workers 1``** for now.
 
 **Map preview handling:** Previews and "Press Enter to start" screens are handled automatically via ``disable_forced_camera`` + ``skip_map_load_screens``. If the game still doesn't start within 3 seconds (no RUN_STEP messages), the script sends TMInterface ``give_up`` / ``press delete`` commands to restart the race every 3 seconds (up to 25 seconds total), then skips the map. Use ``--write-enter-maps`` to collect track IDs of maps that didn't start, then ``--exclude-enter-maps`` on the next run.
 
@@ -176,11 +178,13 @@ Frame capture (capture_replays_tmnf.py)
 
 **Arguments:** ``--replays-dir``, ``--output-dir``, ``--tracks-dir``, ``--width``, ``--height``, ``--fps``, ``--workers``, ``--base-tmi-port``, ``--track-ids``, ``--track-id``, ``--max-replays-per-track``, ``--per-frame-json``, ``--running-speed``, ``--write-enter-maps``, ``--exclude-enter-maps``, ``--log-level``, ``--config``.
 
+**FPS and simulation time (time_ms in filenames):** ``--fps`` is **frames per simulation second** (per second of race time). The interval between captures in sim time is ``1000 / fps`` ms. So with ``--fps 64`` you get ~15.6 ms between frames (e.g. ``frame_00000_0ms.jpeg``, ``frame_00001_20ms.jpeg``, …). ``--running-speed`` does not change this interval; it only affects how fast the race runs in real time.
+
 **Port:** ``BASE_TMI_PORT`` in ``.env`` (or ``--base-tmi-port``) must match the game’s TMInterface console (e.g. "Port set to 8480"). If the script hangs at "Waiting for game to finish loading...", check the port.
 
 **Track vs replay loading:** The script sends only the track **filename** (e.g. ``1000074.Challenge.Gbx``) via ``map ...``; the game looks in its ``Tracks/Challenges`` folder. The replay is not passed by path: the script copies the replay into the game’s **Autosaves** folder (``trackmania_base_path/Tracks/Replays/Autosaves`` as ``{Username}_{MapName}.Replay.gbx``). Set ``trackmania_base_path`` in config or ``.env`` (e.g. ``TRACKMANIA_BASE_PATH=C:\Users\...\TrackMania``). Default is ``Documents\TrackMania``.
 
-**Multiple workers:** Tasks are grouped by track so each worker processes all replays of one track sequentially; different workers handle different tracks in parallel. This avoids overwriting the same Autosaves ghost file.
+**Multiple workers (``--workers N``):** Support for N > 1 is **not yet working**. With several workers, multiple game instances run in parallel but key input (Enter for preview skip, Tilde for console) and window handling are not coordinated, so capture is unreliable. Use **``--workers 1``** until multi-worker operation is fixed. (When implemented, tasks would be grouped by track so each worker processes one track at a time.)
 
 **Connection handling:** If TMInterface disconnects (e.g. game closed), the script clears the connection and the next replay will reconnect automatically.
 
@@ -203,6 +207,50 @@ Examples (from project root)
 
    # Single track
    python scripts/capture_replays_tmnf.py --track-id 12345 --replays-dir maps/replays --output-dir out
+
+Level 0 visual pretraining on captured frames
+----------------------------------------------
+
+After capturing frames to ``maps/img/``, run the Level 0 pretraining pipeline:
+
+.. code-block:: bash
+
+   # Step 1: pretrain AE (all defaults from config_files/pretrain_config.yaml)
+   #         creates output/ptretrain/vis/run_001/
+   python scripts/pretrain_visual_backbone.py --data-dir maps/img
+
+   # Step 1 alt: SimCLR with track-level val split
+   python scripts/pretrain_visual_backbone.py \
+       --data-dir maps/img --task simclr --val-fraction 0.1
+
+   # Step 2: inject encoder into IQN (writes save/weights1.torch + save/weights2.torch)
+   #         encoder.pt = extracted CNN weights only (≠ .ckpt Lightning checkpoint)
+   python scripts/init_iqn_from_encoder.py \
+       --encoder-pt output/ptretrain/vis/run_001/encoder.pt \
+       --save-dir   save/
+
+   # Step 3: start RL training (learner auto-loads the checkpoint)
+   python scripts/train.py
+
+The standard pipeline uses **PyTorch Lightning** (``framework: lightning`` in
+``config_files/pretrain_config.yaml``).
+Each run creates a versioned subdirectory inside ``output_dir``:
+
+- ``run_001/encoder.pt`` — CNN weights; what ``init_iqn_from_encoder.py`` needs
+- ``run_001/pretrain_meta.json`` — full reproducibility record
+- ``run_001/metrics.csv`` — per-epoch loss history
+- ``run_001/checkpoints/`` — ``.ckpt`` snapshots for resuming training (not for IQN)
+- ``run_001/tensorboard/``, ``run_001/csv/`` — training logs
+
+Key dataset properties:
+
+- ``ReplayFrameDataset`` groups frames by replay directory; temporal stacks
+  (``--n-stack``) never cross replay/track boundaries.
+- ``--val-fraction 0.1`` splits at the *track level* to prevent leakage.
+- Expected directory layout: ``maps/img/<track_id>/<replay_name>/frame_*_*ms.jpeg``
+
+See ``docs/source/experiments/pretrain_replay_roadmap.rst`` for the full
+experiment matrix and KPI tracking guide.
 
 API (TMNF-X / ManiaExchange)
 -----------------------------

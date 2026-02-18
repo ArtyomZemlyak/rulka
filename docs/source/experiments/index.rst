@@ -18,4 +18,6 @@ Contents
    temporal_mini_race_duration
    exploration
    network_size_long_training
+   pretrain_replay_roadmap
+   pretrain_visual_backbone
    models/iqn

@@ -146,6 +146,8 @@ def learner_process_fn(
         online_network.load_state_dict(torch.load(f=save_dir / "weights1.torch", weights_only=False))
         target_network.load_state_dict(torch.load(f=save_dir / "weights2.torch", weights_only=False))
         print("[OK] Weights loaded successfully")
+        if get_config().pretrain_encoder_path:
+            print("[OK] Pretrain: img_head loaded from checkpoint (initialized via pretrain_encoder_path).")
     except:
         print("[INFO] Starting with fresh weights (no checkpoint found)")
 

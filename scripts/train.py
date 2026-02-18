@@ -82,6 +82,22 @@ if __name__ == "__main__":
     # Save config snapshot to experiment folder
     shutil.copy(config_path, save_dir / "config_snapshot.yaml")
 
+    # --- Pretrain encoder injection ---
+    # If pretrain_encoder_path is set and weights1.torch does not yet exist,
+    # inject the pretrained img_head into a fresh IQN network pair so that
+    # the learner and collectors start from the pretrained visual backbone.
+    # Skipped automatically on resumed runs (weights1.torch already present).
+    pretrain_injected = False
+    if config.pretrain_encoder_path:
+        from trackmania_rl.pretrain_visual.export import inject_encoder_into_iqn
+        pretrain_injected = inject_encoder_into_iqn(
+            encoder_pt=Path(base_dir) / config.pretrain_encoder_path,
+            save_dir=save_dir,
+            overwrite=False,
+        )
+        if pretrain_injected:
+            print("[OK] Pretrain encoder injected; training will start from pretrained img_head.")
+
     tensorboard_base_dir = Path(base_dir) / "tensorboard"
 
     # Copy Angelscript plugin to TMInterface dir
@@ -98,6 +114,8 @@ if __name__ == "__main__":
     print(f"  Base TMI port: {config.base_tmi_port}")
     print(f"  Save directory: {save_dir}")
     print(f"  Config: {config_path}")
+    if config.pretrain_encoder_path:
+        print(f"  Pretrain encoder: {config.pretrain_encoder_path}" + (" (injected)" if pretrain_injected else " (skipped — checkpoint exists)"))
     print("=" * 80)
     print("\n[INFO] Starting training...\n")
 

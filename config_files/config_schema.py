@@ -5,7 +5,7 @@ All config sections with validation and computed fields.
 
 from pathlib import Path
 from sys import platform
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -102,6 +102,7 @@ class NeuralNetworkConfig(BaseModel):
 # --- Training ---
 class TrainingConfig(BaseModel):
     run_name: str = "uni_18"
+    pretrain_encoder_path: Optional[str] = None
     batch_size: int = 512
     adam_epsilon: float = 1e-4
     adam_beta1: float = 0.9

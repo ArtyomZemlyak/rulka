@@ -25,13 +25,13 @@ environment:
   sync_virtual_and_real_checkpoints: true
 
 neural_network:
-  w_downsized: 128
-  h_downsized: 128
+  w_downsized: 64
+  h_downsized: 64
   float_hidden_dim: 256
   dense_hidden_dimension: 1024
-  iqn_embedding_dimension: 256
-  iqn_n: 16
-  iqn_k: 64
+  iqn_embedding_dimension: 128
+  iqn_n: 8
+  iqn_k: 32
   iqn_kappa: 0.005
   use_ddqn: true
   clip_grad_value: 1000
@@ -47,7 +47,7 @@ neural_network:
   use_jit: true
 
 training:
-  run_name: "A01_as20_big_long"
+  run_name: "A01_as20_long_vis_pretrained"
   batch_size: 512
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -75,6 +75,19 @@ training:
     - [150000000, "_7"]
   oversample_long_term_steps: 40
   oversample_maximum_term_steps: 5
+
+  # Visual pretraining — auto-inject encoder into IQN on first run.
+  # Set to the encoder.pt path produced by pretrain_visual_backbone.py.
+  # Behaviour:
+  #   null  — no injection; IQN starts with random weights (default).
+  #   path  — if save/<run_name>/weights1.torch does NOT yet exist,
+  #            inject encoder.pt into a fresh IQN network pair and save
+  #            weights1.torch + weights2.torch before training starts.
+  #            If weights1.torch already exists (resumed run), injection
+  #            is skipped to preserve training progress.
+  # Example:
+  #   pretrain_encoder_path: "output/ptretrain/vis/run_001/encoder.pt"
+  pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"
 
 memory:
   memory_size_schedule:

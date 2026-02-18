@@ -121,18 +121,17 @@ def _make_lparam(scan_code: int, is_up: bool = False, repeat: int = 1) -> int:
 
 def send_key_to_game_window(gim: "GameInstanceManager", vk_code: int, key_name: str = "key", log=None) -> bool:
     """
-    Send a key press to the game window using multiple methods simultaneously.
-    
-    TrackMania Nations Forever (2006) may use DirectInput, GetAsyncKeyState, or
-    standard Windows messages depending on game state (menu vs race vs preview).
-    We fire all three delivery mechanisms to maximise the chance of the game
-    actually seeing the keystroke:
-    
-      1. PostMessage  WM_KEYDOWN / WM_KEYUP  (delivered to the window procedure)
-      2. keybd_event  with hardware scan-code (goes through the low-level input queue)
-      3. SendInput    with hardware scan-code (same queue, but newer API)
-    
-    Returns True if at least one method succeeded, False otherwise.
+    Send a key press to the game window.
+
+    When gim.send_keys_to_window_only is True (multi-instance capture): only
+    PostMessage to the specific hwnd is used. No focus change. This ensures
+    each worker sends keys to its own window and does not steal focus from
+    other game instances (which would make keybd_event/SendInput go to the
+    wrong window).
+
+    Otherwise we use three delivery mechanisms to maximise the game seeing
+    the key: PostMessage, keybd_event, SendInput. The latter two go to the
+    foreground window, so we call ensure_window_focused(hwnd) first.
     Windows only.
     """
     if get_config().is_linux:
@@ -144,7 +143,9 @@ def send_key_to_game_window(gim: "GameInstanceManager", vk_code: int, key_name: 
         if hwnd is None:
             return False
 
-        ensure_window_focused(hwnd)
+        send_keys_to_window_only = getattr(gim, "send_keys_to_window_only", False)
+        if not send_keys_to_window_only:
+            ensure_window_focused(hwnd)
 
         import ctypes
         from ctypes import wintypes
@@ -156,8 +157,7 @@ def send_key_to_game_window(gim: "GameInstanceManager", vk_code: int, key_name: 
         ok = False
 
         # --- Method 1: PostMessage WM_KEYDOWN / WM_KEYUP ---
-        # This goes directly into the window's message queue and does NOT require
-        # the window to be foreground.  Works for standard Windows message loops.
+        # Targets the specific window; does NOT require it to be foreground.
         WM_KEYDOWN = 0x0100
         WM_KEYUP = 0x0101
         try:
@@ -169,8 +169,10 @@ def send_key_to_game_window(gim: "GameInstanceManager", vk_code: int, key_name: 
         except Exception:
             pass
 
-        # --- Method 2: keybd_event with scan-code ---
-        # Old API but some games / hooks only see keybd_event, not SendInput.
+        if send_keys_to_window_only:
+            return ok
+
+        # --- Method 2: keybd_event (goes to foreground window) ---
         KEYEVENTF_SCANCODE = 0x0008
         KEYEVENTF_KEYUP = 0x0002
         try:
@@ -182,7 +184,7 @@ def send_key_to_game_window(gim: "GameInstanceManager", vk_code: int, key_name: 
         except Exception:
             pass
 
-        # --- Method 3: SendInput with correct INPUT layout ---
+        # --- Method 3: SendInput (goes to foreground window) ---
         ULONG_PTR = ctypes.c_size_t
 
         class KEYBDINPUT(ctypes.Structure):
@@ -314,6 +316,7 @@ class GameInstanceManager:
         max_overall_duration_ms=2000,
         max_minirace_duration_ms=2000,
         tmi_port=None,
+        send_keys_to_window_only=False,
     ):
         # Create TMInterface we will be using to interact with the game client
         self.iface = None
@@ -334,6 +337,9 @@ class GameInstanceManager:
         self.start_states = {}
         self.game_spawning_lock = game_spawning_lock
         self.game_activated = False
+        # When True, send_key_to_game_window only uses PostMessage to our hwnd
+        # (no focus change, no keybd_event/SendInput). Use for multi-instance capture.
+        self.send_keys_to_window_only = send_keys_to_window_only
 
     def get_tm_window_id(self):
         assert self.tm_process_id is not None

@@ -33,6 +33,8 @@ Nadeo.ini
 *.lnk
 .stignore*
 .env
+/cache
+/output
 
 # Documentation build artifacts
 /docs/build/
