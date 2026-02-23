@@ -1,5 +1,5 @@
-Experiment: Temporal Mini-Race Duration (Segment-Based Reward)
-==============================================================
+Temporal Mini-Race Duration
+==========================
 
 This experiment tests the effect of **temporal_mini_race_duration_ms** on convergence and policy quality. In this project, reward and value estimation use a **fixed-duration segment** of the trajectory (a "mini-race") rather than the full episode. In RL literature this is related to **temporal abstraction** (reasoning over trajectory segments; see Sutton et al. "Between MDPs and Semi-MDPs: A Framework for Temporal Abstraction in Reinforcement Learning") and **fixed-horizon** or **truncated-horizon** reward — i.e. using part of the trajectory instead of the full run.
 

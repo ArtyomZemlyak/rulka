@@ -1,5 +1,5 @@
-Experiment: Epsilon-Greedy Exploration Schedule
-===============================================
+Epsilon-Greedy Exploration
+==========================
 
 This experiment tests the effect of **epsilon_schedule** (epsilon-greedy exploration) on convergence and policy quality. Both runs use **temporal_mini_race_duration_ms = 7000** (7 s); the only change is exploration: **uni_15** uses higher epsilon (0.5 at 300k steps, 0.1 at end) vs **uni_12** baseline (default: 0.1 at 300k, 0.03 at end).
 

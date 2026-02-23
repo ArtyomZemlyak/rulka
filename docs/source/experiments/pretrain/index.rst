@@ -1,5 +1,5 @@
-Pretrain Experiments
-===================
+Pretrain
+========
 
 This section documents **pretraining** experiments (Level 0 visual, Level 1 BC, etc.).
 Metrics and logs differ from RL: pretrain uses **epoch-based** training, **CSV** from PyTorch Lightning (and optionally TensorBoard), and metrics such as train/val loss, overall accuracy, and **per-action accuracy** (e.g. accel, left+accel, right+accel, brake).

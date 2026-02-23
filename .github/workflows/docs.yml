@@ -46,7 +46,7 @@ jobs:
           "
           uv pip install -r doc-requirements.txt
 
-      - name: Install Graphviz (for .. graphviz:: diagrams)
+      - name: "Install Graphviz (for .. graphviz:: diagrams)"
         run: sudo apt-get update && sudo apt-get install -y graphviz
 
       - name: Build documentation

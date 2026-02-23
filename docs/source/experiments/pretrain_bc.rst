@@ -1,7 +1,7 @@
 .. _pretrain_bc:
 
-Experiment: BC Pretraining on Top of Visual Backbone
-====================================================
+BC pretraining
+==============
 
 Experiment Overview
 -------------------

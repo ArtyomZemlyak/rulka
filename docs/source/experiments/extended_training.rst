@@ -1,5 +1,5 @@
-Experiment: Extended Training and One Map vs Two Maps
-=====================================================
+Extended Training, One vs Two Maps
+==================================
 
 This experiment tests **(1) the effect of very long training** (from checkpoint and from scratch) and **(2) whether training on one map or two maps yields better final quality**, given a small model with limited capacity.
 

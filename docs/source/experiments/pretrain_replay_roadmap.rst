@@ -1,7 +1,7 @@
 .. _pretrain_replay_roadmap:
 
-Pretrain on replays: roadmap and integration with IQN
-=====================================================
+Replay pretrain roadmap
+=======================
 
 This page systematizes **pretraining and imitation-learning options** for training on TrackMania replays (frames + actions), from the simplest to the most advanced. Each option is described with **how it plugs into the current IQN training pipeline**.
 

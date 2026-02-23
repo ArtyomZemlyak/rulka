@@ -1,7 +1,7 @@
 .. _pretrain_visual_backbone:
 
-Experiment: Visual Pretraining of IQN Backbone
-==============================================
+Visual backbone pretraining
+===========================
 
 Experiment Overview
 -------------------

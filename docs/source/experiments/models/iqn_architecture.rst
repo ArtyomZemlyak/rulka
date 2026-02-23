@@ -1,7 +1,7 @@
 .. _iqn_architecture:
 
-IQN (Implicit Quantile Network) Architecture
-===========================================
+IQN architecture
+================
 
 The diagrams on this page are rendered with **Graphviz** (the ``sphinx.ext.graphviz`` extension). The CI workflow that publishes the docs installs Graphviz so the diagrams render on the site. For a local docs build, install Graphviz and ensure ``dot`` is on your PATH, or you will see raw DOT code instead of images.
 

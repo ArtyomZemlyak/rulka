@@ -1,7 +1,7 @@
 .. _pretrain_bc_behavioral_cloning:
 
-Experiment: BC Pretrain — Training Length and Early Stopping (Level 1)
-======================================================================
+BC pretrain: training length & early stop (Level 1)
+====================================================
 
 Experiment Overview
 -------------------

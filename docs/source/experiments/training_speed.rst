@@ -1,5 +1,5 @@
-Experiment: Batch Size and Running Speed
-========================================
+Batch Size and Running Speed
+============================
 
 Experiment Overview
 -------------------

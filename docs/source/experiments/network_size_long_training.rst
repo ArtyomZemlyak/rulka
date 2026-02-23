@@ -1,5 +1,5 @@
-Experiment: Network Size and Long-Training Convergence
-======================================================
+Network Size and Long Training
+==============================
 
 This experiment tests **how strongly network size affects convergence on long training runs**: whether a bigger network needs more wall-clock time and more steps to converge, and whether it then achieves a better final score than a small network given enough training.
 
