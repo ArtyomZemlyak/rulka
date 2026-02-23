@@ -44,7 +44,12 @@ LIGHTNING_AVAILABLE = _LIGHTNING_AVAILABLE
 
 if _LIGHTNING_AVAILABLE:
     class MetricsCollector(Callback):  # type: ignore[misc]
-        """Accumulate per-epoch metrics from ``trainer.callback_metrics``."""
+        """Accumulate per-epoch metrics from ``trainer.callback_metrics``.
+
+        Runs in on_train_epoch_end. By that time Lightning has run validation for
+        the current epoch, so callback_metrics typically contains both train_loss
+        and val_loss for the same epoch.
+        """
 
         def __init__(self) -> None:
             self.rows: list[dict] = []
@@ -311,3 +316,97 @@ class SimCLRLightningModule(_Base):  # type: ignore[misc]
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.Adam(self.parameters(), lr=self.lr)
+
+
+# ---------------------------------------------------------------------------
+# BC (behavioral cloning) Lightning Module — Level 1
+# ---------------------------------------------------------------------------
+
+if _LIGHTNING_AVAILABLE:
+    class BCLightningModule(_Base):  # type: ignore[misc]
+        """Behavioral cloning: (image, action_idx) → CrossEntropy loss.
+
+        Wraps a full BC model (encoder + action head). Exposes ``self.encoder``
+        for saving the backbone artifact after training.
+
+        Logs train/val loss, overall train/val accuracy, and per-class validation
+        accuracy (val_acc_class_0, ...) for interpretation.
+        """
+
+        def __init__(self, model: nn.Module, lr: float = 1e-3) -> None:
+            super().__init__()
+            self.model = model
+            self.lr = lr
+            self.encoder = getattr(model, "encoder", model)
+            n_actions = getattr(getattr(model, "action_head", None), "out_features", None)
+            self._n_actions = n_actions if n_actions is not None else 12
+            self.register_buffer("_train_correct", torch.zeros(self._n_actions, dtype=torch.float))
+            self.register_buffer("_train_total", torch.zeros(self._n_actions, dtype=torch.float))
+            self.register_buffer("_val_correct", torch.zeros(self._n_actions, dtype=torch.float))
+            self.register_buffer("_val_total", torch.zeros(self._n_actions, dtype=torch.float))
+
+        def _forward(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            img, action_idx = batch
+            if img.dim() == 3:
+                img = img.unsqueeze(1)
+            elif img.dim() == 5 and img.shape[1] > 1:
+                img = img[:, -1]
+            logits = self.model(img)
+            loss = F.cross_entropy(logits, action_idx)
+            return loss, logits, action_idx
+
+        def _update_acc_buffers(
+            self,
+            pred: torch.Tensor,
+            target: torch.Tensor,
+            correct_buf: torch.Tensor,
+            total_buf: torch.Tensor,
+        ) -> None:
+            n = self._n_actions
+            one_hot = F.one_hot(target.clamp(0, n - 1), n).float()
+            correct = (pred == target).float()
+            correct_buf.add_((one_hot * correct.unsqueeze(1)).sum(0))
+            total_buf.add_(one_hot.sum(0))
+
+        def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+            loss, logits, action_idx = self._forward(batch)
+            pred = logits.argmax(dim=1)
+            acc = (pred == action_idx).float().mean()
+            self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+            self.log("train_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
+            self._update_acc_buffers(pred, action_idx, self._train_correct, self._train_total)
+            return loss
+
+        def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
+            loss, logits, action_idx = self._forward(batch)
+            pred = logits.argmax(dim=1)
+            acc = (pred == action_idx).float().mean()
+            self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+            self.log("val_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
+            self._update_acc_buffers(pred, action_idx, self._val_correct, self._val_total)
+
+        def on_train_epoch_end(self) -> None:
+            self._log_per_class_acc("train", self._train_correct, self._train_total)
+            self._train_correct.zero_()
+            self._train_total.zero_()
+
+        def on_validation_epoch_end(self) -> None:
+            self._log_per_class_acc("val", self._val_correct, self._val_total)
+            self._val_correct.zero_()
+            self._val_total.zero_()
+
+        def _log_per_class_acc(self, stage: str, correct: torch.Tensor, total: torch.Tensor) -> None:
+            with torch.no_grad():
+                total_clamped = total.clamp(min=1e-8)
+                per_class = (correct / total_clamped).cpu()
+                for c in range(self._n_actions):
+                    self.log(f"{stage}_acc_class_{c}", per_class[c].item(), on_epoch=True)
+
+        def configure_optimizers(self) -> torch.optim.Optimizer:
+            return torch.optim.Adam(self.parameters(), lr=self.lr)
+else:
+    class BCLightningModule:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "BCLightningModule requires lightning. Install it with: pip install lightning"
+            )

@@ -130,3 +130,66 @@ def build_encoder_from_meta(meta: dict) -> nn.Sequential:
 def get_enc_dim(in_channels: int, image_size: int) -> int:
     """Return the output dimension of an IQN-compatible encoder."""
     return calculate_conv_output_dim(image_size, image_size)
+
+
+# ---------------------------------------------------------------------------
+# BC (behavioral cloning) model
+# ---------------------------------------------------------------------------
+
+
+class BCNetwork(nn.Module):
+    """Encoder + action head for BC. encoder is IQN-compatible for transfer."""
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        enc_dim: int,
+        n_actions: int,
+        use_floats: bool = False,
+        float_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.use_floats = use_floats
+        if use_floats and float_dim > 0:
+            self.float_head = nn.Sequential(
+                nn.Linear(float_dim, 256),
+                nn.LeakyReLU(inplace=True),
+                nn.Linear(256, 256),
+                nn.LeakyReLU(inplace=True),
+            )
+            action_input_dim = enc_dim + 256
+        else:
+            self.float_head = None
+            action_input_dim = enc_dim
+        self.action_head = nn.Linear(action_input_dim, n_actions)
+
+    def forward(
+        self,
+        img: torch.Tensor,
+        float_inputs: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        feats = self.encoder(img)
+        if self.float_head is not None and float_inputs is not None:
+            float_feats = self.float_head(float_inputs)
+            feats = torch.cat((feats, float_feats), dim=1)
+        return self.action_head(feats)
+
+
+def build_bc_network(
+    enc_dim: int,
+    n_actions: int,
+    use_floats: bool = False,
+    float_dim: int = 0,
+    in_channels: int = 1,
+    image_size: int = 64,
+) -> BCNetwork:
+    """Build BC model: IQN-compatible encoder + optional float head + action head."""
+    encoder = build_iqn_encoder(in_channels=in_channels, image_size=image_size)
+    return BCNetwork(
+        encoder=encoder,
+        enc_dim=enc_dim,
+        n_actions=n_actions,
+        use_floats=use_floats,
+        float_dim=float_dim,
+    )

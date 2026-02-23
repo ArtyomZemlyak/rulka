@@ -497,7 +497,7 @@ def _sample_inputs_at_steps(
     We accumulate key state across events and sample at each step.
     """
     if control_names:
-        log.info("  Control names in replay: %s", control_names)
+        log.debug("  Control names in replay: %s", control_names)
 
     # _FakeDontInverseAxis: when present, cancels the default sign-inversion
     # applied by _event_to_analog_value().  Without it the default convention
@@ -508,7 +508,7 @@ def _sample_inputs_at_steps(
         for ce in control_entries
     )
     if cancel_default_steer_inversion:
-        log.info("  Replay has _FakeDontInverseAxis: cancelling default steer inversion")
+        log.debug("  Replay has _FakeDontInverseAxis: cancelling default steer inversion")
 
     # --- collect and sort events ---
     events: list[tuple[int, str, bool]] = []
@@ -558,19 +558,19 @@ def _sample_inputs_at_steps(
             unknown_names.add(event_name_raw)
 
     if unknown_names:
-        log.info("  Unknown control names (ignored): %s", unknown_names)
+        log.debug("  Unknown control names (ignored): %s", unknown_names)
 
     events.sort(key=lambda x: x[0])
 
     if events:
         t_min = events[0][0]
         t_max = events[-1][0]
-        log.info(
+        log.debug(
             "  Parsed %d input events, time range [%d .. %d] ms, step_ms=%d",
             len(events), t_min, t_max, step_ms,
         )
         for j, (t_ev, key, enabled) in enumerate(events[:_DEBUG_EVENTS_TO_LOG]):
-            log.info("  Event %02d: t=%dms key=%s state=%s", j, t_ev, key, int(enabled))
+            log.debug("  Event %02d: t=%dms key=%s state=%s", j, t_ev, key, int(enabled))
 
     # --- sample key state at each step ---
     n_steps = int(race_time_ms / step_ms) + 1
@@ -753,10 +753,10 @@ def extract_inputs_from_replay_gbx(
         )
         return None
 
-    # Diagnostics: show control entry format for first replay
+    # Diagnostics: show control entry format (debug only)
     if control_entries:
         ce0 = control_entries[0]
-        log.info(
+        log.debug(
             "Replay %s: %d control_entries, race_time=%d ms. "
             "First entry attrs: time=%s event_name=%s enabled=%s flags=%s",
             replay_path.name,
@@ -768,7 +768,7 @@ def extract_inputs_from_replay_gbx(
             getattr(ce0, "flags", "?"),
         )
     else:
-        log.info("Replay %s: 0 control_entries, race_time=%d ms", replay_path.name, race_time)
+        log.debug("Replay %s: 0 control_entries, race_time=%d ms", replay_path.name, race_time)
 
     # Build inputs from events
     if control_entries:
@@ -777,15 +777,13 @@ def extract_inputs_from_replay_gbx(
             input_time_offset_ms=input_time_offset_ms,
             control_names=control_names,
         )
-        # Diagnostics: count how many steps have at least one active key
         n_active = sum(1 for inp in inputs if any(inp.values()))
-        log.info(
+        log.debug(
             "  -> %d steps total (step_ms=%d), %d with active inputs (%.0f%%)",
             len(inputs), step_ms, n_active, 100 * n_active / max(len(inputs), 1),
         )
-        # Log first 5 steps for verification (TMNF: accelerate usually from step 0)
         for i in range(min(5, len(inputs))):
-            log.info("  Step %d (t=%dms): %s", i, i * step_ms, inputs[i])
+            log.debug("  Step %d (t=%dms): %s", i, i * step_ms, inputs[i])
     else:
         n_steps = int(race_time / step_ms) + 1
         inputs = [{"accelerate": False, "brake": False, "left": False, "right": False} for _ in range(n_steps)]
@@ -1521,6 +1519,18 @@ def worker_process(
                     if replay_metadata.get("game_version"):
                         log.info("  Game version: %s", replay_metadata["game_version"])
 
+                    # Extract inputs from GBX for manifest (action_idx + full actions list)
+                    inputs_per_step: list[dict[str, bool]] | None = None
+                    action_indices: list[int] | None = None
+                    inputs_result = extract_inputs_from_replay_gbx(
+                        replay_path, step_ms, input_time_offset_ms=input_time_offset_ms,
+                    )
+                    if inputs_result is not None:
+                        inputs_per_step, _, _ = inputs_result
+                        action_indices = [action_dict_to_index(inp) for inp in inputs_per_step]
+                    else:
+                        log.debug("No inputs extracted from GBX for %s (manifest will have no action_idx)", replay_path.name)
+
                     # 2. Ensure challenge is in the game folder
                     challenge_path = get_challenge_path_for_track(
                         track_id, replay_path, tracks_dir, extract_challenge_from_replay,
@@ -1647,14 +1657,23 @@ def worker_process(
                             "time_ms": t_ms,
                             "capture_timestamp_utc": datetime.now(timezone.utc).isoformat(),
                         }
+                        if action_indices is not None and inputs_per_step is not None and len(action_indices) > 0:
+                            step_idx = min(max(0, int(round(t_ms / step_ms))), len(action_indices) - 1)
+                            entry["action_idx"] = action_indices[step_idx]
+                            entry["inputs"] = dict(inputs_per_step[step_idx])
                         manifest_entries.append(entry)
                         if per_frame_json:
                             (out_dir / f"frame_{i:05d}_{t_ms}ms.json").write_text(
                                 json.dumps(entry, indent=2), encoding="utf-8",
                             )
                     
+                    manifest_obj: dict | list = (
+                        {"entries": manifest_entries, "actions": action_indices}
+                        if action_indices is not None
+                        else manifest_entries
+                    )
                     (out_dir / "manifest.json").write_text(
-                        json.dumps(manifest_entries, indent=2), encoding="utf-8",
+                        json.dumps(manifest_obj, indent=2), encoding="utf-8",
                     )
                     
                     capture_interval_ms = 1000.0 / fps if fps > 0 else float(step_ms)

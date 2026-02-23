@@ -14,14 +14,14 @@ Configuration:
   Constructor kwargs                 — programmatic overrides (highest priority)
 
 Quick start:
-  from trackmania_rl.pretrain_visual import PretrainConfig, train_pretrain
+  from trackmania_rl.pretrain import PretrainConfig, train_pretrain
   cfg = PretrainConfig(task="simclr", epochs=100)
   train_pretrain(cfg)
 """
 
 from config_files.pretrain_schema import PretrainConfig, load_pretrain_config
-from trackmania_rl.pretrain_visual.train import train_pretrain
-from trackmania_rl.pretrain_visual.export import save_encoder_artifact, load_encoder_artifact
+from trackmania_rl.pretrain.train import train_pretrain
+from trackmania_rl.pretrain.export import save_encoder_artifact, load_encoder_artifact
 
 __all__ = [
     "PretrainConfig",

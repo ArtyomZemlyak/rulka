@@ -15,6 +15,8 @@ Experiments live in ``docs/source/experiments/``. **Each file covers one topic**
 
 **Rule:** same topic → same file (e.g. training_speed); new topic → new file + new index entry.
 
+- **Pretrain experiments** (BC, visual, etc.): put under ``docs/source/experiments/pretrain/``. Create ``docs/source/experiments/pretrain/<topic>.rst`` (e.g. ``behavioral_cloning.rst``) and add it to ``docs/source/experiments/pretrain/index.rst`` toctree. The main experiments index (``docs/source/experiments/index.rst``) includes ``pretrain/index``. Pretrain logs are **epoch-based**, use **Lightning CSV** (and optionally TensorBoard); metrics differ from RL (train/val loss, overall and **per-action accuracy**). Use **action names** (e.g. accel, left+accel, right+accel, brake) in docs, not only class indices 0, 1, 2. Analysis script: ``scripts/analyze_pretrain_bc.py``.
+
 ---
 
 ## Required Sections (checklist)
@@ -132,9 +134,13 @@ Ask or extract (prefer extract first):
 
 ---
 
-## Step 2: Extract TensorBoard Data
+## Step 2: Extract Data (RL vs Pretrain)
 
 **Environment:** Use the project venv. Activate it before running any Python script.
+
+**Pretrain experiments (BC, etc.):** Data comes from **Lightning CSV** in run dirs (e.g. ``output/ptretrain/bc/v1/csv/metrics.csv``), not from RL TensorBoard. Run ``python scripts/analyze_pretrain_bc.py <run_dir1> <run_dir2> [--interval 5]`` (or ``--base-dir output/ptretrain/bc v1 v1.1``). The script prints loss/acc by epoch and **per-action accuracy with human-readable names** (accel, left+accel, right+accel, coast, brake, etc.). Use that output for the RST. No ``analyze_experiment_by_relative_time.py`` for pretrain.
+
+**RL experiments:** Continue with TensorBoard extraction below.
 
 - **Windows (PowerShell):** ``.\.venv\Scripts\Activate.ps1`` or ``.\.venv\Scripts\activate``  
 - **Unix:** ``source .venv/bin/activate``
@@ -180,7 +186,8 @@ Read the relevant configs to document parameter changes:
 **Choose the target file:**
 
 - **Batch / running_speed / gpu_collectors_count** → use or update ``docs/source/experiments/training_speed.rst`` (add new runs, subsections, conclusions; do not duplicate existing runs).
-- **Any other topic** → create ``docs/source/experiments/<experiment_name>.rst`` and add it to the index toctree.
+- **Pretrain (BC, visual, etc.)** → create or update ``docs/source/experiments/pretrain/<topic>.rst`` (e.g. ``behavioral_cloning.rst``) and add it to ``docs/source/experiments/pretrain/index.rst`` toctree. Document **by epoch**; use **per-action accuracy with action names** (accel, left+accel, right+accel, coast, brake, etc.), not only class indices.
+- **Any other RL topic** → create ``docs/source/experiments/<experiment_name>.rst`` and add it to the main index toctree.
 
 **Template for a new experiment page** (new topic only; for training_speed, adapt and append):
 
@@ -294,15 +301,10 @@ Recommendations
 
 ## Step 5: Update Index (only for new topics)
 
-The toctree in ``docs/source/experiments/index.rst`` must list every experiment page. When you **add a new topic** (new .rst file), add one line:
+The toctree in ``docs/source/experiments/index.rst`` must list every experiment page (and ``pretrain/index`` for the pretrain subfolder). When you **add a new topic**:
 
-```rst
-.. toctree::
-   :maxdepth: 2
-
-   training_speed
-   <new_experiment_name>
-```
+- **RL / main experiments:** add one line to ``docs/source/experiments/index.rst`` toctree (e.g. ``<new_experiment_name>``).
+- **Pretrain:** add one line to ``docs/source/experiments/pretrain/index.rst`` toctree (e.g. ``behavioral_cloning``). The main index already includes ``pretrain/index``.
 
 When you **only update** an existing file (e.g. training_speed.rst), do **not** change the index.
 
@@ -330,8 +332,9 @@ When you **only update** an existing file (e.g. training_speed.rst), do **not** 
 | Compare by last value only | ``python scripts/analyze_experiment.py <run1> <run2> ...`` |
 | Extract specific metrics | ``python scripts/extract_tensorboard_data.py --runs <run1> <run2> --metrics "Race/eval_race_time_robust_hock" "Training/loss"`` |
 | Batch-size–specific (legacy) | ``python scripts/analyze_batch_experiment.py`` |
+| **BC pretrain comparison** (by epoch; per-action accuracy with names) | ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v1 output/ptretrain/bc/v1.1 [--interval 5]``; or ``--base-dir output/ptretrain/bc v1 v1.1``; or ``--csv path1 path2`` |
 
-Use ``--logdir "C:\...\rulka\tensorboard"`` when not running from project root.
+Use ``--logdir "C:\...\rulka\tensorboard"`` when not running from project root. For **pretrain BC**, logs are in run dirs (e.g. ``output/ptretrain/bc/v1/csv/metrics.csv``); the script auto-resolves CSV from run dirs.
 
 ---
 
@@ -355,7 +358,7 @@ When comparing, report these **at the same checkpoints** both by relative time (
 
 2. **PowerShell:** On Windows, ``cmd1 && cmd2`` often fails. Use ``cmd1; cmd2`` or run commands separately.
 
-3. **TensorBoard path:** Logs are in ``tensorboard\uni_<N>``. Scripts use cwd by default. If cwd is not project root, pass ``--logdir "<abs_path_to_tensorboard>"``.
+3. **TensorBoard path:** RL logs are in ``tensorboard\uni_<N>``. Scripts use cwd by default. If cwd is not project root, pass ``--logdir "<abs_path_to_tensorboard>"``. **Pretrain BC** logs are in run dirs (e.g. ``output/ptretrain/bc/v1/csv/``); use ``analyze_pretrain_bc.py`` with run dirs or ``--base-dir``.
 
 4. **Run the script:** Execute the analysis in the same session (venv + correct cwd or ``--logdir``), then paste real numbers into the RST. Do not leave “run the script to get numbers” placeholders.
 
@@ -370,6 +373,8 @@ When comparing, report these **at the same checkpoints** both by relative time (
 9. **Comparison plot JPGs:** After running ``generate_experiment_plots.py`` (with TensorBoard logs present), **commit** the new/updated ``docs/source/_static/exp_*.jpg`` files so the built docs show the graphs. TensorBoard and ``save/`` are not committed; the generated plot images are. After **any change to the plotting script** (e.g. robust y-axis, new metrics), regenerate all plots with ``generate_experiment_plots.py`` and commit the updated JPGs.
 
 10. **Embedding plots:** When adding or updating experiment docs, **embed** comparison plots correctly: place each image **right after** the metric subsection it illustrates; add **``:alt:``** to every image with a short caption (metric + runs); add **one intro sentence** at the start of "Detailed TensorBoard Metrics Analysis" that the figures show one metric per graph, runs as lines, by relative time. See "Embedding plots in RST (quality)".
+
+11. **Pretrain experiments:** Use **epoch-based** comparison (not relative wall-clock time). Data source is **Lightning CSV** (and optionally TensorBoard); columns are train_loss, val_loss, train_acc, val_acc, train_acc_class_0..N, val_acc_class_0..N. In docs, report **per-action accuracy with human-readable names** (accel, left+accel, right+accel, coast, left, right, brake, left+brake, right+brake, accel+brake, left+accel+brake, right+accel+brake), not only "class 0, 1, 2". Use ``scripts/analyze_pretrain_bc.py``; it maps class index to these names. If you extend ``extract_tensorboard_data.py`` for other log types (e.g. pretrain TensorBoard), support different tag sets (no Race/..., no RL/avg_Q; use train_loss, val_loss, val_acc, etc.).
 
 ---
 

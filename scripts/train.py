@@ -89,7 +89,7 @@ if __name__ == "__main__":
     # Skipped automatically on resumed runs (weights1.torch already present).
     pretrain_injected = False
     if config.pretrain_encoder_path:
-        from trackmania_rl.pretrain_visual.export import inject_encoder_into_iqn
+        from trackmania_rl.pretrain.export import inject_encoder_into_iqn
         pretrain_injected = inject_encoder_into_iqn(
             encoder_pt=Path(base_dir) / config.pretrain_encoder_path,
             save_dir=save_dir,

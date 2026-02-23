@@ -92,7 +92,7 @@ def _validate(state_dict: dict, meta: dict | None) -> None:
     if meta is None:
         return
     try:
-        from trackmania_rl.pretrain_visual.export import validate_encoder_compatibility
+        from trackmania_rl.pretrain.export import validate_encoder_compatibility
         validate_encoder_compatibility(state_dict, meta, strict=False)
         log.info("Compatibility check passed.")
     except Exception as exc:
@@ -112,7 +112,7 @@ def _maybe_avg_to_1ch(state_dict: dict, meta: dict | None) -> dict:
         "Averaging first Conv2d kernels to 1 channel for IQN compatibility.",
         in_channels,
     )
-    from trackmania_rl.pretrain_visual.export import average_first_layer_to_1ch
+    from trackmania_rl.pretrain.export import average_first_layer_to_1ch
     return average_first_layer_to_1ch(state_dict)
 
 

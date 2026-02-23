@@ -129,7 +129,7 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    from trackmania_rl.pretrain_visual.preprocess import is_cache_valid, build_cache
+    from trackmania_rl.pretrain.preprocess import is_cache_valid, build_cache
 
     data_dir: Path = args.data_dir
     output_dir: Path = args.output_dir

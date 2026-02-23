@@ -54,7 +54,7 @@ import logging
 from pathlib import Path
 
 from config_files.pretrain_schema import LightningConfig, PretrainConfig, load_pretrain_config
-from trackmania_rl.pretrain_visual.train import train_pretrain
+from trackmania_rl.pretrain.train import train_pretrain
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)

@@ -1,0 +1,215 @@
+# =============================================================================
+# Level 1 BC (behavioral cloning) pretraining configuration
+# config_files/pretrain_config_bc.yaml
+#
+# Override priority (highest first):
+#   1. CLI arguments   (scripts/pretrain_bc.py)
+#   2. Env vars         PRETRAIN_BC_<FIELD>  e.g.  PRETRAIN_BC_EPOCHS=20
+#                       Nested:  PRETRAIN_BC_LIGHTNING__PATIENCE=5
+#   3. This file
+#
+# Schema: config_files/pretrain_bc_schema.py
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+# Root of the frame tree: <data_dir>/<track_id>/<replay_name>/ with manifest.json and frames.
+data_dir: maps/img
+
+# Base output directory. Run is stored in output_dir/<run_name>/ or output_dir/run_001/, run_002/, ...
+output_dir: output/ptretrain/bc
+
+# Subdirectory name for this run. null = auto-increment run_001, run_002, ...
+run_name: v1.1
+
+
+# ---------------------------------------------------------------------------
+# Preprocessed cache (BC: train.npy + train_actions.npy, val_*.npy when val_fraction > 0)
+# ---------------------------------------------------------------------------
+
+# Directory for BC cache. null = load on-the-fly from data_dir (slower, no preprocessing).
+preprocess_cache_dir: cache/v0
+
+# Load cache arrays fully into RAM before training (faster, but requires sufficient memory).
+cache_load_in_ram: true
+
+# Number of threads for cache construction (frame decoding). 0 = single-threaded.
+cache_build_workers: 4
+
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+
+# Square input resolution (must match RL config, e.g. 64).
+image_size: 64
+
+# Number of consecutive frames per sample (1 = single frame).
+n_stack: 1
+
+
+# ---------------------------------------------------------------------------
+# BC mode and encoder init
+# ---------------------------------------------------------------------------
+
+# Save mode:
+#   backbone      — save encoder only for IQN img_head
+#   full_policy   — encoder + action head (for warm start / bc_policy.pt)
+#   auxiliary_head — separate BC head as auxiliary signal in IQN
+bc_mode: backbone
+
+# Path to Level 0 encoder.pt to initialize BC CNN. null = train from scratch.
+encoder_init_path: "output/ptretrain/vis/v1/encoder.pt"
+use_floats: false
+
+# Must match len(config.inputs) in RL config (e.g. 12).
+n_actions: 12
+
+
+# ---------------------------------------------------------------------------
+# Training (common loop parameters)
+# ---------------------------------------------------------------------------
+
+# Mini-batch size.
+batch_size: 4096
+
+# Number of full passes over the dataset.
+epochs: 50
+
+# Adam learning rate.
+lr: 0.0005
+
+# Gradient clipping by norm. 0 = disabled. Recommended 1.0 for stability.
+grad_clip: 1.0
+
+
+# ---------------------------------------------------------------------------
+# DataLoader (data loading)
+# ---------------------------------------------------------------------------
+
+# Number of DataLoader worker processes for parallel loading/augmentation.
+# 0 = main process only (CPU bottleneck, GPU idle; use only for debugging).
+# Recommended: (CPU cores / 2), leaving at least one core free.
+# On Windows, workers > 0 uses spawn (not fork): startup is slower, but
+# persistent_workers (in code) keeps workers alive across epochs.
+workers: 4
+
+# Pin CPU tensors to page-locked memory for faster host→GPU transfer.
+# Recommended true on CUDA; on CPU only slightly increases RAM use.
+pin_memory: true
+
+# DataLoader prefetch: each worker pre-loads this many batches.
+# Only effective when workers > 0. Higher = more RAM but better GPU utilisation.
+prefetch_factor: 4
+
+
+# ---------------------------------------------------------------------------
+# Data split (track-level)
+# ---------------------------------------------------------------------------
+
+# Fraction of track IDs reserved for validation.
+#   0.0 — no split; all data used for training (no val_loss in metrics).
+#   0.1 — 10 % of tracks in validation (recommended: val_loss and early stopping on it).
+# Split is at the TRACK level to prevent leakage (same track never in both splits).
+val_fraction: 0.1
+
+# RNG seed for deterministic track-level split and training reproducibility.
+seed: 42
+
+
+# ---------------------------------------------------------------------------
+# Miscellaneous
+# ---------------------------------------------------------------------------
+
+# Show tqdm progress bar during native training (not Lightning).
+use_tqdm: true
+
+
+# ---------------------------------------------------------------------------
+# PyTorch Lightning (BC training uses Lightning only)
+# ---------------------------------------------------------------------------
+# BC training runs with PyTorch Lightning: Trainer, callbacks, loggers, AMP, etc.
+# Same pattern as Level 0 pretrain with framework: lightning.
+#
+lightning:
+
+  # --- Loggers ---
+
+  # Write TensorBoard events to output_dir/<tensorboard_dir>/.
+  # View with: tensorboard --logdir output/ptretrain/bc/<run>/tensorboard
+  tensorboard: true
+  tensorboard_dir: tensorboard
+
+  # Write per-epoch metrics to CSV: output_dir/csv_dir/version_*/metrics.csv.
+  csv_logger: true
+  csv_dir: csv
+
+  # --- Checkpoints ---
+
+  # Subdirectory (relative to output_dir) for .ckpt files.
+  checkpoint_dir: checkpoints
+
+  # Number of best checkpoints to keep: -1 = all, 0 = none, 1 = best only.
+  save_top_k: 1
+
+  # Metric to monitor for ModelCheckpoint and EarlyStopping.
+  # 'auto' = 'val_loss' when val_fraction > 0, otherwise 'train_loss'.
+  checkpoint_monitor: auto
+
+  # --- Early stopping ---
+
+  # Stop training when the monitored metric stops improving.
+  early_stopping: false
+
+  # Number of epochs with no improvement before stopping.
+  patience: 10
+
+  # Minimum change in the monitored metric to count as an improvement.
+  min_delta: 0.0
+
+  # --- Hardware / precision ---
+
+  # PyTorch Lightning accelerator: auto | cpu | gpu | tpu | mps.
+  # 'auto' = automatic choice (usually GPU when available).
+  accelerator: auto
+
+  # Training precision:
+  #   auto       — 16-mixed if CUDA available, otherwise 32-true
+  #   16-mixed   — mixed FP16 (faster, less VRAM; recommended for CUDA)
+  #   bf16-mixed — BF16 (RTX 30xx+, more numerically stable than FP16)
+  #   32-true    — full FP32 (for CPU and debugging)
+  precision: auto
+
+  # Number of devices (GPUs) to use. null = let Lightning decide (all available).
+  devices: null
+
+  # --- Logging frequency ---
+
+  # Log metrics to TensorBoard/CSV every N training steps.
+  # Capped in code to max(1, n_batches // 4) to avoid sparse-step warnings.
+  log_every_n_steps: 50
+
+  # --- Misc ---
+
+  # Use deterministic algorithms (reproducible but ~10–30 % slower on GPU).
+  # Combine with seed: <int> for full reproducibility.
+  deterministic: false
+
+  # Print model parameter summary table before training starts.
+  enable_model_summary: true
+
+  # PyTorch Lightning profiler: null | simple | advanced | pytorch.
+  # 'simple' adds per-step timing with low overhead.
+  profiler: null
+
+  # torch.set_float32_matmul_precision — enables Tensor Core utilisation on
+  # RTX 30xx / 40xx / 50xx (Ampere / Ada / Blackwell). Without this, FP32 matmuls
+  # do not use Tensor Cores.
+  #   medium  — recommended (best speed, small precision loss)
+  #   high    — slightly more precise
+  #   highest — full FP32 precision; slowest
+  #   null    — do not call (PyTorch default behaviour)
+  float32_matmul_precision: medium

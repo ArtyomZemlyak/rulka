@@ -92,3 +92,30 @@ CACHE_VALIDATION_FIELDS = (
     "seed",
     "source_signature",
 )
+
+# ---------------------------------------------------------------------------
+# BC preprocessed cache contract  (preprocess.py build_bc_cache / CachedBCDataset)
+# ---------------------------------------------------------------------------
+#
+# A BC cache directory (``preprocess_cache_dir`` in BCPretrainConfig) contains:
+#
+#   train.npy           — (N_train, n_stack, 1, H, W) float32, same as Level 0.
+#   train_actions.npy   — (N_train,) int64, action index per sample.
+#   val.npy             — same as train.npy for validation. Absent when val_fraction == 0.
+#   val_actions.npy     — (N_val,) int64. Absent when val_fraction == 0.
+#   cache_meta.json     — same fields as Level 0 plus:
+#     n_actions         (int): number of action classes (must match BCPretrainConfig.n_actions)
+#
+# Validation: is_bc_cache_valid() checks source_data_dir, image_size, n_stack,
+# val_fraction, seed, source_signature, and n_actions.
+#
+# Reusing Level 0 cache: You can use the SAME directory for both Level 0 and
+# BC. Build Level 0 first (build_cache → train.npy, val.npy, cache_meta.json).
+# When you run BC with that directory as preprocess_cache_dir, build_bc_cache
+# will add only train_actions.npy and val_actions.npy (same row order as
+# train.npy/val.npy) and update cache_meta.json with n_actions. If any sample
+# lacks action_idx in manifest.json, a full BC cache is built instead.
+
+CACHE_TRAIN_ACTIONS_FILE = "train_actions.npy"
+CACHE_VAL_ACTIONS_FILE = "val_actions.npy"
+BC_CACHE_VALIDATION_FIELDS = CACHE_VALIDATION_FIELDS + ("n_actions",)

@@ -156,7 +156,7 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
   - **What:** Pretrain only the **CNN backbone** (IQN ``img_head``) on frames—no actions.
     Tasks: autoencoder (AE), VAE, SimCLR (contrastive).
 
-  - **Package:** ``trackmania_rl/pretrain_visual/`` — modular package with ``PretrainConfig``,
+  - **Package:** ``trackmania_rl/pretrain/`` — modular package with ``PretrainConfig``,
     replay-aware dataset (no cross-replay temporal stacking), Lightning + native training
     paths, and reproducible artifact export.
 
@@ -192,7 +192,7 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
     - ``checkpoints/`` — ``best-epoch=NNN.ckpt`` snapshots for resuming training
       (not consumed by ``init_iqn_from_encoder.py``; use ``encoder.pt`` there).
 
-    See ``trackmania_rl/pretrain_visual/contract.py`` for the full schema.
+    See ``trackmania_rl/pretrain/contract.py`` for the full schema.
 
   - **Dataset split:** ``--val-fraction 0.1`` enables track-level train/val split
     (no data leakage). Default ``0`` = no split (original behaviour).
@@ -313,10 +313,36 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
 
   Use ``scripts/analyze_experiment_by_relative_time.py A_scratch B1_ae B2_simclr``
   to compare the three runs.
+
 **Level 1: Behavioral cloning (BC) — frames → actions**
-  - **What:** Supervised learning: input = frame stack (and optionally float features), target = expert action from ``manifest.json`` (e.g. steer/accel/brake or discrete action id). Single policy network (e.g. same CNN as ``img_head`` + action head); loss = cross-entropy (discrete) or MSE (continuous).
-  - **Data:** Replays from ``capture_replays_tmnf.py``; read ``manifest.json`` per frame for ``inputs``; align frames ``frame_*_*ms.jpeg`` with inputs (same ``step``/``time_ms``).
-  - **Integration with IQN:** (A) **Backbone only:** train BC, save the **encoder** (CNN part); load into ``IQN_Network.img_head`` as in Level 0; then run IQN from that checkpoint. (B) **Full policy as prior:** if the BC network has the same architecture as IQN’s “feature” part (img_head + float head → joint embedding), load both into IQN and optionally use a **warm start**: fill replay buffer with BC policy rollouts, then train IQN with a short BC loss coef (e.g. L = L_IQN + 0.1·L_BC) for a few k steps before dropping L_BC.
+
+  - **What:** Supervised learning: input = frame stack (and optionally float features), target = expert action from ``manifest.json`` (e.g. steer/accel/brake or discrete action id). Single policy network (same CNN as ``img_head`` + action head); loss = cross-entropy (discrete). Training runs with **PyTorch Lightning** only: Trainer, checkpoints, early stopping, TensorBoard/CSV, AMP; config is in ``config_files/pretrain_config_bc.yaml`` (and nested ``lightning:`` for Trainer options).
+
+  - **Data:** Replays from ``capture_replays_tmnf.py``; read ``manifest.json`` per frame for ``inputs``; align frames ``frame_*_*ms.jpeg`` with inputs (same ``step``/``time_ms``). You can either load on-the-fly from ``data_dir`` or prebuild a **BC cache** (``train.npy`` + ``train_actions.npy``, optional ``val.npy``/``val_actions.npy``) via ``preprocess_cache_dir`` for faster I/O. **Reusing Level 0 cache:** Use the *same* directory as Level 0 ``preprocess_cache_dir`` (e.g. ``cache/pretrain_64``). Level 0 writes ``train.npy``, ``val.npy``, ``cache_meta.json``. When you run BC with that dir, only ``train_actions.npy`` and ``val_actions.npy`` are added (same row order); no duplicate frame files. If any frame lacks ``action_idx`` in ``manifest.json``, a full BC cache is built instead.
+
+  - **How it works:** Entry point is ``train_bc(cfg)`` in ``trackmania_rl.pretrain.train_bc``. It (1) checks/builds BC cache if ``preprocess_cache_dir`` is set; (2) builds the BC network (encoder + action head), optionally loading a Level 0 ``encoder.pt`` into the CNN; (3) uses ``CachedBCDataModule`` or ``BCReplayDataModule`` for train/val loaders; (4) creates the Lightning Trainer via ``create_lightning_trainer`` (shared with Level 0); (5) runs ``trainer.fit(bc_module, datamodule=data_module)``; (6) saves ``encoder.pt`` and ``pretrain_meta.json`` (and ``metrics.csv``) in the run directory. The saved encoder is the CNN backbone only (IQN-compatible).
+
+  - **How to run:**
+
+    .. code-block:: bash
+
+     # Defaults from config_files/pretrain_config_bc.yaml (data_dir, output_dir, epochs, batch_size, lightning:, etc.):
+     python scripts/pretrain_bc.py --data-dir maps/img
+
+     # Override key options:
+     python scripts/pretrain_bc.py --data-dir maps/img --epochs 30 --batch-size 2048 --run-name bc_v1
+     python scripts/pretrain_bc.py --config my_bc.yaml --encoder-init-path output/ptretrain/vis/v1/encoder.pt
+
+     # Use preprocessed BC cache (faster; built automatically if missing or stale):
+     python scripts/pretrain_bc.py --data-dir maps/img --preprocess-cache-dir cache/bc
+
+     # Env overrides (PRETRAIN_BC_*), e.g. PowerShell:
+     $env:PRETRAIN_BC_EPOCHS = "20"; $env:PRETRAIN_BC_VAL_FRACTION = "0.15"
+     python scripts/pretrain_bc.py --data-dir maps/img
+
+    Config priority: CLI → env (``PRETRAIN_BC_*``, nested ``PRETRAIN_BC_LIGHTNING__*``) → ``pretrain_config_bc.yaml``. Schema: ``config_files/pretrain_bc_schema.py``.
+
+  - **Integration with IQN:** (A) **Backbone only:** After BC, save the **encoder** (CNN part) as ``encoder.pt`` in the run dir. Load it into ``IQN_Network.img_head`` exactly as in Level 0: use ``scripts/init_iqn_from_encoder.py`` to create (or patch) IQN checkpoints with the BC encoder, then start the learner from that checkpoint. (B) **Full policy as prior:** if the BC network has the same architecture as IQN’s “feature” part (img_head + float head → joint embedding), load both into IQN and optionally use a **warm start**: fill replay buffer with BC policy rollouts, then train IQN with a short BC loss coef (e.g. L = L_IQN + 0.1·L_BC) for a few k steps before dropping L_BC.
 
 **Level 2: BC + temporal model (LSTM / history of actions)**
   - **What:** Same as Level 1 but input includes **last K actions** (or latent states); network = CNN + LSTM(256) or 1D conv over time; predicts next action. Captures “how we got here” and reduces compounding errors somewhat by conditioning on recent behavior.

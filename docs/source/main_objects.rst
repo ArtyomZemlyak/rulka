@@ -76,6 +76,6 @@ These instances **do not share weights**, they are independent instances.
 
 The learner process and collector processes have access to a common uncompiled ``uncompiled_shared_network`` created in ``scripts/train.py``. The learner will regularly copy weights from the ``online_network`` to the ``uncompiled_shared_network``. Collector processes will regularly copy weights from the ``uncompiled_shared_network`` to their own ``inference_network``. Locks are used to avoid simultaneous writing and reading from the ``uncompiled_shared_network``.
 
-The network's structure is further defined in the class' ``forward()`` method.
+The network's structure is further defined in the class' ``forward()`` method. A detailed architecture description with block diagrams is in :doc:`experiments/models/iqn_architecture`.
 
 

@@ -33,6 +33,7 @@ dependencies = [
     # Utilities
     "joblib>=1.4.0",
     "psutil>=6.0.0",
+    "tqdm>=4.66.0",
     "setuptools",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -55,12 +56,13 @@ dependencies = [
 dev = [
     "ruff>=0.8.0",
 ]
-# For pretrain_visual_backbone.py: lightly (SimCLR), lightning (training loop), timm (future backbones)
+# For trackmania_rl.pretrain (scripts/pretrain_visual_backbone.py): lightly (SimCLR), lightning (training loop), timm (future backbones)
 pretrain = [
     "lightly>=1.5.0",
     "lightning>=2.0.0",
     "timm>=1.0.0",
 ]
+# Build docs: pip install -e ".[doc]". For IQN architecture diagrams, install system Graphviz (dot on PATH).
 doc = [
     "sphinx>=8.0.0",
     "sphinx_rtd_theme>=3.0.0",

@@ -20,4 +20,7 @@ Contents
    network_size_long_training
    pretrain_replay_roadmap
    pretrain_visual_backbone
+   pretrain_bc
+   pretrain/index
+   models/iqn_architecture
    models/iqn

@@ -40,6 +40,7 @@ EXPERIMENTS = [
     {"name": "extended_training_triple", "runs": ["A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_extended_training_A01_uni20_uni20long"},
     {"name": "network_size_big_long", "runs": ["A01_as20_big_long", "A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_network_size_big_long"},
     {"name": "pretrain_visual_backbone", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained"], "prefix": "exp_pretrain_visual_backbone"},
+    {"name": "pretrain_bc", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained", "A01_as20_long_vis_bc_pretrained"], "prefix": "exp_pretrain_bc"},
 ]
 
 

@@ -9,7 +9,7 @@
 #   3. This file       (pretrain_config.yaml)
 #
 # Schema and validation: config_files/pretrain_schema.py
-# Artifact contract   : trackmania_rl/pretrain_visual/contract.py
+# Artifact contract   : trackmania_rl/pretrain/contract.py
 # Experiment roadmap  : docs/source/experiments/pretrain_replay_roadmap.rst
 # =============================================================================
 

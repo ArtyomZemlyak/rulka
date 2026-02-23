@@ -18,7 +18,7 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
-from trackmania_rl.pretrain_visual.contract import (
+from trackmania_rl.pretrain.contract import (
     ENCODER_FILE,
     META_FILE,
     METRICS_FILE,
@@ -116,9 +116,14 @@ def save_encoder_artifact(
 
     # metrics.csv (optional)
     if metrics_rows:
-        fieldnames = list(metrics_rows[0].keys())
+        all_keys = set()
+        for row in metrics_rows:
+            all_keys.update(row.keys())
+        fieldnames = (["epoch"] if "epoch" in all_keys else []) + sorted(
+            k for k in all_keys if k != "epoch"
+        )
         with open(out_dir / METRICS_FILE, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(metrics_rows)
         log.info("Saved metrics → %s", out_dir / METRICS_FILE)
@@ -181,7 +186,7 @@ def validate_encoder_compatibility(
         ``average_first_layer_to_1ch`` before injecting into IQN).
         If ``False``, only warn.
     """
-    from trackmania_rl.pretrain_visual.models import build_encoder_from_meta
+    from trackmania_rl.pretrain.models import build_encoder_from_meta
     from trackmania_rl.agents.iqn import calculate_conv_output_dim
 
     image_size = meta["image_size"]
@@ -325,3 +330,32 @@ def inject_encoder_into_iqn(
         save_dir,
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Load encoder into BC network (for encoder_init_path)
+# ---------------------------------------------------------------------------
+
+def load_encoder_into_bc(encoder_pt: Path, bc_network: nn.Module) -> None:
+    """Load encoder.pt into the encoder of a BC network.
+
+    If the encoder has multiple input channels (from Level 0 stack_mode=channel),
+    averages the first Conv2d to 1 channel for compatibility.
+    """
+    encoder_pt = Path(encoder_pt)
+    if not encoder_pt.exists():
+        raise FileNotFoundError(f"encoder.pt not found: {encoder_pt}")
+
+    state_dict = torch.load(encoder_pt, map_location="cpu", weights_only=True)
+    meta_path = encoder_pt.parent / META_FILE
+    if meta_path.exists():
+        with open(meta_path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        in_channels = meta.get("in_channels", 1)
+        if in_channels != 1:
+            state_dict = average_first_layer_to_1ch(state_dict)
+            log.info("Loaded BC encoder init from %s (averaged %d-ch to 1-ch)", encoder_pt, in_channels)
+
+    encoder = bc_network.encoder
+    encoder.load_state_dict(state_dict, strict=True)
+    log.info("Loaded encoder weights into BC network from %s", encoder_pt)

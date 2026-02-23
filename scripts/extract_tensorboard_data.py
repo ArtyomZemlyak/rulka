@@ -102,6 +102,11 @@ def main():
         type=str,
         help="Output file path (optional, prints to stdout if not specified)"
     )
+    parser.add_argument(
+        "--list-tags",
+        action="store_true",
+        help="List all available scalar tags in the first run and exit (useful for pretrain or other log schemas)"
+    )
     
     args = parser.parse_args()
     
@@ -110,6 +115,25 @@ def main():
         print(f"Error: Log directory {log_dir} does not exist")
         sys.exit(1)
     
+    # List tags only (e.g. for pretrain TensorBoard with different tag names)
+    if args.list_tags:
+        run_name = args.runs[0]
+        run_path = log_dir / run_name
+        if not run_path.exists():
+            print(f"Error: Run directory {run_path} not found")
+            sys.exit(1)
+        event_files = list(run_path.glob("events.out.tfevents.*"))
+        if not event_files:
+            print(f"No event files in {run_path}")
+            sys.exit(1)
+        ea = EventAccumulator(str(run_path))
+        ea.Reload()
+        tags = ea.Tags().get("scalars", [])
+        print(f"Scalar tags in {run_name} ({len(tags)}):")
+        for t in sorted(tags):
+            print(f"  {t}")
+        sys.exit(0)
+
     # Extract data for all runs
     all_data = {}
     for run_name in args.runs:

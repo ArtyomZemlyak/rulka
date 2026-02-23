@@ -8,7 +8,7 @@ and programmatic construction all have higher priority than the YAML file.
 Usage
 -----
     from config_files.pretrain_schema import PretrainConfig
-    from trackmania_rl.pretrain_visual import train_pretrain
+    from trackmania_rl.pretrain import train_pretrain
     from pathlib import Path
 
     # Defaults from pretrain_config.yaml:
@@ -35,16 +35,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 # PretrainConfig is defined in config_files (pydantic-settings + YAML)
-from config_files.pretrain_schema import PretrainConfig  # re-exported from __init__ too
+from config_files.pretrain_schema import LightningConfig, PretrainConfig  # re-exported from __init__ too
 
-from trackmania_rl.pretrain_visual.models import (
+from trackmania_rl.pretrain.models import (
     StackedEncoderConcat,
     build_ae_decoder,
     build_iqn_encoder,
@@ -53,7 +53,7 @@ from trackmania_rl.pretrain_visual.models import (
     build_vae_head,
     get_enc_dim,
 )
-from trackmania_rl.pretrain_visual.export import save_encoder_artifact
+from trackmania_rl.pretrain.export import save_encoder_artifact
 
 log = logging.getLogger(__name__)
 
@@ -100,13 +100,13 @@ def _make_encoder_and_loader(
     -------
     encoder, loader, enc_dim, in_channels, stacked_concat, lightly_available
     """
-    from trackmania_rl.pretrain_visual.datasets import (
+    from trackmania_rl.pretrain.datasets import (
         FlatFrameDataset,
         ReplayFrameDataset,
         CachedPretrainDataset,
         split_track_ids,
     )
-    from trackmania_rl.pretrain_visual.preprocess import CACHE_TRAIN_FILE
+    from trackmania_rl.pretrain.preprocess import CACHE_TRAIN_FILE
 
     single_enc_dim = get_enc_dim(1, cfg.image_size)
 
@@ -322,7 +322,7 @@ def _train_simclr_native(
     except ImportError:
         _tqdm_ok = False
 
-    from trackmania_rl.pretrain_visual.tasks import _augment, _nt_xent
+    from trackmania_rl.pretrain.tasks import _augment, _nt_xent
 
     criterion = None
     if lightly_available:
@@ -375,7 +375,124 @@ def _train_simclr_native(
 
 
 # ---------------------------------------------------------------------------
-# Lightning training path
+# Shared Lightning trainer factory (used by Level 0 and Level 1 BC)
+# ---------------------------------------------------------------------------
+
+def create_lightning_trainer(
+    lc: LightningConfig,
+    run_dir: Path,
+    max_epochs: int,
+    grad_clip: float,
+    use_tqdm: bool,
+    has_val: bool,
+    n_train_batches: int,
+) -> tuple[Any, Any, str]:
+    """Build Lightning Trainer, callbacks and loggers from LightningConfig.
+
+    Returns
+    -------
+    (trainer, metrics_cb, monitor_key)
+    """
+    try:
+        import lightning as L
+        from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+        from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
+    except ImportError as exc:
+        raise ImportError(
+            "PyTorch Lightning is required. Install it with: pip install lightning"
+        ) from exc
+
+    from trackmania_rl.pretrain.tasks import MetricsCollector
+
+    if lc.checkpoint_monitor == "auto":
+        monitor_key = "val_loss" if has_val else "train_loss"
+    else:
+        monitor_key = lc.checkpoint_monitor
+
+    metrics_cb = MetricsCollector()
+    callbacks: list = [metrics_cb]
+
+    if lc.save_top_k != 0:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(run_dir / lc.checkpoint_dir),
+                save_top_k=lc.save_top_k,
+                monitor=monitor_key,
+                mode="min",
+                filename="best-{epoch:03d}-{" + monitor_key + ":.4f}",
+            )
+        )
+
+    if lc.early_stopping:
+        callbacks.append(
+            EarlyStopping(
+                monitor=monitor_key,
+                patience=lc.patience,
+                min_delta=lc.min_delta,
+                mode="min",
+                verbose=True,
+            )
+        )
+
+    loggers = []
+    if lc.tensorboard:
+        loggers.append(
+            TensorBoardLogger(
+                save_dir=str(run_dir),
+                name=lc.tensorboard_dir,
+                version="",
+            )
+        )
+    if lc.csv_logger:
+        loggers.append(
+            CSVLogger(
+                save_dir=str(run_dir),
+                name=lc.csv_dir,
+                version="",
+            )
+        )
+    if not loggers:
+        loggers = False  # type: ignore[assignment]
+
+    precision = lc.precision
+    if precision == "auto":
+        precision = "16-mixed" if torch.cuda.is_available() else "32-true"
+
+    log_every = max(1, min(lc.log_every_n_steps, n_train_batches))
+
+    trainer_kwargs: dict = dict(
+        max_epochs=max_epochs,
+        accelerator=lc.accelerator,
+        precision=precision,
+        callbacks=callbacks,
+        logger=loggers,
+        gradient_clip_val=grad_clip if grad_clip > 0 else None,
+        enable_progress_bar=use_tqdm,
+        enable_model_summary=lc.enable_model_summary,
+        deterministic=lc.deterministic,
+        limit_val_batches=1.0 if has_val else 0.0,
+        log_every_n_steps=log_every,
+    )
+    if lc.devices is not None:
+        trainer_kwargs["devices"] = lc.devices
+    if lc.profiler is not None:
+        trainer_kwargs["profiler"] = lc.profiler
+
+    trainer = L.Trainer(**trainer_kwargs)
+
+    log.info(
+        "Lightning Trainer: accelerator=%s  precision=%s  max_epochs=%d  "
+        "monitor=%s  tensorboard=%s  csv=%s  checkpoints→%s  early_stopping=%s(patience=%d)",
+        lc.accelerator, precision, max_epochs,
+        monitor_key, lc.tensorboard, lc.csv_logger,
+        run_dir / lc.checkpoint_dir, lc.early_stopping, lc.patience,
+    )
+
+    return trainer, metrics_cb, monitor_key
+
+
+# ---------------------------------------------------------------------------
+# Lightning training path (Level 0)
 # ---------------------------------------------------------------------------
 
 def _train_lightning(
@@ -396,23 +513,12 @@ def _train_lightning(
     -------
     (metrics_rows, n_train_samples, n_val_samples)
     """
-    try:
-        import lightning as L
-        from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-        from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
-    except ImportError as exc:
-        raise ImportError(
-            "PyTorch Lightning is required for framework='lightning'. "
-            "Install it with: pip install lightning"
-        ) from exc
-
-    from trackmania_rl.pretrain_visual.tasks import (
+    from trackmania_rl.pretrain.tasks import (
         AELightningModule,
         VAELightningModule,
         SimCLRLightningModule,
-        MetricsCollector,
     )
-    from trackmania_rl.pretrain_visual.datasets import (
+    from trackmania_rl.pretrain.datasets import (
         ReplayFrameDataModule,
         CachedPretrainDataModule,
     )
@@ -464,99 +570,15 @@ def _train_lightning(
         )
     data_module.setup()
 
-    # --- Resolve monitored metric ---
-    if lc.checkpoint_monitor == "auto":
-        monitor_key = "val_loss" if data_module.has_val else "train_loss"
-    else:
-        monitor_key = lc.checkpoint_monitor
-
-    # --- Callbacks ---
-    metrics_cb = MetricsCollector()
-    callbacks = [metrics_cb]
-
-    if lc.save_top_k != 0:
-        callbacks.append(
-            ModelCheckpoint(
-                dirpath=str(run_dir / lc.checkpoint_dir),
-                save_top_k=lc.save_top_k,
-                monitor=monitor_key,
-                mode="min",
-                filename="best-{epoch:03d}-{" + monitor_key + ":.4f}",
-            )
-        )
-
-    if lc.early_stopping:
-        callbacks.append(
-            EarlyStopping(
-                monitor=monitor_key,
-                patience=lc.patience,
-                min_delta=lc.min_delta,
-                mode="min",
-                verbose=True,
-            )
-        )
-
-    # --- Loggers ---
-    # version="" disables Lightning's own version_N subdirectory so that logs land
-    # directly in run_dir/tensorboard/ and run_dir/csv/ (no extra nesting).
-    loggers = []
-    if lc.tensorboard:
-        loggers.append(
-            TensorBoardLogger(
-                save_dir=str(run_dir),
-                name=lc.tensorboard_dir,
-                version="",
-            )
-        )
-    if lc.csv_logger:
-        loggers.append(
-            CSVLogger(
-                save_dir=str(run_dir),
-                name=lc.csv_dir,
-                version="",
-            )
-        )
-    if not loggers:
-        loggers = False  # type: ignore[assignment]  # Lightning accepts False = no logger
-
-    # --- Precision ---
-    precision = lc.precision
-    if precision == "auto":
-        precision = "16-mixed" if torch.cuda.is_available() else "32-true"
-
-    # --- log_every_n_steps: cap to batch count to avoid sparse-step warning ---
     n_train_batches = len(data_module.train_dataloader())
-    log_every = max(1, min(lc.log_every_n_steps, n_train_batches))
-
-    # --- Trainer ---
-    trainer_kwargs: dict = dict(
+    trainer, metrics_cb, _ = create_lightning_trainer(
+        lc,
+        run_dir,
         max_epochs=cfg.epochs,
-        accelerator=lc.accelerator,
-        precision=precision,
-        callbacks=callbacks,
-        logger=loggers,
-        gradient_clip_val=cfg.grad_clip if cfg.grad_clip > 0 else None,
-        enable_progress_bar=cfg.use_tqdm,
-        enable_model_summary=lc.enable_model_summary,
-        deterministic=lc.deterministic,
-        limit_val_batches=1.0 if data_module.has_val else 0.0,
-        log_every_n_steps=log_every,
-    )
-    if lc.devices is not None:
-        trainer_kwargs["devices"] = lc.devices
-    if lc.profiler is not None:
-        trainer_kwargs["profiler"] = lc.profiler
-
-    trainer = L.Trainer(**trainer_kwargs)
-
-    log.info(
-        "Lightning Trainer: accelerator=%s  precision=%s  max_epochs=%d  "
-        "monitor=%s  tensorboard=%s  csv=%s  checkpoints→%s  "
-        "early_stopping=%s(patience=%d)",
-        lc.accelerator, precision, cfg.epochs,
-        monitor_key, lc.tensorboard, lc.csv_logger,
-        run_dir / lc.checkpoint_dir,
-        lc.early_stopping, lc.patience,
+        grad_clip=cfg.grad_clip,
+        use_tqdm=cfg.use_tqdm,
+        has_val=data_module.has_val,
+        n_train_batches=n_train_batches,
     )
 
     try:
@@ -619,7 +641,7 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
     # -----------------------------------------------------------------------
     cache_dir: Optional[Path] = None
     if cfg.preprocess_cache_dir is not None:
-        from trackmania_rl.pretrain_visual.preprocess import (
+        from trackmania_rl.pretrain.preprocess import (
             is_cache_valid,
             build_cache,
         )

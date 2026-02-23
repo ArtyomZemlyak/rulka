@@ -311,6 +311,109 @@ class CachedPretrainDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# BC datasets: manifest-based (frame, action_idx)
+# ---------------------------------------------------------------------------
+
+
+class BCReplayDataset(Dataset):
+    """Dataset for BC: (frame stack, action_idx) from manifest.json on the fly.
+
+    Uses _collect_bc_index from preprocess to build the index; loads frames when needed.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        track_ids: Optional[list[str]],
+        size: int = 64,
+        n_stack: int = 1,
+    ) -> None:
+        from trackmania_rl.pretrain.preprocess import _collect_bc_index
+
+        root = Path(root)
+        if track_ids is None:
+            track_ids = sorted(d.name for d in root.iterdir() if d.is_dir())
+        self._items = _collect_bc_index(root, track_ids, n_stack)
+        self._size = size
+        self._n_stack = max(1, n_stack)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        paths, action_idx = self._items[idx]
+        stack = [_load_one_frame(paths[i], self._size) for i in range(self._n_stack)]
+        t = torch.stack(stack, dim=0)  # (n_stack, 1, H, W)
+        if self._n_stack == 1:
+            t = t.squeeze(0)
+        return t, action_idx
+
+
+class CachedBCDataset(Dataset):
+    """Dataset backed by BC cache: train.npy + train_actions.npy (or val)."""
+
+    def __init__(
+        self,
+        npy_path: Path,
+        actions_path: Path,
+        load_in_ram: bool = False,
+        expected_image_size: Optional[int] = None,
+        expected_n_stack: Optional[int] = None,
+    ) -> None:
+        npy_path = Path(npy_path)
+        actions_path = Path(actions_path)
+        if not npy_path.exists():
+            raise FileNotFoundError(f"CachedBCDataset: cache not found: {npy_path}")
+        if not actions_path.exists():
+            raise FileNotFoundError(f"CachedBCDataset: actions not found: {actions_path}")
+
+        mmap_mode = None if load_in_ram else "r"
+        self._frames = np.load(str(npy_path), mmap_mode=mmap_mode)
+        self._actions = np.load(str(actions_path), mmap_mode=mmap_mode)
+
+        if self._frames.ndim != 5:
+            raise ValueError(f"Expected 5-D frames (N, n_stack, 1, H, W), got {self._frames.shape}")
+        if self._actions.ndim != 1 or len(self._actions) != len(self._frames):
+            raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
+
+        _, self._n_stack, _, h, w = self._frames.shape
+        if expected_n_stack is not None and self._n_stack != expected_n_stack:
+            raise ValueError(f"n_stack mismatch: cache={self._n_stack}, expected={expected_n_stack}")
+        if expected_image_size is not None and (h != expected_image_size or w != expected_image_size):
+            raise ValueError(f"image_size mismatch: cache {h}x{w}, expected {expected_image_size}")
+
+        self._image_size = h
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        frame = np.array(self._frames[idx], dtype=np.float32)
+        t = torch.from_numpy(frame)
+        if self._n_stack == 1:
+            t = t.squeeze(0)
+        return t, int(self._actions[idx])
+
+    @property
+    def n_stack(self) -> int:
+        return self._n_stack
+
+    @property
+    def image_size(self) -> int:
+        return self._image_size
+
+
+class _EmptyBCDataset(Dataset):
+    """Empty dataset for BC val_dataloader when there is no validation split."""
+
+    def __len__(self) -> int:
+        return 0
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        raise IndexError("EmptyBCDataset has no elements")
+
+
+# ---------------------------------------------------------------------------
 # Lightning DataModule (optional — requires pip install lightning)
 # ---------------------------------------------------------------------------
 
@@ -487,7 +590,7 @@ if _LIGHTNING_AVAILABLE:
             self._has_val: bool = False
 
         def setup(self, stage: Optional[str] = None) -> None:
-            from trackmania_rl.pretrain_visual.preprocess import (
+            from trackmania_rl.pretrain.preprocess import (
                 CACHE_TRAIN_FILE, CACHE_VAL_FILE,
             )
             train_ds = CachedPretrainDataset(
@@ -512,7 +615,7 @@ if _LIGHTNING_AVAILABLE:
                 self.n_val_samples = len(val_ds)
 
         def _make_ds(self, split: str) -> CachedPretrainDataset:
-            from trackmania_rl.pretrain_visual.preprocess import (
+            from trackmania_rl.pretrain.preprocess import (
                 CACHE_TRAIN_FILE, CACHE_VAL_FILE,
             )
             fname = CACHE_TRAIN_FILE if split == "train" else CACHE_VAL_FILE
@@ -537,7 +640,7 @@ if _LIGHTNING_AVAILABLE:
             )
 
         def val_dataloader(self) -> DataLoader:
-            from trackmania_rl.pretrain_visual.preprocess import CACHE_VAL_FILE
+            from trackmania_rl.pretrain.preprocess import CACHE_VAL_FILE
             val_path = self.cache_dir / CACHE_VAL_FILE
             if not self._has_val or not val_path.exists():
                 # Empty loader so Lightning doesn't complain
@@ -566,10 +669,215 @@ if _LIGHTNING_AVAILABLE:
         def has_val(self) -> bool:
             return self._has_val
 
+    # -----------------------------------------------------------------------
+    # BC Lightning DataModules (Level 1)
+    # -----------------------------------------------------------------------
+
+    class CachedBCDataModule(L.LightningDataModule):  # type: ignore[misc]
+        """Lightning DataModule for BC preprocessed cache (train.npy + train_actions.npy, etc.)."""
+
+        def __init__(
+            self,
+            cache_dir: Path,
+            batch_size: int = 128,
+            workers: int = 4,
+            pin_memory: bool = True,
+            prefetch_factor: int = 2,
+            load_in_ram: bool = False,
+            expected_image_size: Optional[int] = None,
+            expected_n_stack: Optional[int] = None,
+        ) -> None:
+            super().__init__()
+            from trackmania_rl.pretrain.contract import (
+                CACHE_TRAIN_FILE,
+                CACHE_TRAIN_ACTIONS_FILE,
+                CACHE_VAL_FILE,
+                CACHE_VAL_ACTIONS_FILE,
+            )
+            self.cache_dir = Path(cache_dir)
+            self.batch_size = batch_size
+            self.workers = workers
+            self.pin_memory = pin_memory
+            self.prefetch_factor = prefetch_factor
+            self.load_in_ram = load_in_ram
+            self.expected_image_size = expected_image_size
+            self.expected_n_stack = expected_n_stack
+            self._train_file = CACHE_TRAIN_FILE
+            self._train_actions_file = CACHE_TRAIN_ACTIONS_FILE
+            self._val_file = CACHE_VAL_FILE
+            self._val_actions_file = CACHE_VAL_ACTIONS_FILE
+            self.n_train_samples: int = 0
+            self.n_val_samples: int = 0
+            self._has_val: bool = False
+
+        def setup(self, stage: Optional[str] = None) -> None:
+            train_ds = CachedBCDataset(
+                self.cache_dir / self._train_file,
+                self.cache_dir / self._train_actions_file,
+                load_in_ram=self.load_in_ram,
+                expected_image_size=self.expected_image_size,
+                expected_n_stack=self.expected_n_stack,
+            )
+            self.n_train_samples = len(train_ds)
+            val_frames = self.cache_dir / self._val_file
+            val_actions = self.cache_dir / self._val_actions_file
+            self._has_val = val_frames.exists() and val_actions.exists()
+            if self._has_val:
+                val_ds = CachedBCDataset(
+                    val_frames,
+                    val_actions,
+                    load_in_ram=self.load_in_ram,
+                    expected_image_size=self.expected_image_size,
+                    expected_n_stack=self.expected_n_stack,
+                )
+                self.n_val_samples = len(val_ds)
+
+        def train_dataloader(self) -> DataLoader:
+            ds = CachedBCDataset(
+                self.cache_dir / self._train_file,
+                self.cache_dir / self._train_actions_file,
+                load_in_ram=self.load_in_ram,
+                expected_image_size=self.expected_image_size,
+                expected_n_stack=self.expected_n_stack,
+            )
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.workers,
+                drop_last=True,
+                pin_memory=self.pin_memory,
+                persistent_workers=(self.workers > 0),
+                prefetch_factor=self.prefetch_factor if self.workers > 0 else None,
+            )
+
+        def val_dataloader(self) -> DataLoader:
+            if not self._has_val:
+                empty_ds = _EmptyBCDataset()
+                return DataLoader(empty_ds, batch_size=self.batch_size, num_workers=0)
+            ds = CachedBCDataset(
+                self.cache_dir / self._val_file,
+                self.cache_dir / self._val_actions_file,
+                load_in_ram=self.load_in_ram,
+                expected_image_size=self.expected_image_size,
+                expected_n_stack=self.expected_n_stack,
+            )
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.workers,
+                pin_memory=self.pin_memory,
+                persistent_workers=(self.workers > 0),
+                prefetch_factor=self.prefetch_factor if self.workers > 0 else None,
+            )
+
+        @property
+        def has_val(self) -> bool:
+            return self._has_val
+
+    class BCReplayDataModule(L.LightningDataModule):  # type: ignore[misc]
+        """Lightning DataModule for BC from replay dirs (split_track_ids + BCReplayDataset)."""
+
+        def __init__(
+            self,
+            data_dir: Path,
+            image_size: int = 64,
+            n_stack: int = 1,
+            batch_size: int = 128,
+            workers: int = 4,
+            pin_memory: bool = True,
+            prefetch_factor: int = 2,
+            val_fraction: float = 0.1,
+            seed: int = 42,
+        ) -> None:
+            super().__init__()
+            self.data_dir = Path(data_dir)
+            self.image_size = image_size
+            self.n_stack = n_stack
+            self.batch_size = batch_size
+            self.workers = workers
+            self.pin_memory = pin_memory
+            self.prefetch_factor = prefetch_factor
+            self.val_fraction = val_fraction
+            self.seed = seed
+            self._train_ids: Optional[list[str]] = None
+            self._val_ids: Optional[list[str]] = None
+            self.n_train_samples: int = 0
+            self.n_val_samples: int = 0
+
+        def setup(self, stage: Optional[str] = None) -> None:
+            if self.val_fraction > 0:
+                self._train_ids, self._val_ids = split_track_ids(
+                    self.data_dir, self.val_fraction, self.seed
+                )
+            else:
+                self._train_ids = sorted(d.name for d in self.data_dir.iterdir() if d.is_dir())
+                self._val_ids = []
+            train_ds = BCReplayDataset(
+                self.data_dir, self._train_ids, size=self.image_size, n_stack=self.n_stack
+            )
+            self.n_train_samples = len(train_ds)
+            if self._val_ids:
+                val_ds = BCReplayDataset(
+                    self.data_dir, self._val_ids, size=self.image_size, n_stack=self.n_stack
+                )
+                self.n_val_samples = len(val_ds)
+            else:
+                self.n_val_samples = 0
+
+        def train_dataloader(self) -> DataLoader:
+            ds = BCReplayDataset(
+                self.data_dir, self._train_ids, size=self.image_size, n_stack=self.n_stack
+            )
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.workers,
+                drop_last=True,
+                pin_memory=self.pin_memory,
+                persistent_workers=(self.workers > 0),
+                prefetch_factor=self.prefetch_factor if self.workers > 0 else None,
+            )
+
+        def val_dataloader(self) -> DataLoader:
+            if not self._val_ids:
+                empty = BCReplayDataset(self.data_dir, [], size=self.image_size, n_stack=self.n_stack)
+                return DataLoader(empty, batch_size=self.batch_size, num_workers=0)
+            ds = BCReplayDataset(
+                self.data_dir, self._val_ids, size=self.image_size, n_stack=self.n_stack
+            )
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.workers,
+                pin_memory=self.pin_memory,
+                persistent_workers=(self.workers > 0),
+                prefetch_factor=self.prefetch_factor if self.workers > 0 else None,
+            )
+
+        @property
+        def has_val(self) -> bool:
+            return bool(self._val_ids)
+
 else:
     class CachedPretrainDataModule:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
             raise ImportError(
                 "CachedPretrainDataModule requires lightning. "
                 "Install it with: pip install lightning"
+            )
+
+    class CachedBCDataModule:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "CachedBCDataModule requires lightning. Install it with: pip install lightning"
+            )
+
+    class BCReplayDataModule:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "BCReplayDataModule requires lightning. Install it with: pip install lightning"
             )

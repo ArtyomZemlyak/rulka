@@ -47,7 +47,7 @@ neural_network:
   use_jit: true
 
 training:
-  run_name: "A01_as20_long_vis_pretrained"
+  run_name: "A01_as20_long_vis_bc_pretrained"
   batch_size: 512
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -77,7 +77,7 @@ training:
   oversample_maximum_term_steps: 5
 
   # Visual pretraining — auto-inject encoder into IQN on first run.
-  # Set to the encoder.pt path produced by pretrain_visual_backbone.py.
+  # Set to the encoder.pt path produced by pretrain_visual_backbone.py (script name unchanged; package is trackmania_rl.pretrain).
   # Behaviour:
   #   null  — no injection; IQN starts with random weights (default).
   #   path  — if save/<run_name>/weights1.torch does NOT yet exist,
@@ -87,7 +87,7 @@ training:
   #            is skipped to preserve training progress.
   # Example:
   #   pretrain_encoder_path: "output/ptretrain/vis/run_001/encoder.pt"
-  pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"
+  pretrain_encoder_path: "output/ptretrain/bc/v1.1/encoder.pt"
 
 memory:
   memory_size_schedule:

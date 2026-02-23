@@ -196,7 +196,7 @@ rulka/
 │   ├── pretrain_config.yaml          # Level 0 pretrain config (edit defaults here)
 │   └── pretrain_schema.py            # PretrainConfig(BaseSettings) + load_pretrain_config()
 ├── trackmania_rl/
-│   ├── pretrain_visual/       # Level 0 pretraining package
+│   ├── pretrain/              # Level 0/1 pretraining package (visual + BC)
 │   │   ├── contract.py        #   artifact schema constants
 │   │   ├── datasets.py        #   ReplayFrameDataset + Lightning DataModule
 │   │   ├── models.py          #   encoder/decoder factories (IQN-compatible)
