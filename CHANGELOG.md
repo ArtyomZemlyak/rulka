@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+- **IQN architecture documentation** — `docs/source/experiments/models/iqn_architecture.rst` with high-level and per-block Graphviz diagrams (inputs/outputs, image head, float head, IQN quantile mixing, dueling heads); link from main_objects; `sphinx.ext.graphviz` enabled
+- **Pretrain BC** — behavioral cloning pretraining (`trackmania_rl.pretrain`, `scripts/pretrain_bc.py`, `config_files/pretrain_config_bc.yaml`), experiment docs and plots; `pretrain_visual` renamed to `pretrain`
+
+### Changed
+- **Doc build** — optional dependency group `doc` comment: Graphviz (system) required for architecture diagrams; all architecture page text in English
+
+## [1.4.0] - 2026-02-18
+
+### Added
+- **Pretrain visual backbone** — optional visual pretraining (encoder injection into IQN), config and scripts
+- **TMNF replays** — replay capture and related tooling
+- Config updates and `.gitignore` for cache/output
+
+## [1.3.0] - 2026-02-16
+
+### Added
+- **Replay capture** — scripts and support for capturing replays (e.g. `--exclude-respawn-maps`), `replay_has_respawn` fixes
+- **Experiments plots** and **game_env_backend**-related updates
+
+### Changed
+- Config, docs, and scripts updates
+
 ## [1.2.0] - 2026-02-01
 
 ### Added

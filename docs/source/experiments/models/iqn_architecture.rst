@@ -3,7 +3,7 @@
 IQN (Implicit Quantile Network) Architecture
 ===========================================
 
-The diagrams on this page are built with **Graphviz** (the ``sphinx.ext.graphviz`` extension). Building the docs requires Graphviz to be installed with the ``dot`` executable on your PATH.
+The diagrams on this page are rendered with **Graphviz** (the ``sphinx.ext.graphviz`` extension). The CI workflow that publishes the docs installs Graphviz so the diagrams render on the site. For a local docs build, install Graphviz and ensure ``dot`` is on your PATH, or you will see raw DOT code instead of images.
 
 This page describes the structure of **IQN_Network** (``trackmania_rl.agents.iqn``): what goes in as input, how the blocks are built, and what is produced as output.
 
