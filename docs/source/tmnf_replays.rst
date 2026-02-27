@@ -61,13 +61,17 @@ This removes maps with non-standard environments (e.g., not Stadium/Speed/Alpine
 
 .. code-block:: bash
 
-   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --running-speed 16 --fps 64 --track-ids maps/track_ids_no_respawn.txt --max-replays-per-track 1
+   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --running-speed 16 --fps 100 --track-ids maps/track_ids_no_respawn.txt --max-replays-per-track 1 --vcp-dir maps/vcp
 
 **Multi-worker capture:** Running with ``--workers N`` (N > 1) is **not yet working reliably** (multiple game windows, key input and preview handling are not coordinated). Use **``--workers 1``** for now.
 
 **Map preview handling:** Previews and "Press Enter to start" screens are handled automatically via ``disable_forced_camera`` + ``skip_map_load_screens``. If the game still doesn't start within 3 seconds (no RUN_STEP messages), the script sends TMInterface ``give_up`` / ``press delete`` commands to restart the race every 3 seconds (up to 25 seconds total), then skips the map. Use ``--write-enter-maps`` to collect track IDs of maps that didn't start, then ``--exclude-enter-maps`` on the next run.
 
-**Note on --running-speed:** Values above ~20 may cause the game to skip reading inputs, making the car stand still. For reliable replay, use 10–20.
+**Stale / hang detection:** Several levels detect when the capture gets stuck and force a switch to the next replay: (1) socket timeout during race (20s with no messages → unload); (2) wall-clock progress (no RUN_STEP for 25s even if CHECKPOINT/LAP arrive → unload); (3) total rollout limit (5 min); (4) on any exception, the script attempts ``unload`` before returning.
+
+**Note on --running-speed:** Higher values may cause the game to skip inputs or desync (e.g. 8 can break replay, 4 works reliably). Use 4–6 for capture.
+
+**VCP (zone centers):** To enable zone-based meta in manifests (for BC with float inputs), add ``--vcp-dir maps/vcp``. VCP files are auto-generated from replays when missing; defaults: ``--vcp-distance 0.5``, ``--vcp-suffix cl``, ``--vcp-auto-generate``. Use ``--no-vcp-auto-generate`` to disable auto-generation.
 
 Output: ``maps/img/<track_id>/<replay_name>/`` — frames (jpeg), ``metadata.json``, ``manifest.json``. Details below.
 
@@ -215,7 +219,7 @@ After capturing frames to ``maps/img/``, run the Level 0 pretraining pipeline:
 
 .. code-block:: bash
 
-   # Step 1: pretrain AE (all defaults from config_files/pretrain_config.yaml)
+   # Step 1: pretrain AE (all defaults from config_files/pretrain/vis/pretrain_config.yaml)
    #         creates output/ptretrain/vis/run_001/
    python scripts/pretrain_visual_backbone.py --data-dir maps/img
 
@@ -233,7 +237,7 @@ After capturing frames to ``maps/img/``, run the Level 0 pretraining pipeline:
    python scripts/train.py
 
 The standard pipeline uses **PyTorch Lightning** (``framework: lightning`` in
-``config_files/pretrain_config.yaml``).
+``config_files/pretrain/vis/pretrain_config.yaml``).
 Each run creates a versioned subdirectory inside ``output_dir``:
 
 - ``run_001/encoder.pt`` — CNN weights; what ``init_iqn_from_encoder.py`` needs

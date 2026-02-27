@@ -1,7 +1,7 @@
 """
 Level 1 BC (behavioral cloning) pretraining: frames + manifest action_idx → encoder.pt.
 
-Configuration from config_files/pretrain_config_bc.yaml and PRETRAIN_BC_* env vars.
+Configuration from config_files/pretrain/bc/pretrain_config_bc.yaml and PRETRAIN_BC_* env vars.
 CLI overrides take priority.
 
 Usage:
@@ -39,6 +39,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--image-size", type=int, default=None, dest="image_size")
     ap.add_argument("--n-stack", type=int, default=None, dest="n_stack")
     ap.add_argument("--n-actions", type=int, default=None, dest="n_actions", help="Number of actions (match RL config.inputs).")
+    ap.add_argument("--image-normalization", type=str, default=None, dest="image_normalization", choices=["01", "iqn"],
+                    help="01 = [0,1]; iqn = (x-0.5)/0.5 for IQN transfer.")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None, dest="batch_size")
     ap.add_argument("--lr", type=float, default=None)
@@ -66,12 +68,12 @@ def main() -> None:
         log.info("Loaded config from %s", args.config)
     else:
         cfg = BCPretrainConfig()
-        log.info("Loaded config from config_files/pretrain_config_bc.yaml")
+        log.info("Loaded config from config_files/pretrain/bc/pretrain_config_bc.yaml")
 
     overrides = {}
     for field in (
         "data_dir", "output_dir", "run_name", "bc_mode", "encoder_init_path",
-        "image_size", "n_stack", "n_actions", "epochs", "batch_size", "lr",
+        "image_size", "n_stack", "n_actions", "image_normalization", "epochs", "batch_size", "lr",
         "workers", "val_fraction", "seed", "grad_clip", "prefetch_factor",
         "preprocess_cache_dir", "cache_build_workers",
     ):

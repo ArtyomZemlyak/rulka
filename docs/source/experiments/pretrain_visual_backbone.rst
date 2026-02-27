@@ -33,7 +33,7 @@ Run Analysis
 - **A01_as20_long** (baseline): Same config as A01_as20_long_vis_pretrained except ``pretrain_encoder_path: null``. IQN starts from random weights. **~495 min** (relative time), 3 TensorBoard log dirs merged.
 - **A01_as20_long_vis_pretrained**: ``pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"``. Encoder injected into IQN before training start. **~275 min** (relative time), 2 TensorBoard log dirs merged.
 
-**Pretrain encoder source:** ``output/ptretrain/vis/v1``, trained with ``config_files/pretrain_config.yaml``:
+**Pretrain encoder source:** ``output/ptretrain/vis/v1``, trained with ``config_files/pretrain/vis/pretrain_config.yaml``:
   - Task: autoencoder (ae)
   - Framework: PyTorch Lightning
   - Image size: 64×64 (matches IQN ``w_downsized`` / ``h_downsized``)
@@ -90,7 +90,7 @@ Configuration Changes
    pretrain_encoder_path: null   # baseline (A01_as20_long)
    pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"  # pretrained (A01_as20_long_vis_pretrained)
 
-**Pretrain** (``config_files/pretrain_config.yaml``):
+**Pretrain** (``config_files/pretrain/vis/pretrain_config.yaml``):
 
 .. code-block:: yaml
 
@@ -127,7 +127,7 @@ Recommendations
 ---------------
 
 - **Use pretrained encoder** for new A01 (or similar) runs when replay frames are available. Inject with ``pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"`` (or your pretrain output path).
-- **Reproduce pretrain:** ``python scripts/pretrain_visual_backbone.py`` with ``config_files/pretrain_config.yaml``.
+- **Reproduce pretrain:** ``python scripts/pretrain_visual_backbone.py`` with ``config_files/pretrain/vis/pretrain_config.yaml``.
 - **Inject into IQN:** The training script auto-injects when ``weights1.torch`` does not exist. Manual injection: ``scripts/init_iqn_from_encoder.py``.
 - **Next experiments:** Compare AE vs SimCLR pretrain; vary pretrain epochs; vary amount of pretrain data.
 

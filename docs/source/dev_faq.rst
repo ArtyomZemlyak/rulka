@@ -86,7 +86,7 @@ A:
 .. code-block:: bash
 
     # Verify config loads (from project root)
-    python -c "from config_files.config_loader import load_config; c = load_config('config_files/config_default.yaml'); print('Config OK')"
+    python -c "from config_files.config_loader import load_config; c = load_config('config_files/rl/config_default.yaml'); print('Config OK')"
     python scripts/check_plugin.py
 
     # Verify packages
@@ -106,9 +106,9 @@ Configuration Development
 A:
 
 1. Add the parameter to the appropriate Pydantic model in ``config_files/config_schema.py``
-2. Add it to the corresponding section in ``config_files/config_default.yaml``
+2. Add it to the corresponding section in ``config_files/rl/config_default.yaml``
 3. Update the Configuration Guide (:doc:`configuration_guide`) with full documentation
-4. Verify with: ``python -c "from config_files.config_loader import load_config; load_config('config_files/config_default.yaml')"``
+4. Verify with: ``python -c "from config_files.config_loader import load_config; load_config('config_files/rl/config_default.yaml')"``
 
 **Q: Can I modify config during training?**
 
@@ -242,7 +242,7 @@ A:
 
 A:
 
-- Configuration is loaded from a YAML file (e.g. ``config_files/config_default.yaml``) at startup via ``train.py --config <path>``
+- Configuration is loaded from a YAML file (e.g. ``config_files/rl/config_default.yaml``) at startup via ``train.py --config <path>``
 - Use ``from config_files.config_loader import get_config`` and ``get_config().<attribute>`` to access settings in code
 - User-specific settings (paths, username) come from ``.env`` in the project root
 - A snapshot of the config used for each run is saved in ``save/{run_name}/config_snapshot.yaml``

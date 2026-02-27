@@ -46,7 +46,7 @@ source .venv/bin/activate  # Linux/macOS
 ### Training
 
 ```bash
-python scripts/train.py --config config_files/config_default.yaml
+python scripts/train.py --config config_files/rl/config_default.yaml
 
 # Monitor (in separate terminal)
 tensorboard --logdir=tensorboard
@@ -133,7 +133,7 @@ Activate the environment first (Windows: `.\.venv\Scripts\activate`; Linux/macOS
 
 3. **Pretrain the backbone** (Level 0 — unsupervised: AE, VAE, SimCLR):
 
-   All settings live in `config_files/pretrain_config.yaml` (`framework: lightning` by default).
+   All settings live in `config_files/pretrain/vis/pretrain_config.yaml` (`framework: lightning` by default).
    Install the pretrain dependencies once:
    ```bash
    pip install -e ".[pretrain]"   # lightning, lightly, timm
@@ -190,11 +190,15 @@ Activate the environment first (Windows: `.\.venv\Scripts\activate`; Linux/macOS
 ```
 rulka/
 ├── config_files/
-│   ├── config_default.yaml           # RL training config
+│   ├── rl/
+│   │   └── config_default.yaml       # RL training config
+│   ├── pretrain/
+│   │   ├── vis/                      # Level 0 pretrain (AE, SimCLR): pretrain_config.yaml, etc.
+│   │   └── bc/                       # Level 1 BC: pretrain_config_bc.yaml, etc.
 │   ├── config_schema.py              # Pydantic schema for RL config
 │   ├── config_loader.py              # loader + get_config()
-│   ├── pretrain_config.yaml          # Level 0 pretrain config (edit defaults here)
-│   └── pretrain_schema.py            # PretrainConfig(BaseSettings) + load_pretrain_config()
+│   ├── pretrain_schema.py            # PretrainConfig (vis)
+│   └── pretrain_bc_schema.py         # BCPretrainConfig
 ├── trackmania_rl/
 │   ├── pretrain/              # Level 0/1 pretraining package (visual + BC)
 │   │   ├── contract.py        #   artifact schema constants

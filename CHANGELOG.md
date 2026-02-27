@@ -8,7 +8,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 - **IQN architecture documentation** — `docs/source/experiments/models/iqn_architecture.rst` with high-level and per-block Graphviz diagrams (inputs/outputs, image head, float head, IQN quantile mixing, dueling heads); link from main_objects; `sphinx.ext.graphviz` enabled
-- **Pretrain BC** — behavioral cloning pretraining (`trackmania_rl.pretrain`, `scripts/pretrain_bc.py`, `config_files/pretrain_config_bc.yaml`), experiment docs and plots; `pretrain_visual` renamed to `pretrain`
+- **Pretrain BC** — behavioral cloning pretraining (`trackmania_rl.pretrain`, `scripts/pretrain_bc.py`, `config_files/pretrain/bc/pretrain_config_bc.yaml`), experiment docs and plots; `pretrain_visual` renamed to `pretrain`
 
 ### Changed
 - **Doc build** — optional dependency group `doc` comment: Graphviz (system) required for architecture diagrams; all architecture page text in English

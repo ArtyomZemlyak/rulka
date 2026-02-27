@@ -40,7 +40,11 @@ EXPERIMENTS = [
     {"name": "extended_training_triple", "runs": ["A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_extended_training_A01_uni20_uni20long"},
     {"name": "network_size_big_long", "runs": ["A01_as20_big_long", "A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_network_size_big_long"},
     {"name": "pretrain_visual_backbone", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained"], "prefix": "exp_pretrain_visual_backbone"},
-    {"name": "pretrain_bc", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained", "A01_as20_long_vis_bc_pretrained"], "prefix": "exp_pretrain_bc"},
+    {"name": "pretrain_bc", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained", "A01_as20_long_vis_bc_pretrained", "A01_as20_long_vis_bc_ah_pretrained"], "prefix": "exp_pretrain_bc"},
+    {"name": "pretrain_bc_enc_freeze", "runs": ["A01_as20_long_vis_bc_ah_pretrained", "A01_as20_long_vis_bc_ah_pretrained_enc_freeze"], "prefix": "exp_pretrain_bc_enc_freeze"},
+    {"name": "pretrain_bc_enc_ah_freeze", "runs": ["A01_as20_long_vis_bc_ah_pretrained", "A01_as20_long_vis_bc_ah_pretrained_enc_freeze", "A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze"], "prefix": "exp_pretrain_bc_enc_ah_freeze"},
+    {"name": "pretrain_bc_enc_ah_freeze_resume", "runs": ["A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze", "A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze_resume"], "prefix": "exp_pretrain_bc_enc_ah_freeze_resume"},
+    {"name": "reward_shaping", "runs": ["A01_as20_long", "A01_as20_long_engineer_rewards"], "prefix": "exp_reward_shaping"},
 ]
 
 

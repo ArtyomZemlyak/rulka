@@ -165,17 +165,19 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
     - ``scripts/pretrain_visual_backbone.py`` — train the encoder.
     - ``scripts/init_iqn_from_encoder.py`` — inject encoder into IQN checkpoint.
 
-  - **Configuration:** ``config_files/pretrain_config.yaml`` — YAML file with all defaults.
+  - **Configuration:** ``config_files/pretrain/vis/pretrain_config.yaml`` — YAML file with all defaults.
+    For **IQN-normalized** visual pretrain (run v2): use ``config_files/pretrain/vis/pretrain_config_vis_iqn.yaml``
+    (``run_name: v2``, ``image_normalization: "iqn"``). See :ref:`pretrain_bc_behavioral_cloning` (full IQN-aligned chain).
     Loaded via ``PretrainConfig(BaseSettings)`` (``config_files/pretrain_schema.py``).
     Override priority:
 
     1. CLI arguments (highest)
     2. Env vars: ``PRETRAIN_<FIELD>``  e.g. ``PRETRAIN_TASK=simclr PRETRAIN_EPOCHS=100``
-    3. ``config_files/pretrain_config.yaml``
+    3. ``config_files/pretrain/vis/pretrain_config.yaml``
     4. Field defaults
 
   - **Framework:** PyTorch Lightning (default; ``framework: lightning`` in
-    ``pretrain_config.yaml``). Provides AMP, gradient clipping, early stopping,
+    ``pretrain/vis/pretrain_config.yaml``). Provides AMP, gradient clipping, early stopping,
     TensorBoard, CSV logger, and best-checkpoint saving out of the box.
     ``native`` and ``lightly`` back-ends remain available via ``--framework``
     for debugging or minimal-dependency setups.
@@ -206,7 +208,7 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
     stores them as a memory-mappable NumPy array (``train.npy`` / ``val.npy``),
     reducing per-epoch I/O to fast sequential reads from a single large file.
 
-    **Activation:** set ``preprocess_cache_dir`` in ``pretrain_config.yaml``
+    **Activation:** set ``preprocess_cache_dir`` in ``config_files/pretrain/vis/pretrain_config.yaml``
     (or via ``--preprocess-cache-dir`` CLI arg).  The training script
     automatically validates the cache and rebuilds it when stale.
 
@@ -232,18 +234,18 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
            --image-size 64 --n-stack 1 \
            --val-fraction 0.1 --seed 42
 
-       # Then in pretrain_config.yaml:
+       # Then in config_files/pretrain/vis/pretrain_config.yaml:
        #   preprocess_cache_dir: cache/pretrain_64
 
     **RAM loading** (for small datasets that fit in memory): set
-    ``cache_load_in_ram: true`` in ``pretrain_config.yaml`` to load the
+    ``cache_load_in_ram: true`` in ``config_files/pretrain/vis/pretrain_config.yaml`` to load the
     arrays fully into RAM at startup instead of memory-mapping.
 
   **Quick start:**
 
   .. code-block:: bash
 
-     # All settings come from config_files/pretrain_config.yaml.
+     # All settings come from config_files/pretrain/vis/pretrain_config.yaml.
      # framework: lightning is the default — no extra flags needed.
 
      # Step 1: pretrain AE (auto-creates output/ptretrain/vis/run_001/)
@@ -276,7 +278,7 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
      # Step 3: start IQN training (learner auto-loads checkpoint)
      python scripts/train.py
 
-     # Use a custom YAML (replaces pretrain_config.yaml):
+     # Use a custom YAML (replaces config_files/pretrain/vis/pretrain_config.yaml):
      python scripts/pretrain_visual_backbone.py --config my_experiment.yaml
 
      # Override individual fields via env vars (PowerShell):
@@ -316,22 +318,61 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
 
 **Level 1: Behavioral cloning (BC) — frames → actions**
 
-  - **What:** Supervised learning: input = frame stack (and optionally float features), target = expert action from ``manifest.json`` (e.g. steer/accel/brake or discrete action id). Single policy network (same CNN as ``img_head`` + action head); loss = cross-entropy (discrete). Training runs with **PyTorch Lightning** only: Trainer, checkpoints, early stopping, TensorBoard/CSV, AMP; config is in ``config_files/pretrain_config_bc.yaml`` (and nested ``lightning:`` for Trainer options).
+  - **What:** Supervised learning: input = frame stack (and optionally float features), target = expert action from ``manifest.json`` (e.g. steer/accel/brake or discrete action id). Single policy network (same CNN as ``img_head`` + action head); loss = cross-entropy (discrete). Training runs with **PyTorch Lightning** only: Trainer, checkpoints, early stopping, TensorBoard/CSV, AMP; config is in ``config_files/pretrain/bc/pretrain_config_bc.yaml`` (and nested ``lightning:`` for Trainer options).
 
-  - **Data:** Replays from ``capture_replays_tmnf.py``; read ``manifest.json`` per frame for ``inputs``; align frames ``frame_*_*ms.jpeg`` with inputs (same ``step``/``time_ms``). You can either load on-the-fly from ``data_dir`` or prebuild a **BC cache** (``train.npy`` + ``train_actions.npy``, optional ``val.npy``/``val_actions.npy``) via ``preprocess_cache_dir`` for faster I/O. **Reusing Level 0 cache:** Use the *same* directory as Level 0 ``preprocess_cache_dir`` (e.g. ``cache/pretrain_64``). Level 0 writes ``train.npy``, ``val.npy``, ``cache_meta.json``. When you run BC with that dir, only ``train_actions.npy`` and ``val_actions.npy`` are added (same row order); no duplicate frame files. If any frame lacks ``action_idx`` in ``manifest.json``, a full BC cache is built instead.
+  - **Training options (every option is in config):** All Level 1 variants are controlled by ``config_files/pretrain/bc/pretrain_config_bc.yaml`` (and schema ``config_files/pretrain_bc_schema.py``). Override via CLI, env ``PRETRAIN_BC_<FIELD>``, or a custom YAML.
 
-  - **How it works:** Entry point is ``train_bc(cfg)`` in ``trackmania_rl.pretrain.train_bc``. It (1) checks/builds BC cache if ``preprocess_cache_dir`` is set; (2) builds the BC network (encoder + action head), optionally loading a Level 0 ``encoder.pt`` into the CNN; (3) uses ``CachedBCDataModule`` or ``BCReplayDataModule`` for train/val loaders; (4) creates the Lightning Trainer via ``create_lightning_trainer`` (shared with Level 0); (5) runs ``trainer.fit(bc_module, datamodule=data_module)``; (6) saves ``encoder.pt`` and ``pretrain_meta.json`` (and ``metrics.csv``) in the run directory. The saved encoder is the CNN backbone only (IQN-compatible).
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Option                     | Config key                             | Notes                                                             |
+  +===========================+========================================+==================================================================+
+  | Image resolution           | ``image_size``                         | Must match RL ``w_downsized`` / ``h_downsized`` (e.g. 64).        |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Temporal stack             | ``n_stack``                            | 1 = single frame; >1 = consecutive frames per sample. Interval between frames = **1000/fps** ms from capture (e.g. 10 FPS → 100 ms, 64 FPS → ~15.6 ms); stack of 3 spans 2× that. |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Image normalization       | ``image_normalization``                | ``"01"`` = [0,1] (default); ``"iqn"`` = (x-128)/128 for IQN align.  |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Float (scalar) inputs      | ``use_floats``                         | If true, BC uses same float state as IQN; requires float in cache.|
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Float state length         | ``float_input_dim``                    | Required when ``use_floats`` true; match RL ``float_input_dim``.   |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Float normalization       | ``float_inputs_mean``, ``float_inputs_std`` | Same as RL state_normalization; length = ``float_input_dim``. |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Float head size            | ``float_hidden_dim``                   | Match RL ``neural_network.float_hidden_dim`` for IQN transfer.     |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Save float head for IQN   | ``save_float_head``                    | When use_floats: save float head for ``float_feature_extractor``.  |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | What to save               | ``bc_mode``                            | ``backbone`` \| ``full_policy`` \| ``auxiliary_head``.             |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Init from Level 0          | ``encoder_init_path``                  | Path to ``encoder.pt`` or null (train from scratch).              |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Action space size          | ``n_actions``                         | Must match RL ``len(config.inputs)`` (e.g. 12).                    |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | BC target                  | ``bc_target``                         | ``current_tick`` = action at last frame; ``next_tick`` = action at next timestep (MDP-aligned). |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Early stopping             | ``lightning.early_stopping``            | Stop when val metric stops improving.                             |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Early stopping patience    | ``lightning.patience``                 | Epochs with no improvement before stop.                           |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  | Checkpoint monitor         | ``lightning.checkpoint_monitor``       | ``auto`` \| ``val_loss`` \| ``train_loss``.                        |
+  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+
+  - **Data:** Replays from ``capture_replays_tmnf.py``; read ``manifest.json`` per frame for ``inputs``; align frames ``frame_*_*ms.jpeg`` with inputs (same ``step``/``time_ms``). You can either load on-the-fly from ``data_dir`` or prebuild a **BC cache** (``train.npy`` + ``train_actions.npy``, optional ``val.npy``/``val_actions.npy``) via ``preprocess_cache_dir`` for faster I/O. **BC target:** ``bc_target: current_tick`` uses the action at the last frame of each window; ``bc_target: next_tick`` uses the action at the *next* timestep (observe s_t → predict a_t for MDP alignment); with ``next_tick`` the last frame of each replay has no “next” action and is dropped. **Reusing Level 0 cache:** Use the *same* directory as Level 0 ``preprocess_cache_dir`` (e.g. ``cache/pretrain_64``) only when ``bc_target`` is ``current_tick``; with ``next_tick`` a full BC cache is always built. Level 0 writes ``train.npy``, ``val.npy``, ``cache_meta.json``. When you run BC with that dir and ``current_tick``, only ``train_actions.npy`` and ``val_actions.npy`` are added (same row order). If any frame lacks ``action_idx`` in ``manifest.json``, a full BC cache is built instead.
+
+  - **How it works:** Entry point is ``train_bc(cfg)`` in ``trackmania_rl.pretrain.train_bc``. It (1) checks/builds BC cache if ``preprocess_cache_dir`` is set; (2) builds the BC network (encoder + action head), optionally loading a Level 0 ``encoder.pt`` into the CNN; (3) uses ``CachedBCDataModule`` or ``BCReplayDataModule`` for train/val loaders; (4) creates the Lightning Trainer via ``create_lightning_trainer`` (shared with Level 0); (5) runs ``trainer.fit(bc_module, datamodule=data_module)``; (6) saves ``encoder.pt`` and ``pretrain_meta.json`` (and ``metrics.csv``) in the run directory. The saved encoder is the CNN backbone only (IQN-compatible). **Multi-offset runs:** When ``bc_time_offsets_ms`` has more than one value, labels for each offset use the **action timeline** (manifest ``"actions"`` + ``metadata.json`` ``step_ms``) when present, so 0 vs +10 ms refer to actual game-step actions; fallback is closest frame by ``time_ms``. Lightning logs **per-offset accuracy** (e.g. ``train_acc_offset_ms_-10``, ``val_acc_offset_ms_0``, ``val_acc_offset_ms_10``, ``val_acc_offset_ms_100``) in addition to overall ``train_acc``/``val_acc``. These appear in TensorBoard, in ``metrics.csv`` (via the MetricsCollector callback), and in ``pretrain_meta.json`` (final row); you can analyze them in doc/exp scripts (e.g. compare accuracy at current tick vs past/future offsets).
 
   - **How to run:**
 
     .. code-block:: bash
 
-     # Defaults from config_files/pretrain_config_bc.yaml (data_dir, output_dir, epochs, batch_size, lightning:, etc.):
+     # Defaults from config_files/pretrain/bc/pretrain_config_bc.yaml (data_dir, output_dir, epochs, batch_size, lightning:, etc.):
      python scripts/pretrain_bc.py --data-dir maps/img
 
      # Override key options:
      python scripts/pretrain_bc.py --data-dir maps/img --epochs 30 --batch-size 2048 --run-name bc_v1
      python scripts/pretrain_bc.py --config my_bc.yaml --encoder-init-path output/ptretrain/vis/v1/encoder.pt
+
+     # Full IQN-aligned chain (vis v2 + BC v2): first run vis with config_files/pretrain/vis/pretrain_config_vis_iqn.yaml, then:
+     python scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v2.yaml
 
      # Use preprocessed BC cache (faster; built automatically if missing or stale):
      python scripts/pretrain_bc.py --data-dir maps/img --preprocess-cache-dir cache/bc
@@ -340,7 +381,7 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
      $env:PRETRAIN_BC_EPOCHS = "20"; $env:PRETRAIN_BC_VAL_FRACTION = "0.15"
      python scripts/pretrain_bc.py --data-dir maps/img
 
-    Config priority: CLI → env (``PRETRAIN_BC_*``, nested ``PRETRAIN_BC_LIGHTNING__*``) → ``pretrain_config_bc.yaml``. Schema: ``config_files/pretrain_bc_schema.py``.
+    Config priority: CLI → env (``PRETRAIN_BC_*``, nested ``PRETRAIN_BC_LIGHTNING__*``) → ``config_files/pretrain/bc/pretrain_config_bc.yaml``. Schema: ``config_files/pretrain_bc_schema.py``.
 
   - **Integration with IQN:** (A) **Backbone only:** After BC, save the **encoder** (CNN part) as ``encoder.pt`` in the run dir. Load it into ``IQN_Network.img_head`` exactly as in Level 0: use ``scripts/init_iqn_from_encoder.py`` to create (or patch) IQN checkpoints with the BC encoder, then start the learner from that checkpoint. (B) **Full policy as prior:** if the BC network has the same architecture as IQN’s “feature” part (img_head + float head → joint embedding), load both into IQN and optionally use a **warm start**: fill replay buffer with BC policy rollouts, then train IQN with a short BC loss coef (e.g. L = L_IQN + 0.1·L_BC) for a few k steps before dropping L_BC.
 

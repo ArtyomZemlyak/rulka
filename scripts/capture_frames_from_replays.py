@@ -43,7 +43,7 @@ sys.path.insert(0, str(_script_root))
 
 from config_files.config_loader import get_config, load_config, set_config
 
-_default_yaml = _script_root / "config_files" / "config_default.yaml"
+_default_yaml = _script_root / "config_files" / "rl" / "config_default.yaml"
 if _default_yaml.exists():
     set_config(load_config(_default_yaml))
 

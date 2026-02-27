@@ -15,7 +15,7 @@ epsilon = cfg.epsilon_schedule
 Run training with a specific config:
 
 ```bash
-python scripts/train.py --config config_files/config_default.yaml
+python scripts/train.py --config config_files/rl/config_default.yaml
 ```
 
 User-specific settings (paths, usernames) are read from a `.env` file in the project root. Config is loaded once per process; there is no hot-reload.
@@ -24,11 +24,15 @@ User-specific settings (paths, usernames) are read from a `.env` file in the pro
 
 ```
 config_files/
-├── config_default.yaml    # Default YAML config (versioned, tracked in git)
-├── config_schema.py       # Pydantic models for validation
-├── config_loader.py       # load_config(), get_config(), set_config()
-├── inputs_list.py         # Action space (used by loader/schema)
-├── state_normalization.py # Helpers if needed (main data in YAML)
+├── rl/
+│   └── config_default.yaml  # Default YAML config (versioned, tracked in git)
+├── pretrain/
+│   ├── vis/                 # Visual pretrain (AE, SimCLR): pretrain_config.yaml, etc.
+│   └── bc/                  # BC pretrain: pretrain_config_bc.yaml, etc.
+├── config_schema.py         # Pydantic models for validation
+├── config_loader.py         # load_config(), get_config(), set_config()
+├── pretrain_schema.py       # PretrainConfig (vis)
+├── pretrain_bc_schema.py    # BCPretrainConfig
 └── README.md
 ```
 
@@ -36,7 +40,7 @@ You can add more YAML files (e.g. `config_uni18.yaml`) and pass them with `--con
 
 ## Editing Configuration
 
-1. Edit the YAML file (e.g. `config_default.yaml` or your own `config_*.yaml`).
+1. Edit the YAML file (e.g. `rl/config_default.yaml` or your own `config_*.yaml`).
 2. Restart training so the new config is loaded.
 3. A snapshot of the config used for each run is saved in `save/{run_name}/config_snapshot.yaml`.
 
@@ -82,7 +86,7 @@ training:
 ### Use a different config file
 
 ```bash
-python scripts/train.py --config config_files/config_uni18.yaml
+python scripts/train.py --config config_files/rl/config_uni18.yaml
 ```
 
 ### User-specific settings (.env)

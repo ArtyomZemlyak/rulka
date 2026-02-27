@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser(description="Train TrackMania RL agent")
 parser.add_argument(
     "--config",
     type=str,
-    default="config_files/config_default.yaml",
+    default="config_files/rl/config_default.yaml",
     help="Path to YAML config file",
 )
 args = parser.parse_args()
@@ -87,6 +87,7 @@ if __name__ == "__main__":
     # inject the pretrained img_head into a fresh IQN network pair so that
     # the learner and collectors start from the pretrained visual backbone.
     # Skipped automatically on resumed runs (weights1.torch already present).
+    weights_existed = (save_dir / "weights1.torch").exists()
     pretrain_injected = False
     if config.pretrain_encoder_path:
         from trackmania_rl.pretrain.export import inject_encoder_into_iqn
@@ -97,6 +98,38 @@ if __name__ == "__main__":
         )
         if pretrain_injected:
             print("[OK] Pretrain encoder injected; training will start from pretrained img_head.")
+
+    # --- Pretrain BC full IQN injection (from iqn_bc.pt) ---
+    # Only on fresh run (weights did not exist at start): load full BC IQN state into current weights.
+    bc_heads_injected = False
+    if config.pretrain_bc_heads_path and not weights_existed:
+        from trackmania_rl.pretrain.export import inject_bc_heads_into_iqn
+        bc_heads_injected = inject_bc_heads_into_iqn(
+            bc_heads_path=Path(base_dir) / config.pretrain_bc_heads_path,
+            save_dir=save_dir,
+        )
+        if bc_heads_injected:
+            print("[OK] Pretrain BC full IQN state (img_head, float_feature_extractor, iqn_fc, A_head, V_head) injected.")
+
+    # --- Pretrain piecewise: float_head.pt -> float_feature_extractor, actions_head.pt -> A_head ---
+    float_head_injected = False
+    actions_head_injected = False
+    if config.pretrain_float_head_path and not weights_existed:
+        from trackmania_rl.pretrain.export import inject_float_head_into_iqn
+        float_head_injected = inject_float_head_into_iqn(
+            float_head_path=Path(base_dir) / config.pretrain_float_head_path,
+            save_dir=save_dir,
+        )
+        if float_head_injected:
+            print("[OK] Pretrain float_feature_extractor (float_head.pt) injected.")
+    if config.pretrain_actions_head_path and not weights_existed:
+        from trackmania_rl.pretrain.export import inject_actions_head_into_iqn
+        actions_head_injected = inject_actions_head_into_iqn(
+            actions_head_path=Path(base_dir) / config.pretrain_actions_head_path,
+            save_dir=save_dir,
+        )
+        if actions_head_injected:
+            print("[OK] Pretrain A_head (actions_head.pt) injected.")
 
     tensorboard_base_dir = Path(base_dir) / "tensorboard"
 
@@ -116,6 +149,12 @@ if __name__ == "__main__":
     print(f"  Config: {config_path}")
     if config.pretrain_encoder_path:
         print(f"  Pretrain encoder: {config.pretrain_encoder_path}" + (" (injected)" if pretrain_injected else " (skipped — checkpoint exists)"))
+    if config.pretrain_bc_heads_path:
+        print(f"  Pretrain BC full IQN: {config.pretrain_bc_heads_path}" + (" (injected)" if bc_heads_injected else " (skipped — checkpoint exists)"))
+    if config.pretrain_float_head_path:
+        print(f"  Pretrain float head: {config.pretrain_float_head_path}" + (" (injected)" if float_head_injected else " (skipped)"))
+    if config.pretrain_actions_head_path:
+        print(f"  Pretrain actions head: {config.pretrain_actions_head_path}" + (" (injected)" if actions_head_injected else " (skipped)"))
     print("=" * 80)
     print("\n[INFO] Starting training...\n")
 

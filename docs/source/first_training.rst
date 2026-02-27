@@ -40,7 +40,7 @@ To create a new reference line:
 
 This generates a ``.npy`` file in ``maps/`` folder with virtual checkpoints spaced at ``distance_between_checkpoints`` (default 0.5m).
 
-4. Update the ``map_cycle`` section in your config YAML (e.g. ``config_files/config_default.yaml``) to reference your new ``.npy`` file
+4. Update the ``map_cycle`` section in your config YAML (e.g. ``config_files/rl/config_default.yaml``) to reference your new ``.npy`` file
 
 **3. Verify configuration**
 
@@ -60,7 +60,7 @@ We are ready to start training.
 
 .. code-block:: bash
 
-   python scripts/train.py --config config_files/config_default.yaml
+   python scripts/train.py --config config_files/rl/config_default.yaml
 
 Upon running this command, it is expected that a :doc:`wall of text appears in your terminal <wall_text>`. *Don't worry, this is normal.*
 

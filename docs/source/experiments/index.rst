@@ -14,6 +14,7 @@ Contents
    :maxdepth: 2
 
    training_speed
+   reward_shaping
    extended_training
    temporal_mini_race_duration
    exploration

@@ -103,6 +103,24 @@ class NeuralNetworkConfig(BaseModel):
 class TrainingConfig(BaseModel):
     run_name: str = "uni_18"
     pretrain_encoder_path: Optional[str] = None
+    # Optional: path to BC run dir or to iqn_bc.pt to load full IQN state into checkpoints.
+    # All matching parts are loaded: img_head, float_feature_extractor, iqn_fc, A_head, V_head.
+    # Applied on fresh run (after encoder injection if set). Requires iqn_bc.pt from BC with use_full_iqn.
+    pretrain_bc_heads_path: Optional[str] = None
+
+    # Optional: path to float_head.pt (BC run dir or file) to load only float_feature_extractor.
+    pretrain_float_head_path: Optional[str] = None
+    # Optional: path to actions_head.pt (BC run dir or file) to load only A_head.
+    pretrain_actions_head_path: Optional[str] = None
+
+    # Freeze pretrain parts during RL training (default: false). Only parameters of the
+    # corresponding module are excluded from the optimizer and from resets/weight decay.
+    pretrain_encoder_freeze: bool = False
+    pretrain_float_head_freeze: bool = False
+    pretrain_iqn_fc_freeze: bool = False
+    pretrain_actions_head_freeze: bool = False
+    pretrain_V_head_freeze: bool = False
+
     batch_size: int = 512
     adam_epsilon: float = 1e-4
     adam_beta1: float = 0.9

@@ -2,14 +2,14 @@
 Visual pretraining package for IQN backbone (Level 0).
 
 Public API:
-  PretrainConfig         — pydantic-settings model (loads from config_files/pretrain_config.yaml)
+  PretrainConfig         — pydantic-settings model (loads from config_files/pretrain/vis/pretrain_config.yaml)
   load_pretrain_config   — load from a custom YAML path
   train_pretrain         — unified training entry point (native or Lightning)
   save_encoder_artifact  — save encoder.pt + pretrain_meta.json + metrics.csv
   load_encoder_artifact  — load and validate saved artifact
 
 Configuration:
-  config_files/pretrain_config.yaml  — default values (edit to change project-wide defaults)
+  config_files/pretrain/vis/pretrain_config.yaml  — default values (edit to change project-wide defaults)
   PRETRAIN_<FIELD> env vars          — runtime overrides
   Constructor kwargs                 — programmatic overrides (highest priority)
 

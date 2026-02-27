@@ -89,7 +89,7 @@ sys.path.insert(0, str(_scripts_dir))
 
 from config_files.config_loader import get_config, load_config, set_config
 
-_default_yaml = _script_root / "config_files" / "config_default.yaml"
+_default_yaml = _script_root / "config_files" / "rl" / "config_default.yaml"
 if _default_yaml.exists():
     set_config(load_config(_default_yaml))
 
@@ -1066,7 +1066,63 @@ def _save_rollout_frames(
     return frame_count
 
 
-# ---------- 6. Worker: replay via gim.rollout() ----------
+# ---------- 6. VCP ensure + Worker ----------
+
+
+def ensure_vcp_for_track(
+    track_id: str,
+    replay_paths: list[Path],
+    vcp_dir: Path,
+    vcp_distance: float,
+    vcp_suffix: str,
+    vcp_auto_generate: bool,
+    vcp_source: str,
+) -> Path | None:
+    """Ensure VCP file exists for track. Auto-generate if missing and vcp_auto_generate.
+    Returns path to VCP file or None if not available."""
+    vcp_name = f"{track_id}_{vcp_distance}m_{vcp_suffix}.npy"
+    vcp_path = vcp_dir / vcp_name
+    if vcp_path.exists():
+        return vcp_path
+    if not vcp_auto_generate:
+        return None
+    if not replay_paths:
+        return None
+    # Pick replay: first or best by finish time
+    from trackmania_rl.map_loader import gbx_to_raw_pos_list
+    from trackmania_rl.geometry import extract_cp_distance_interval
+
+    if vcp_source == "best":
+        from pygbx import Gbx, GbxType
+        best_path = None
+        best_time = float("inf")
+        for rp in replay_paths:
+            try:
+                gbx = Gbx(str(rp))
+                ghosts = gbx.get_classes_by_ids([GbxType.CTN_GHOST])
+                if not ghosts:
+                    continue
+                ghost = min(ghosts, key=lambda g: g.cp_times[-1])
+                t = ghost.cp_times[-1]
+                if t < best_time:
+                    best_time = t
+                    best_path = rp
+            except Exception:
+                continue
+        replay_path = best_path if best_path is not None else replay_paths[0]
+    else:
+        replay_path = replay_paths[0]
+    try:
+        raw_positions = gbx_to_raw_pos_list(replay_path)
+        vcp_dir.mkdir(parents=True, exist_ok=True)
+        extract_cp_distance_interval(
+            raw_positions, vcp_distance, vcp_dir, out_path=vcp_path,
+        )
+        log.info("Generated VCP for %s from %s", track_id, replay_path.name)
+        return vcp_path
+    except Exception as e:
+        log.warning("Failed to generate VCP for %s: %s", track_id, e)
+        return None
 
 
 def rollout_with_tmi_script(
@@ -1081,6 +1137,9 @@ def rollout_with_tmi_script(
     last_map_requested: list[str | None],
     next_map_name: str | None = None,
     next_script_path: Path | None = None,
+    fps_meta: float | None = None,
+    vcp_path: Path | None = None,
+    console_hidden_ref: list[bool] | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     """
     Replay using TMInterface native script loading (deterministic, no drift).
@@ -1121,14 +1180,35 @@ def rollout_with_tmi_script(
     next_capture_time_ms = 0.0
     frames = []
     frame_times_ms = []
+    # Meta capture (race state at fps_meta)
+    meta_interval_ms = 1000.0 / fps_meta if (fps_meta is not None and fps_meta > 0) else capture_interval_ms
+    next_meta_time_ms = 0.0
+    meta_entries: list[dict[str, Any]] = []
+    zone_data = None
+    current_zone_idx = get_config().n_zone_centers_extrapolate_before_start_of_map
+    last_gear_and_wheels: np.ndarray | None = None
+    if vcp_path is not None and vcp_path.exists():
+        try:
+            from trackmania_rl.pretrain.sim_state_utils import load_zone_centers_from_vcp
+            zone_data = load_zone_centers_from_vcp(vcp_path)
+        except Exception as e:
+            log.debug("Could not load zone data from %s: %s", vcp_path, e)
+    # Pending message (after meta: get_simulation_state first, then respond→buffer next)
+    pending_msgtype: int | None = None
+    pending_time = -3000
+    pending_cp_current = 0
+    pending_cp_target = 0
+    pending_frame_bytes: bytes | None = None
+    pending_lap_consumed = False
     frame_expected = False
+    pending_capture_time_ms: float = -1.0  # time_ms to record when we receive the frame (set at request)
     race_started = False
     race_finished = False
     race_start_requested = False
     current_time = -3000
     timeout_start = None
     connect_seen_this_rollout = False
-    console_hidden = False  # Флаг: консоль скрыта один раз
+    _console_hidden = console_hidden_ref if console_hidden_ref is not None else [False]
     max_cp_reached = 0  # Для диагностики: 0 чекпоинтов = машина не ехала
     # После смены карты TMInterface может ещё присылать run step с временем предыдущей гонки (51s).
     # Не считать время "нашим" пока не увидели countdown/старт новой карты (current_time <= 0).
@@ -1140,9 +1220,17 @@ def rollout_with_tmi_script(
     ENTER_SOCKET_TIMEOUT_S = 3.0
     # Полный таймаут после которого сдаёмся и пропускаем карту.
     ENTER_TOTAL_TIMEOUT_S = 25.0
+    # Нет сообщений N секунд во время гонки (медали, зависание) → unload и след. реплей
+    STALE_DURING_RACE_S = 20.0
+    # Wall-clock: нет RUN_STEP N сек — сервер может слать CHECKPOINT/LAP, но не прогресс → unload
+    PROGRESS_STALE_S = 25.0
+    # Макс длительность rollout — защита от бесконечных циклов
+    ROLLOUT_MAX_WALL_S = 300.0
     map_load_wall_time = 0.0
+    last_run_step_wall_time: float | None = None
     need_enter = False
     import time as time_module
+    rollout_start_wall_time = time_module.perf_counter()
     import socket
 
     # Спам Enter в отдельном потоке: скипает превью на картах, где RUN_STEP не приходят во время превью.
@@ -1177,14 +1265,55 @@ def rollout_with_tmi_script(
     skip_retry_count = 0  # сколько раз пытались скипнуть превью через TMInterface команды
     try:
         while not race_finished:
-            # Короткий таймаут сокета, когда ждём старт после map — если RUN_STEP перестали приходить, не висеть 500 сек.
+            # Уровень 1: общий watchdog rollout — защита от бесконечных циклов
+            if time_module.perf_counter() - rollout_start_wall_time > ROLLOUT_MAX_WALL_S:
+                log.warning("  Rollout exceeded %.0fs — forcing switch to next", ROLLOUT_MAX_WALL_S)
+                try:
+                    gim.iface.execute_command("unload")
+                except Exception:
+                    pass
+                break
+            # Уровень 2: wall-clock progress — RUN_STEP давно не приходил (сервер шлёт CHECKPOINT/LAP, но не симуляцию)
+            if race_started and last_run_step_wall_time is not None:
+                elapsed = time_module.perf_counter() - last_run_step_wall_time
+                if elapsed > PROGRESS_STALE_S:
+                    log.warning(
+                        "  No RUN_STEP for %.0fs (stale progress) — switching to next",
+                        elapsed,
+                    )
+                    try:
+                        gim.iface.execute_command("unload")
+                    except Exception:
+                        pass
+                    break
+            # Короткий таймаут: ждём старт — 3с; во время гонки — 20с (медали/зависание → unload); иначе default
             if map_load_wall_time > 0 and not race_started:
                 gim.iface.set_socket_timeout(ENTER_SOCKET_TIMEOUT_S)
+            elif race_started:
+                gim.iface.set_socket_timeout(STALE_DURING_RACE_S)
             else:
                 gim.iface.set_socket_timeout(default_socket_timeout_s)
 
             try:
-                msgtype = gim.iface._read_int32()
+                if pending_msgtype is not None:
+                    msgtype = pending_msgtype
+                    if msgtype == int(MessageType.SC_RUN_STEP_SYNC):
+                        current_time = pending_time
+                    elif msgtype == int(MessageType.SC_REQUESTED_FRAME_SYNC):
+                        pass  # frame in pending_frame_bytes, handled in elif branch
+                    elif msgtype == int(MessageType.SC_CHECKPOINT_COUNT_CHANGED_SYNC):
+                        current_cp = pending_cp_current
+                        target_cp = pending_cp_target
+                    elif msgtype == int(MessageType.SC_LAP_COUNT_CHANGED_SYNC):
+                        pending_lap_consumed = True
+                    pending_msgtype = None
+                else:
+                    msgtype = gim.iface._read_int32()
+                    if msgtype == int(MessageType.SC_RUN_STEP_SYNC):
+                        current_time = gim.iface._read_int32()
+                    elif msgtype == int(MessageType.SC_CHECKPOINT_COUNT_CHANGED_SYNC):
+                        current_cp = gim.iface._read_int32()
+                        target_cp = gim.iface._read_int32()
             except socket.timeout:
                 # Сокет не получил данных за ENTER_SOCKET_TIMEOUT_S секунд.
                 # Если ждём старт гонки — возможно карта показывает превью/intro.
@@ -1203,8 +1332,15 @@ def rollout_with_tmi_script(
                     skip_retry_count += 1
                     log.info("  No messages for %.0fs (retry #%d), Enter spam running", elapsed, skip_retry_count)
                     continue  # retry _read_int32
+                elif race_started:
+                    log.warning("  No messages for %.0fs during race (medals/stuck) — switching to next", STALE_DURING_RACE_S)
+                    race_finished = True
+                    try:
+                        gim.iface.execute_command("unload")
+                    except Exception:
+                        pass
+                    break
                 else:
-                    # Timeout during race or other state — propagate as before
                     raise
             
             if msgtype == int(MessageType.SC_ON_CONNECT_SYNC):
@@ -1212,16 +1348,15 @@ def rollout_with_tmi_script(
                 # skip_map_load_screens: пропускает "Press any key to continue" (docs: donadigo.com/tminterface/variables)
                 gim.iface.execute_command("set skip_map_load_screens true")
                 gim.iface.execute_command("set disable_forced_camera true")
-                # Скрываем консоль TMInterface один раз при первом подключении
-                if not console_hidden:
-                    time_module.sleep(0.3)
-                    from trackmania_rl.tmi_interaction import game_instance_manager
-                    if game_instance_manager.send_tilde_to_game_window(gim, log):
-                        log.info("  TMInterface console hidden")
-                        console_hidden = True
+                # Консоль скрыта через toggle_console в /configstring при запуске TMNF
                 # Переменные и скрипт — каждый connect. Map шлём только если в меню (is_in_menus).
                 gim.iface.execute_command(f"set countdown_speed {gim.running_speed}")
-                gim.request_speed(gim.running_speed)  # скорость гонки (speed); countdown_speed — только обратный отсчёт
+                # Первая карта: грузим из меню на 1x (как game_env_backend), иначе высокая скорость ломает вводы.
+                # Реальную скорость выставим в первом countdown (give_up).
+                if gim.iface.is_in_menus() and map_name != last_map_requested[0]:
+                    gim.request_speed(1)
+                else:
+                    gim.request_speed(gim.running_speed)
                 try:
                     gim.iface.execute_command("set use_valseed false")
                 except Exception:
@@ -1255,7 +1390,9 @@ def rollout_with_tmi_script(
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_RUN_STEP_SYNC):
-                current_time = gim.iface._read_int32()
+                if race_started:
+                    last_run_step_wall_time = time_module.perf_counter()
+                # current_time already set in try block (from socket or pending)
                 # Как только видим время countdown/старта (<= 0), считаем что приходят тики уже от текущей карты.
                 if current_time <= 0 and not time_from_current_map:
                     # Первый RUN_STEP с countdown — СТОП спам немедленно
@@ -1331,6 +1468,7 @@ def rollout_with_tmi_script(
                     # Capture frames at specified FPS
                     if race_started and time_from_current_map and current_time >= next_capture_time_ms:
                         if not frame_expected:
+                            pending_capture_time_ms = next_capture_time_ms
                             gim.iface.request_frame(width, height)
                             frame_expected = True
                             next_capture_time_ms += capture_interval_ms
@@ -1340,20 +1478,80 @@ def rollout_with_tmi_script(
                         if time_module.perf_counter() - timeout_start > (race_time_ms / 1000.0) + 30:
                             log.warning("  Timeout after %.1fs - race did not finish", time_module.perf_counter() - timeout_start)
                             break
-                
+
+                    # Meta capture: get_simulation_state BEFORE respond+read, so state matches current_time
+                    if (
+                        fps_meta is not None
+                        and fps_meta > 0
+                        and race_started
+                        and time_from_current_map
+                        and current_time >= next_meta_time_ms
+                    ):
+                        try:
+                            sim_state = gim.iface.get_simulation_state()
+                            from trackmania_rl.pretrain.sim_state_utils import (
+                                sim_state_to_dict,
+                                add_zone_fields,
+                            )
+                            last_gw = np.array(last_gear_and_wheels) if last_gear_and_wheels is not None else None
+                            raw_dict = sim_state_to_dict(sim_state, last_gw)
+                            last_gear_and_wheels = np.array(raw_dict["gear_and_wheels"], dtype=np.float32)
+                            if zone_data is not None:
+                                (
+                                    zc, zt, dbt, dspt, nv, nrp, max_allow,
+                                ) = zone_data
+                                add_zone_fields(
+                                    raw_dict, zc, zt, dbt, dspt, nv, current_zone_idx, nrp, max_allow,
+                                )
+                            current_zone_idx = raw_dict["current_zone_idx"]
+                            raw_dict["time_ms"] = current_time
+                            meta_entries.append(raw_dict)
+                        except Exception as e:
+                            log.debug("Meta capture failed: %s", e)
+                        next_meta_time_ms += meta_interval_ms
+                        gim.iface._respond_to_call(msgtype)
+                        next_mt = gim.iface._read_int32()
+                        if next_mt == int(MessageType.SC_RUN_STEP_SYNC):
+                            pending_msgtype = next_mt
+                            pending_time = gim.iface._read_int32()
+                        elif next_mt == int(MessageType.SC_REQUESTED_FRAME_SYNC):
+                            pending_msgtype = next_mt
+                            pending_frame_bytes = gim.iface.sock.recv(
+                                width * height * 4, socket.MSG_WAITALL
+                            )
+                        elif next_mt == int(MessageType.SC_CHECKPOINT_COUNT_CHANGED_SYNC):
+                            pending_msgtype = next_mt
+                            pending_cp_current = gim.iface._read_int32()
+                            pending_cp_target = gim.iface._read_int32()
+                        elif next_mt == int(MessageType.SC_LAP_COUNT_CHANGED_SYNC):
+                            pending_msgtype = next_mt
+                            gim.iface._read_int32()  # consume payload
+                            gim.iface._read_int32()
+                        else:
+                            pending_msgtype = next_mt
+                        continue
+
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_REQUESTED_FRAME_SYNC):
-                frame = gim.iface.get_frame(width, height)
+                if pending_frame_bytes is not None:
+                    frame = np.frombuffer(pending_frame_bytes, dtype=np.uint8).reshape(
+                        (height, width, 4)
+                    )
+                    pending_frame_bytes = None
+                else:
+                    frame = gim.iface.get_frame(width, height)
                 frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
                 frames.append(np.expand_dims(frame_gray, 0))
-                frame_times_ms.append(current_time)
+                # Use time from when we REQUESTED, not when we received (frame is async)
+                t_ms = int(pending_capture_time_ms) if pending_capture_time_ms >= 0 else current_time
+                frame_times_ms.append(t_ms)
                 frame_expected = False
+                pending_capture_time_ms = -1.0
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_CHECKPOINT_COUNT_CHANGED_SYNC):
-                current_cp = gim.iface._read_int32()
-                target_cp = gim.iface._read_int32()
+                # current_cp, target_cp already set in try block (from socket or pending)
                 if race_started and current_cp > max_cp_reached:
                     max_cp_reached = current_cp
                     log.info("  Checkpoint %d/%d at t=%dms", current_cp, target_cp, current_time)
@@ -1362,8 +1560,10 @@ def rollout_with_tmi_script(
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_LAP_COUNT_CHANGED_SYNC):
-                gim.iface._read_int32()
-                gim.iface._read_int32()
+                if not pending_lap_consumed:
+                    gim.iface._read_int32()
+                    gim.iface._read_int32()
+                pending_lap_consumed = False
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.C_SHUTDOWN):
@@ -1373,8 +1573,13 @@ def rollout_with_tmi_script(
                 pass
                 
     except socket.timeout:
-        # Таймаут вне фазы ожидания старта — фатальная ошибка
+        # Таймаут вне фазы ожидания старта — фатальная ошибка (напр. get_simulation_state завис)
         log.warning("  TMInterface socket timeout (not during map load wait)")
+        try:
+            if gim.iface is not None:
+                gim.iface.execute_command("unload")
+        except Exception:
+            pass
         return (None, False)
     except ConnectionError as e:
         log.warning("  TMInterface connection closed: %s", e)
@@ -1387,6 +1592,11 @@ def rollout_with_tmi_script(
         return (None, False)
     except Exception as e:
         log.exception("  Rollout failed: %s", e)
+        try:
+            if gim.iface is not None:
+                gim.iface.execute_command("unload")
+        except Exception:
+            pass
         return (None, False)
     finally:
         if enter_spam_thread is not None and enter_spam_thread.is_alive():
@@ -1412,6 +1622,7 @@ def rollout_with_tmi_script(
         "frame_times_ms": frame_times_ms,
         "race_finished": race_finished,
         "final_time_ms": current_time,
+        "meta": meta_entries,
     }, False)
 
 
@@ -1426,6 +1637,7 @@ def worker_process(
     width: int,
     height: int,
     fps: float,
+    fps_meta: float,
     run_steps_per_action: int,
     step_ms: int,
     input_time_offset_ms: int,
@@ -1436,6 +1648,11 @@ def worker_process(
     per_frame_json: bool = False,
     track_ids_need_enter: Any = None,
     multi_instance: bool = False,
+    vcp_dir: Path | None = None,
+    vcp_distance: float = 0.5,
+    vcp_suffix: str = "cl",
+    vcp_auto_generate: bool = True,
+    vcp_source: str = "first",
 ) -> None:
     """Single worker: convert .replay.gbx → TMI script, load via TMInterface, capture frames.
     When multi_instance is True, keys (Enter, Tilde) are sent only via PostMessage to this
@@ -1476,6 +1693,7 @@ def worker_process(
     )
     # Как в training: latest_map_path_requested — при смене трека запрашиваем новую карту.
     last_map_requested: list[str | None] = [None]
+    console_hidden_ref: list[bool] = [False]  # persist across rollouts so we don't toggle (show) console on new map
 
     try:
         try:
@@ -1491,6 +1709,12 @@ def worker_process(
                 except queue.Empty:
                     next_task = None
                 track_id, replay_paths = task
+                vcp_path = None
+                if vcp_dir is not None:
+                    vcp_path = ensure_vcp_for_track(
+                        track_id, replay_paths, vcp_dir, vcp_distance, vcp_suffix,
+                        vcp_auto_generate, vcp_source,
+                    )
                 runs_done_this_track = 0  # only count actually run rollouts (skipped "already done" don't count)
                 for replay_idx, replay_path in enumerate(replay_paths):
                     is_last_replay_this_task = replay_idx == len(replay_paths) - 1
@@ -1609,6 +1833,9 @@ def worker_process(
                             last_map_requested=last_map_requested,
                             next_map_name=next_map_name,
                             next_script_path=next_script_path,
+                            fps_meta=fps_meta,
+                            vcp_path=vcp_path,
+                            console_hidden_ref=console_hidden_ref,
                         )
                     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
                         log.warning("TMI connection broken: %s", e)
@@ -1667,23 +1894,27 @@ def worker_process(
                                 json.dumps(entry, indent=2), encoding="utf-8",
                             )
                     
-                    manifest_obj: dict | list = (
-                        {"entries": manifest_entries, "actions": action_indices}
-                        if action_indices is not None
-                        else manifest_entries
-                    )
+                    manifest_obj = {"entries": manifest_entries}
+                    if action_indices is not None:
+                        manifest_obj["actions"] = action_indices
+                    meta_entries_result = rollout_results.get("meta", [])
+                    if meta_entries_result:
+                        manifest_obj["meta"] = meta_entries_result
                     (out_dir / "manifest.json").write_text(
                         json.dumps(manifest_obj, indent=2), encoding="utf-8",
                     )
-                    
+
                     capture_interval_ms = 1000.0 / fps if fps > 0 else float(step_ms)
+                    meta_interval_ms_val = 1000.0 / fps_meta if fps_meta > 0 else capture_interval_ms
                     metadata = {
                         "track_id": track_id,
                         "replay_name": replay_name,
                         "challenge_name": dest_challenge.name,
                         "fps": fps,
+                        "fps_meta": fps_meta,
                         "running_speed": running_speed,
                         "capture_interval_ms": capture_interval_ms,
+                        "meta_interval_ms": meta_interval_ms_val,
                         "width": width,
                         "height": height,
                         "step_ms": step_ms,
@@ -1746,7 +1977,45 @@ def main() -> None:
     parser.add_argument("--tracks-dir", type=Path, default=Path("maps/tracks"), help="Extracted challenges or place to extract")
     parser.add_argument("--width", type=int, default=None, help="Frame width (default: config w_downsized)")
     parser.add_argument("--height", type=int, default=None, help="Frame height (default: config h_downsized)")
-    parser.add_argument("--fps", type=float, default=10.0, help="Capture FPS (frames per real second; respects --running-speed)")
+    parser.add_argument("--fps", type=float, default=10.0, help="Capture FPS: frames per simulation (in-game) second. Independent of --running-speed.")
+    parser.add_argument(
+        "--fps-meta",
+        type=float,
+        default=None,
+        help="Meta capture frequency (default: same as --fps). If higher than --fps, extra meta snapshots between frames.",
+    )
+    parser.add_argument("--vcp-dir", type=Path, default=Path("maps/vcp"), help="Directory for VCP (zone) files")
+    parser.add_argument(
+        "--vcp-distance",
+        type=float,
+        default=0.5,
+        help="Distance between VCP points in meters (used in filename, e.g. 0.5 -> 0.5m)",
+    )
+    parser.add_argument(
+        "--vcp-suffix",
+        type=str,
+        default="cl",
+        help="Suffix in VCP filename (e.g. cl for centerline)",
+    )
+    parser.add_argument(
+        "--vcp-auto-generate",
+        action="store_true",
+        default=True,
+        help="Auto-generate VCP from replay if file missing (default: True)",
+    )
+    parser.add_argument(
+        "--no-vcp-auto-generate",
+        action="store_false",
+        dest="vcp_auto_generate",
+        help="Disable auto-generation of VCP files",
+    )
+    parser.add_argument(
+        "--vcp-source",
+        type=str,
+        default="first",
+        choices=["first", "best"],
+        help="Which replay to use for VCP generation: first or best by finish time",
+    )
     parser.add_argument("--workers", type=int, default=1, help="Number of game instances (TMI ports)")
     parser.add_argument("--base-tmi-port", type=int, default=None, help="Base TMI port (default: from config)")
     parser.add_argument(
@@ -1920,6 +2189,14 @@ def main() -> None:
     game_spawning_lock = manager.Lock()
     track_ids_need_enter_list = manager.list() if args.write_enter_maps is not None else None
 
+    fps_meta = args.fps_meta if args.fps_meta is not None else args.fps
+    vcp_dir = args.vcp_dir.resolve() if args.vcp_dir.is_absolute() else (_script_root / args.vcp_dir).resolve()
+    # Resolve output_dir relative to project root (like vcp_dir) so skip check is consistent regardless of cwd
+    output_dir_resolved = args.output_dir.resolve() if args.output_dir.is_absolute() else (_script_root / args.output_dir).resolve()
+    replays_dir_resolved = args.replays_dir.resolve() if args.replays_dir.is_absolute() else (_script_root / args.replays_dir).resolve()
+    tracks_dir_resolved = args.tracks_dir.resolve() if args.tracks_dir.is_absolute() else (_script_root / args.tracks_dir).resolve()
+    log.info("Output dir (resolved): %s", output_dir_resolved)
+
     procs = []
     for w in range(args.workers):
         p = mp.Process(
@@ -1929,12 +2206,13 @@ def main() -> None:
                 task_queue,
                 game_spawning_lock,
                 base_tmi_port,
-                args.replays_dir.resolve(),
-                args.output_dir.resolve(),
-                args.tracks_dir.resolve(),
+                replays_dir_resolved,
+                output_dir_resolved,
+                tracks_dir_resolved,
                 width,
                 height,
                 args.fps,
+                fps_meta,
                 run_steps_per_action,
                 step_ms,
                 args.input_time_offset_ms,
@@ -1945,6 +2223,11 @@ def main() -> None:
                 getattr(args, "per_frame_json", False),
                 track_ids_need_enter_list,
                 args.workers > 1,
+                vcp_dir,
+                args.vcp_distance,
+                args.vcp_suffix,
+                args.vcp_auto_generate,
+                args.vcp_source,
             ),
         )
         p.start()

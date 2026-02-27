@@ -60,7 +60,9 @@ from tqdm import tqdm
 
 from trackmania_rl.pretrain.contract import (
     CACHE_TRAIN_ACTIONS_FILE,
+    CACHE_TRAIN_FLOATS_FILE,
     CACHE_VAL_ACTIONS_FILE,
+    CACHE_VAL_FLOATS_FILE,
 )
 from trackmania_rl.pretrain.datasets import (
     IMAGE_EXTS,
@@ -467,19 +469,145 @@ def build_cache(
 # BC cache: manifest-based index and build
 # ---------------------------------------------------------------------------
 
+# metadata.json in each replay dir (from capture_replays_tmnf) has "step_ms" (game step in ms).
+# manifest.json can be {"entries": [...], "actions": [...]}; "actions" is the full action timeline
+# (one action per game step: actions[i] = action at time i*step_ms). Use that for multi-offset
+# so that offset 0 vs +10 ms use actual action timings, not "closest frame".
+
+
+def _action_at_time_from_timeline(
+    actions: list[int],
+    step_ms: int,
+    target_time_ms: float | int,
+) -> int | None:
+    """Return action at *target_time_ms* from the action timeline (game steps).
+
+    actions[k] is the action at game time k * step_ms. So action at target_time_ms
+    is actions[round(target_time_ms / step_ms)], clamped to valid index.
+    Returns None if actions is empty or step_ms <= 0.
+    """
+    if not actions or step_ms <= 0:
+        return None
+    try:
+        t = float(target_time_ms)
+    except (TypeError, ValueError):
+        return None
+    step_idx = int(round(t / step_ms))
+    step_idx = max(0, min(step_idx, len(actions) - 1))
+    try:
+        return int(actions[step_idx])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _load_replay_manifest_and_timeline(
+    replay_dir: Path,
+) -> tuple[list[dict], list[int] | None, int | None, list[dict] | None]:
+    """Load manifest.json and metadata.json for a replay.
+
+    Returns (entries, actions_or_none, step_ms_or_none, meta_or_none). entries are sorted by (step, time_ms).
+    actions is the full action timeline from manifest["actions"] when present;
+    step_ms from metadata.json. meta is manifest["meta"] when present (race state snapshots).
+    """
+    manifest_path = replay_dir / "manifest.json"
+    meta_path = replay_dir / "metadata.json"
+    if not manifest_path.exists():
+        return [], None, None, None
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return [], None, None, None
+    entries = _manifest_entries(data)
+    if not entries:
+        return [], None, None, None
+    entries = sorted(entries, key=lambda e: (e.get("step", 0), e.get("time_ms", 0)))
+    actions: list[int] | None = None
+    if isinstance(data, dict) and "actions" in data:
+        raw = data["actions"]
+        if isinstance(raw, list) and len(raw) > 0:
+            try:
+                actions = [int(x) for x in raw]
+            except (TypeError, ValueError):
+                pass
+    step_ms: int | None = None
+    if meta_path.exists():
+        try:
+            with open(meta_path, encoding="utf-8") as fh:
+                meta = json.load(fh)
+            step_ms = meta.get("step_ms")
+            if step_ms is not None:
+                step_ms = int(step_ms)
+                if step_ms <= 0:
+                    step_ms = None
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+    meta: list[dict] | None = None
+    if isinstance(data, dict) and "meta" in data and isinstance(data["meta"], list):
+        meta = data["meta"]
+    return entries, actions, step_ms, meta
+
+
+def _action_at_time(entries: list[dict], target_time_ms: float | int) -> int | None:
+    """Return action_idx from the entry whose time_ms is closest to *target_time_ms*.
+
+    Fallback when the manifest has no "actions" timeline or metadata has no step_ms.
+    *entries* must be sorted by (step, time_ms). Prefer using the action timeline
+    (manifest["actions"] + metadata["step_ms"]) via _action_at_time_from_timeline
+    so that offsets use actual action timings, not closest frame.
+    """
+    if not entries:
+        return None
+    best_entry: dict | None = None
+    best_diff: float = float("inf")
+    for e in entries:
+        t = e.get("time_ms")
+        a = e.get("action_idx")
+        if t is None or a is None:
+            continue
+        try:
+            t_float = float(t)
+            int(a)
+        except (TypeError, ValueError):
+            continue
+        diff = abs(t_float - target_time_ms)
+        if diff < best_diff:
+            best_diff = diff
+            best_entry = e
+    if best_entry is None:
+        return None
+    try:
+        return int(best_entry["action_idx"])
+    except (TypeError, ValueError):
+        return None
+
 
 def _collect_bc_index(
     data_dir: Path,
     track_ids: list[str],
     n_stack: int,
-) -> list[tuple[list[Path], int]]:
-    """Build a flat list of (frame_paths, action_idx) for BC training.
+    bc_target: str = "current_tick",
+    bc_time_offsets_ms: list[int] | None = None,
+) -> list[tuple[list[Path], list[int]]]:
+    """Build a flat list of (frame_paths, action_indices) for BC training.
 
-    For each replay in *track_ids*, reads manifest.json. Entries with valid
-    action_idx are used; temporal windows of *n_stack* consecutive frames
-    get the action of the last frame in the window.
+    When *bc_time_offsets_ms* is None or [0], *bc_target* applies: current_tick =
+    action at last frame (MDP π(a_t|s_t)), next_tick = action at next timestep.
+    When *bc_time_offsets_ms* has multiple offsets (e.g. [-10, 0, 10, 100]), for
+    each window the last frame time T is used and for each offset d the action at
+    T+d ms is taken from the **action timeline** (manifest["actions"] and
+    metadata["step_ms"]) when available, so labels use actual action timings, not
+    closest frame. Fallback: closest entry by time_ms. Returns
+    (paths, list of n_offsets action indices); n_offsets=1 when single head.
     """
-    items: list[tuple[list[Path], int]] = []
+    if bc_time_offsets_ms is None:
+        bc_time_offsets_ms = [0]
+    use_multi_offset = len(bc_time_offsets_ms) > 1 or (
+        len(bc_time_offsets_ms) == 1 and bc_time_offsets_ms[0] != 0
+    )
+    use_next_tick = not use_multi_offset and bc_target == "next_tick"
+
+    items: list[tuple[list[Path], list[int]]] = []
     for tid in sorted(track_ids):
         track_dir = data_dir / tid
         if not track_dir.is_dir():
@@ -487,34 +615,53 @@ def _collect_bc_index(
         for replay_dir in sorted(track_dir.iterdir()):
             if not replay_dir.is_dir():
                 continue
-            manifest_path = replay_dir / "manifest.json"
-            if not manifest_path.exists():
-                continue
-            try:
-                with open(manifest_path, encoding="utf-8") as fh:
-                    entries = _manifest_entries(json.load(fh))
-            except (json.JSONDecodeError, OSError) as e:
-                log.warning("Skip %s: %s", manifest_path, e)
+            entries, actions_timeline, step_ms, _ = _load_replay_manifest_and_timeline(replay_dir)
+            if not entries:
                 continue
             if len(entries) < max(1, n_stack):
                 continue
-            # Sort by step for deterministic order
-            entries = sorted(entries, key=lambda e: (e.get("step", 0), e.get("time_ms", 0)))
-            n_win = len(entries) - n_stack + 1 if n_stack > 1 else len(entries)
+            if use_next_tick:
+                n_win = max(0, len(entries) - n_stack)
+            else:
+                n_win = len(entries) - n_stack + 1 if n_stack > 1 else len(entries)
             for start in range(n_win):
                 if n_stack > 1:
                     end = start + n_stack
                     window = entries[start:end]
                 else:
                     window = [entries[start]]
-                last = window[-1]
-                action_idx = last.get("action_idx")
-                if action_idx is None:
-                    continue
-                try:
-                    action_idx = int(action_idx)
-                except (TypeError, ValueError):
-                    continue
+                if use_multi_offset:
+                    last_time = window[-1].get("time_ms")
+                    if last_time is None:
+                        continue
+                    try:
+                        T = float(last_time)
+                    except (TypeError, ValueError):
+                        continue
+                    action_indices: list[int] = []
+                    use_timeline = actions_timeline is not None and step_ms is not None
+                    for d in bc_time_offsets_ms:
+                        if use_timeline:
+                            a = _action_at_time_from_timeline(actions_timeline, step_ms, T + d)
+                        else:
+                            a = _action_at_time(entries, T + d)
+                        if a is None:
+                            break
+                        action_indices.append(a)
+                    if len(action_indices) != len(bc_time_offsets_ms):
+                        continue
+                else:
+                    if use_next_tick:
+                        next_entry = entries[start + n_stack]
+                        action_idx = next_entry.get("action_idx")
+                    else:
+                        action_idx = window[-1].get("action_idx")
+                    if action_idx is None:
+                        continue
+                    try:
+                        action_indices = [int(action_idx)]
+                    except (TypeError, ValueError):
+                        continue
                 paths = []
                 for ent in window:
                     fname = ent.get("file")
@@ -525,7 +672,7 @@ def _collect_bc_index(
                         break
                     paths.append(p)
                 if len(paths) == len(window):
-                    items.append((paths, action_idx))
+                    items.append((paths, action_indices))
     return items
 
 
@@ -533,34 +680,26 @@ def _get_action_for_level0_sample(
     frames: list[Path],
     start: int,
     n_stack: int,
-    manifest_cache: dict[Path, list],
+    manifest_cache: dict[Path, tuple[list[dict], list[int] | None, int | None, list[dict] | None]],
 ) -> int | None:
     """Return action_idx for the sample (frames, start) in Level 0 order.
 
     The last frame in the window (frames[start + n_stack - 1]) must have an
     entry in the replay's manifest.json with ``action_idx``. Uses
-    *manifest_cache* (replay_dir -> list of entries sorted by step/time_ms).
+    *manifest_cache* (replay_dir -> (entries, actions_timeline, step_ms)).
     """
     last_path = frames[start + n_stack - 1]
     replay_dir = last_path.parent
     if replay_dir not in manifest_cache:
-        try:
-            manifest_path = replay_dir / "manifest.json"
-            with open(manifest_path, encoding="utf-8") as fh:
-                entries = _manifest_entries(json.load(fh))
-            if not entries:
-                return None
-            entries = sorted(entries, key=lambda e: (e.get("step", 0), e.get("time_ms", 0)))
-            manifest_cache[replay_dir] = entries
-        except (OSError, json.JSONDecodeError):
-            return None
-    entries = manifest_cache[replay_dir]
+        manifest_cache[replay_dir] = _load_replay_manifest_and_timeline(replay_dir)  # (entries, actions, step_ms, meta)
+    entries = manifest_cache[replay_dir][0]
+    if not entries:
+        return None
     name = last_path.name
     for ent in entries:
         f = ent.get("file")
         if f is None:
             continue
-        # Match by filename only (manifest may store "file" as name or relative path)
         if Path(f).name != name:
             continue
         a = ent.get("action_idx")
@@ -573,6 +712,130 @@ def _get_action_for_level0_sample(
     return None
 
 
+def _get_actions_for_level0_sample(
+    frames: list[Path],
+    start: int,
+    n_stack: int,
+    bc_time_offsets_ms: list[int],
+    manifest_cache: dict[Path, tuple[list[dict], list[int] | None, int | None, list[dict] | None]],
+) -> list[int] | None:
+    """Return list of action_idx per offset for the sample (frames, start).
+
+    Last frame of window is used to get time T from manifest; then for each
+    offset d in bc_time_offsets_ms returns action at T+d ms from the **action
+    timeline** (manifest["actions"] + metadata["step_ms"]) when available,
+    else from closest entry by time_ms. Returns None if any offset has no valid action.
+    """
+    last_path = frames[start + n_stack - 1]
+    replay_dir = last_path.parent
+    if replay_dir not in manifest_cache:
+        manifest_cache[replay_dir] = _load_replay_manifest_and_timeline(replay_dir)  # (entries, actions, step_ms, meta)
+    entries, actions_timeline, step_ms, _ = manifest_cache[replay_dir]
+    if not entries:
+        return None
+    name = last_path.name
+    T_ent = None
+    for ent in entries:
+        f = ent.get("file")
+        if f is None:
+            continue
+        if Path(f).name != name:
+            continue
+        t = ent.get("time_ms")
+        if t is None:
+            return None
+        try:
+            T_ent = float(t)
+        except (TypeError, ValueError):
+            return None
+        break
+    if T_ent is None:
+        return None
+    use_timeline = actions_timeline is not None and step_ms is not None
+    out: list[int] = []
+    for d in bc_time_offsets_ms:
+        if use_timeline:
+            a = _action_at_time_from_timeline(actions_timeline, step_ms, T_ent + d)
+        else:
+            a = _action_at_time(entries, T_ent + d)
+        if a is None:
+            return None
+        out.append(a)
+    return out
+
+
+def _nearest_meta_by_time(meta_list: list[dict], target_time_ms: float) -> dict | None:
+    """Binary search for meta entry with time_ms closest to target_time_ms."""
+    if not meta_list:
+        return None
+    times = [m.get("time_ms") for m in meta_list]
+    valid = [(i, t) for i, t in enumerate(times) if t is not None]
+    if not valid:
+        return None
+    best_i, best_t = min(valid, key=lambda x: abs(float(x[1]) - target_time_ms))
+    return meta_list[best_i]
+
+
+def _build_float_vector_from_meta(
+    meta_dict: dict,
+    prev_action_indices: list[int],
+) -> np.ndarray:
+    """Build RL-compatible float vector from meta dict and prev_actions. Returns float32 array."""
+    cfg = None
+    try:
+        from config_files.config_loader import load_config, set_config, get_config
+        _rl_default = Path(__file__).resolve().parents[2] / "config_files" / "rl" / "config_default.yaml"
+        if _rl_default.exists():
+            set_config(load_config(_rl_default))
+            cfg = get_config()
+    except Exception:
+        pass
+    if cfg is None:
+        raise RuntimeError("RL config required for float building")
+    inputs = cfg.inputs
+    action_forward_idx = cfg.action_forward_idx
+    n_prev = cfg.n_prev_actions_in_inputs
+    n_zone = cfg.n_zone_centers_in_inputs
+    prev_actions_flat = []
+    for idx in prev_action_indices:
+        if idx < 0 or idx >= len(inputs):
+            act = inputs[action_forward_idx]
+        else:
+            act = inputs[idx]
+        for k in ["accelerate", "brake", "left", "right"]:
+            prev_actions_flat.append(float(act.get(k, False)))
+    gear = np.array(meta_dict.get("gear_and_wheels", []), dtype=np.float32)
+    ang_vel = np.array(meta_dict.get("angular_velocity", [0, 0, 0]), dtype=np.float32)
+    vel = np.array(meta_dict.get("velocity", [0, 0, 0]), dtype=np.float32)
+    ori = np.array(meta_dict.get("orientation_flat", list(np.eye(3).ravel())), dtype=np.float32).reshape(3, 3)
+    y_map = (ori @ np.array([0, 1, 0], dtype=np.float32)).ravel()
+    zone_in_car = meta_dict.get("zone_centers_in_car_frame")
+    if zone_in_car is not None:
+        zone_arr = np.array(zone_in_car, dtype=np.float32)
+        if len(zone_arr) > n_zone * 3:
+            zone_arr = zone_arr[: n_zone * 3]
+        elif len(zone_arr) < n_zone * 3:
+            zone_arr = np.pad(zone_arr, (0, n_zone * 3 - len(zone_arr)))
+    else:
+        zone_arr = np.zeros(n_zone * 3, dtype=np.float32)
+    margin = float(meta_dict.get("margin", 0.0))
+    freewheel = float(meta_dict.get("is_freewheeling", 0.0))
+    temporal = 0.0
+    return np.hstack(
+        (
+            temporal,
+            prev_actions_flat,
+            gear.ravel(),
+            ang_vel.ravel(),
+            vel.ravel(),
+            y_map.ravel(),
+            zone_arr.ravel(),
+            margin,
+            freewheel,
+        )
+    ).astype(np.float32)
+
+
 def _add_bc_actions_to_level0_cache(
     data_dir: Path,
     cache_dir: Path,
@@ -581,11 +844,12 @@ def _add_bc_actions_to_level0_cache(
     val_fraction: float,
     seed: int,
     n_actions: int,
+    bc_time_offsets_ms: list[int],
 ) -> bool:
-    """If *cache_dir* has a valid Level 0 cache (train.npy, val.npy), add only
+    """If *cache_dir* has a valid Level 0 cache (train.npy, val.npy), add
     train_actions.npy and val_actions.npy in the same row order and update
-    cache_meta.json with n_actions. Returns True if successful; False if cache
-    is not reusable (then caller should run full build_bc_cache).
+    cache_meta.json. When bc_time_offsets_ms is [0], saves shape (N,); else (N, n_offsets).
+    Returns True if successful; False if cache is not reusable.
     """
     cache_dir = Path(cache_dir)
     if (cache_dir / CACHE_TRAIN_ACTIONS_FILE).exists():
@@ -614,20 +878,36 @@ def _add_bc_actions_to_level0_cache(
         )
         return False
 
-    manifest_cache: dict[Path, list] = {}
-    train_actions: list[int] = []
+    manifest_cache: dict[Path, tuple[list[dict], list[int] | None, int | None]] = {}
+    single_head = len(bc_time_offsets_ms) == 1 and bc_time_offsets_ms[0] == 0
+    train_actions: list[int] | list[list[int]] = []
     for frames, start in tqdm(train_items, desc="BC actions from Level 0 (train)", unit="sample"):
-        a = _get_action_for_level0_sample(frames, start, max(1, n_stack), manifest_cache)
-        if a is None:
-            log.info(
-                "Cannot reuse Level 0 cache: sample has no action_idx in manifest (replay=%s, start=%d). "
-                "Level 0 cache includes every frame; BC requires action_idx for each. Building full BC cache.",
-                frames[0].parent, start,
+        if single_head:
+            a = _get_action_for_level0_sample(frames, start, max(1, n_stack), manifest_cache)
+            if a is None:
+                log.info(
+                    "Cannot reuse Level 0 cache: sample has no action_idx in manifest (replay=%s, start=%d). "
+                    "Building full BC cache.",
+                    frames[0].parent, start,
+                )
+                return False
+            train_actions.append(a)
+        else:
+            acts = _get_actions_for_level0_sample(
+                frames, start, max(1, n_stack), bc_time_offsets_ms, manifest_cache
             )
-            return False
-        train_actions.append(a)
+            if acts is None:
+                log.info(
+                    "Cannot reuse Level 0 cache: missing action for some offset (replay=%s, start=%d). Building full BC cache.",
+                    frames[0].parent, start,
+                )
+                return False
+            train_actions.append(acts)
 
-    np.save(cache_dir / CACHE_TRAIN_ACTIONS_FILE, np.array(train_actions, dtype=np.int64))
+    if single_head:
+        np.save(cache_dir / CACHE_TRAIN_ACTIONS_FILE, np.array(train_actions, dtype=np.int64))
+    else:
+        np.save(cache_dir / CACHE_TRAIN_ACTIONS_FILE, np.array(train_actions, dtype=np.int64))
     log.info("Added %s from Level 0 cache (reused train.npy)", CACHE_TRAIN_ACTIONS_FILE)
 
     if n_val > 0:
@@ -639,24 +919,41 @@ def _add_bc_actions_to_level0_cache(
             )
             (cache_dir / CACHE_TRAIN_ACTIONS_FILE).unlink(missing_ok=True)
             return False
-        val_actions = []
+        val_actions_list: list[int] | list[list[int]] = []
         for frames, start in tqdm(val_items, desc="BC actions from Level 0 (val)", unit="sample"):
-            a = _get_action_for_level0_sample(frames, start, max(1, n_stack), manifest_cache)
-            if a is None:
-                log.info(
-                    "Cannot reuse Level 0 cache: missing action_idx for val sample (replay=%s)",
-                    frames[0].parent,
+            if single_head:
+                a = _get_action_for_level0_sample(frames, start, max(1, n_stack), manifest_cache)
+                if a is None:
+                    log.info(
+                        "Cannot reuse Level 0 cache: missing action_idx for val sample (replay=%s)",
+                        frames[0].parent,
+                    )
+                    (cache_dir / CACHE_TRAIN_ACTIONS_FILE).unlink(missing_ok=True)
+                    return False
+                val_actions_list.append(a)
+            else:
+                acts = _get_actions_for_level0_sample(
+                    frames, start, max(1, n_stack), bc_time_offsets_ms, manifest_cache
                 )
-                (cache_dir / CACHE_TRAIN_ACTIONS_FILE).unlink(missing_ok=True)
-                return False
-            val_actions.append(a)
-        np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, np.array(val_actions, dtype=np.int64))
+                if acts is None:
+                    log.info(
+                        "Cannot reuse Level 0 cache: missing action for val sample (replay=%s)",
+                        frames[0].parent,
+                    )
+                    (cache_dir / CACHE_TRAIN_ACTIONS_FILE).unlink(missing_ok=True)
+                    return False
+                val_actions_list.append(acts)
+        if single_head:
+            np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, np.array(val_actions_list, dtype=np.int64))
+        else:
+            np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, np.array(val_actions_list, dtype=np.int64))
         log.info("Added %s from Level 0 cache (reused val.npy)", CACHE_VAL_ACTIONS_FILE)
 
     meta["n_actions"] = n_actions
+    meta["bc_time_offsets_ms"] = bc_time_offsets_ms
     with open(cache_dir / CACHE_META_FILE, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
-    log.info("BC actions added to Level 0 cache: %d train + %d val (reused frames)", len(train_actions), len(val_actions) if n_val else 0)
+    log.info("BC actions added to Level 0 cache: %d train + %d val (reused frames)", len(train_actions), len(val_actions_list) if n_val else 0)
     return True
 
 
@@ -668,8 +965,14 @@ def is_bc_cache_valid(
     val_fraction: float,
     seed: int,
     n_actions: int,
+    bc_target: str = "current_tick",
+    bc_time_offsets_ms: list[int] | None = None,
 ) -> bool:
-    """Return True iff the BC cache in *cache_dir* is valid for the given params."""
+    """Return True iff the BC cache in *cache_dir* is valid for the given params.
+    Old caches without bc_time_offsets_ms are treated as [0].
+    """
+    if bc_time_offsets_ms is None:
+        bc_time_offsets_ms = [0]
     cache_dir = Path(cache_dir)
     meta_path = cache_dir / CACHE_META_FILE
     train_path = cache_dir / CACHE_TRAIN_FILE
@@ -704,9 +1007,17 @@ def is_bc_cache_valid(
         ("val_fraction", val_fraction),
         ("seed", seed),
         ("n_actions", n_actions),
+        ("bc_target", bc_target),
+        ("bc_time_offsets_ms", bc_time_offsets_ms),
     ]:
-        if meta.get(key) != current_val:
-            log.info("BC cache invalid: %s mismatch (stored=%s, current=%s)", key, meta.get(key), current_val)
+        if key == "bc_target":
+            stored = meta.get("bc_target", "current_tick")
+        elif key == "bc_time_offsets_ms":
+            stored = meta.get("bc_time_offsets_ms", [0])
+        else:
+            stored = meta.get(key)
+        if stored != current_val:
+            log.info("BC cache invalid: %s mismatch (stored=%s, current=%s)", key, stored, current_val)
             return False
 
     stored_sig = meta.get("source_signature")
@@ -733,27 +1044,30 @@ def build_bc_cache(
     seed: int = 42,
     n_actions: int = 12,
     workers: int = 0,
+    bc_target: str = "current_tick",
+    bc_time_offsets_ms: list[int] | None = None,
+    bc_offset_weights: list[float] | None = None,
 ) -> None:
     """Build BC preprocessed cache: train.npy, train_actions.npy, val.npy, val_actions.npy, cache_meta.json.
 
-    If *cache_dir* already contains a valid Level 0 cache (train.npy, val.npy from
-    ``build_cache``), only train_actions.npy and val_actions.npy are added (same
-    row order as the existing frames), so you can reuse one cache dir for both
-    Level 0 and BC. If reuse is not possible (e.g. missing action_idx in manifest),
-    a full BC cache is built from scratch.
+    If *cache_dir* already contains a valid Level 0 cache and bc_time_offsets_ms is [0],
+    only train_actions.npy and val_actions.npy are added. With multiple offsets a full
+    BC cache is built. Actions shape: (N,) when single offset, (N, n_offsets) otherwise.
     """
+    if bc_time_offsets_ms is None:
+        bc_time_offsets_ms = [0]
     data_dir = Path(data_dir).resolve()
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    if (cache_dir / CACHE_TRAIN_FILE).exists() and not (cache_dir / CACHE_TRAIN_ACTIONS_FILE).exists():
+    if bc_time_offsets_ms == [0] and (cache_dir / CACHE_TRAIN_FILE).exists() and not (cache_dir / CACHE_TRAIN_ACTIONS_FILE).exists():
         log.info("Found cache files from another task (Level 0) — reusing and adding BC actions")
-    if _add_bc_actions_to_level0_cache(
-        data_dir, cache_dir, image_size, n_stack, val_fraction, seed, n_actions,
-    ):
-        return
+        if _add_bc_actions_to_level0_cache(
+            data_dir, cache_dir, image_size, n_stack, val_fraction, seed, n_actions, bc_time_offsets_ms,
+        ):
+            return
 
-    log.info("Building BC cache: data_dir=%s -> cache_dir=%s", data_dir, cache_dir)
+    log.info("Building BC cache: data_dir=%s -> cache_dir=%s (bc_time_offsets_ms=%s)", data_dir, cache_dir, bc_time_offsets_ms)
     signature = compute_source_signature(data_dir)
 
     if val_fraction > 0:
@@ -762,8 +1076,8 @@ def build_bc_cache(
         train_ids = sorted(d.name for d in data_dir.iterdir() if d.is_dir())
         val_ids = []
 
-    train_items = _collect_bc_index(data_dir, train_ids, n_stack)
-    val_items = _collect_bc_index(data_dir, val_ids, n_stack) if val_ids else []
+    train_items = _collect_bc_index(data_dir, train_ids, n_stack, bc_target, bc_time_offsets_ms)
+    val_items = _collect_bc_index(data_dir, val_ids, n_stack, bc_target, bc_time_offsets_ms) if val_ids else []
 
     if len(train_items) == 0:
         raise RuntimeError(
@@ -794,7 +1108,10 @@ def build_bc_cache(
 
     # Write train_actions.npy
     actions_path = cache_dir / CACHE_TRAIN_ACTIONS_FILE
-    actions_arr = np.array([a for _, a in train_items], dtype=np.int64)
+    if len(bc_time_offsets_ms) == 1:
+        actions_arr = np.array([acts[0] for _, acts in train_items], dtype=np.int64)
+    else:
+        actions_arr = np.array([acts for _, acts in train_items], dtype=np.int64)
     np.save(actions_path, actions_arr)
 
     if val_items:
@@ -811,22 +1128,133 @@ def build_bc_cache(
         finally:
             arr.flush()
             del arr
-        np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, np.array([a for _, a in val_items], dtype=np.int64))
+        np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, np.array([acts[0] for _, acts in val_items], dtype=np.int64) if len(bc_time_offsets_ms) == 1 else np.array([acts for _, acts in val_items], dtype=np.int64))
     elif (cache_dir / CACHE_VAL_FILE).exists():
         (cache_dir / CACHE_VAL_FILE).unlink(missing_ok=True)
         (cache_dir / CACHE_VAL_ACTIONS_FILE).unlink(missing_ok=True)
 
-    meta = {
+    meta: dict = {
         "source_data_dir": str(data_dir),
         "image_size": image_size,
         "n_stack": n_stack,
         "val_fraction": val_fraction,
         "seed": seed,
+        "bc_target": bc_target,
+        "bc_time_offsets_ms": bc_time_offsets_ms,
         "source_signature": signature,
         "n_train": len(train_items),
         "n_val": len(val_items),
         "n_actions": n_actions,
     }
+    if bc_offset_weights is not None:
+        meta["bc_offset_weights"] = bc_offset_weights
+
+    # Build train_floats.npy / val_floats.npy when manifest has meta
+    manifest_cache: dict[Path, tuple[list[dict], list[int] | None, int | None, list[dict] | None]] = {}
+    has_meta = False
+    float_dim = 0
+    try:
+        if train_items:
+            last_path = train_items[0][0][-1]
+            replay_dir = last_path.parent
+            entries, actions_tl, step_ms_val, meta_list = _load_replay_manifest_and_timeline(replay_dir)
+            has_meta = meta_list is not None and len(meta_list) > 0
+        if has_meta:
+            from config_files.config_loader import load_config, set_config, get_config
+            _rl_cfg = Path(__file__).resolve().parents[2] / "config_files" / "rl" / "config_default.yaml"
+            if _rl_cfg.exists():
+                set_config(load_config(_rl_cfg))
+                float_dim = int(get_config().float_input_dim)
+    except Exception as e:
+        log.debug("Skipping float build: %s", e)
+        has_meta = False
+
+    if has_meta and float_dim > 0:
+        from config_files.config_loader import get_config as _get_cfg
+
+        def _get_float_for_sample(
+            paths: list[Path],
+            _manifest_cache: dict,
+        ) -> np.ndarray | None:
+            replay_dir = paths[-1].parent
+            if replay_dir not in _manifest_cache:
+                _manifest_cache[replay_dir] = _load_replay_manifest_and_timeline(replay_dir)
+            entries, actions_tl, step_ms_v, meta_list = _manifest_cache[replay_dir]
+            if not meta_list or not entries:
+                return None
+            last_name = paths[-1].name
+            t_ms = None
+            for e in entries:
+                if Path(e.get("file", "")).name == last_name:
+                    t_ms = e.get("time_ms")
+                    break
+            if t_ms is None:
+                return None
+            try:
+                t = float(t_ms)
+            except (TypeError, ValueError):
+                return None
+            nearest = _nearest_meta_by_time(meta_list, t)
+            if nearest is None:
+                return None
+            cfg = _get_cfg()
+            n_prev = cfg.n_prev_actions_in_inputs
+            prev_indices: list[int] = []
+            if actions_tl is not None and step_ms_v is not None and step_ms_v > 0:
+                step_idx = int(round(t / step_ms_v))
+                for k in range(n_prev):
+                    idx = step_idx - n_prev + 1 + k
+                    if idx < 0:
+                        prev_indices.append(cfg.action_forward_idx)
+                    elif idx >= len(actions_tl):
+                        prev_indices.append(cfg.action_forward_idx)
+                    else:
+                        prev_indices.append(actions_tl[idx])
+            else:
+                prev_indices = [cfg.action_forward_idx] * n_prev
+            return _build_float_vector_from_meta(nearest, prev_indices)
+
+        train_floats_list: list[np.ndarray] = []
+        for paths, _ in tqdm(train_items, desc="BC floats train", unit="sample"):
+            fv = _get_float_for_sample(paths, manifest_cache)
+            if fv is None:
+                log.info("Sample missing meta/float, skipping float cache")
+                train_floats_list = []
+                has_meta = False
+                break
+            train_floats_list.append(fv)
+        if train_floats_list:
+            np.save(cache_dir / CACHE_TRAIN_FLOATS_FILE, np.stack(train_floats_list, axis=0).astype(np.float32))
+            if val_items:
+                val_floats_list: list[np.ndarray] = []
+                for paths, _ in tqdm(val_items, desc="BC floats val", unit="sample"):
+                    fv = _get_float_for_sample(paths, manifest_cache)
+                    if fv is None:
+                        val_floats_list = []
+                        break
+                    val_floats_list.append(fv)
+                if val_floats_list:
+                    np.save(cache_dir / CACHE_VAL_FLOATS_FILE, np.stack(val_floats_list, axis=0).astype(np.float32))
+            meta["has_floats"] = True
+            meta["float_input_dim"] = float_dim
+
+    if not meta.get("has_floats"):
+        meta["has_floats"] = False
+
     with open(cache_dir / CACHE_META_FILE, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
     log.info("BC cache build complete: %d train + %d val", len(train_items), len(val_items))
+    # Verify cache consistency
+    train_actions_arr = np.load(str(actions_path), mmap_mode="r")
+    n_offsets = len(bc_time_offsets_ms)
+    if train_actions_arr.shape[0] != len(train_items):
+        raise RuntimeError(f"BC cache inconsistent: train_actions.npy shape[0]={train_actions_arr.shape[0]} != n_train={len(train_items)}")
+    if n_offsets == 1:
+        if train_actions_arr.ndim != 1:
+            raise RuntimeError(f"BC cache inconsistent: single offset but train_actions.npy ndim={train_actions_arr.ndim}")
+    else:
+        if train_actions_arr.ndim != 2 or train_actions_arr.shape[1] != n_offsets:
+            raise RuntimeError(
+                f"BC cache inconsistent: multi-offset expected shape (N, {n_offsets}), got {train_actions_arr.shape}"
+            )
+    log.info("BC cache verification passed: train_actions shape %s, n_offsets=%d", train_actions_arr.shape, n_offsets)

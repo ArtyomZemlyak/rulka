@@ -6,7 +6,7 @@ val_acc, train_acc_class_0..N, val_acc_class_0..N). This script reads CSV from r
 directories (e.g. output/ptretrain/bc/v1/csv/metrics.csv or output/ptretrain/bc/v1/csv/
 with version_0/metrics.csv) and prints comparison with action names (not just 0,1,2).
 
-Action names match config_files/config_default.yaml inputs (12 actions):
+Action names match config_files/rl/config_default.yaml inputs (12 actions):
   0=accel, 1=left+accel, 2=right+accel, 3=coast, 4=left, 5=right,
   6=brake, 7=left+brake, 8=right+brake, 9=accel+brake, 10=left+accel+brake, 11=right+accel+brake
 
@@ -221,9 +221,42 @@ def run_analysis(
             val_acc = meta.get("val_acc_final")
             train_loss = meta.get("train_loss_final")
             val_loss = meta.get("val_loss_final")
-            print(f"  {name}: epochs_trained={epochs_trained}  train_acc={train_acc}  val_acc={val_acc}  train_loss={train_loss}  val_loss={val_loss}")
+            offsets = meta.get("bc_time_offsets_ms")
+            off_s = f"  bc_time_offsets_ms={offsets}" if offsets else ""
+            print(f"  {name}: epochs_trained={epochs_trained}  train_acc={train_acc}  val_acc={val_acc}  train_loss={train_loss}  val_loss={val_loss}{off_s}")
         else:
             print(f"  {name}: (no pretrain_meta.json)")
+
+    # ---- Per-offset accuracy (multi-offset BC runs) ----
+    def _offset_cols(merged: list[dict[str, Any]]) -> list[str]:
+        cols = set()
+        for row in merged:
+            for k in row:
+                if k.startswith("val_acc_offset") and row.get(k) is not None:
+                    cols.add(k)
+        return sorted(cols)
+
+    has_offset = any(_offset_cols(merged) for _, _, merged, _ in runs)
+    if has_offset:
+        print("\n--- Per-offset validation accuracy (multi-offset BC) ---")
+        for name, _, merged, _ in runs:
+            cols = _offset_cols(merged)
+            if not cols:
+                continue
+            print(f"  {name}:")
+            last = merged[-1]
+            for c in cols:
+                v = last.get(c)
+                if v is not None:
+                    print(f"    {c} = {float(v):.4f}")
+            best_row = min((r for r in merged if r.get("val_loss") is not None), key=lambda r: float(r["val_loss"]), default=None)
+            if best_row and best_row != last:
+                print(f"    (best epoch by val_loss={best_row.get('epoch')}):")
+                for c in cols:
+                    v = best_row.get(c)
+                    if v is not None:
+                        print(f"      {c} = {float(v):.4f}")
+            print()
 
     # ---- Loss / overall acc at epoch checkpoints ----
     print("\n--- train_loss / val_loss / train_acc / val_acc at epoch checkpoints ---")

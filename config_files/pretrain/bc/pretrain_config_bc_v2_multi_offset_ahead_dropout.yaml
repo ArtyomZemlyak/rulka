@@ -1,0 +1,69 @@
+# =============================================================================
+# Level 1 BC — multi-offset + vis backbone + a_head + dropout (no early stop)
+# Base: pretrain_config_bc_v2_multi_offset_ahead_reg.yaml + dropout on features
+# Goal: improve val via dropout regularization over full 50 epochs.
+# =============================================================================
+
+data_dir: maps/img
+output_dir: output/ptretrain/bc
+run_name: v2_multi_offset_ahead_dropout
+
+preprocess_cache_dir: cache/v0
+cache_load_in_ram: true
+cache_build_workers: 4
+
+image_size: 64
+n_stack: 1
+image_normalization: "iqn"
+
+bc_mode: backbone
+bc_target: next_tick
+bc_time_offsets_ms: [-10, 0, 10, 100]
+bc_offset_weights: [0.2, 1.0, 0.5, 0.3]
+
+encoder_init_path: "output/ptretrain/vis/v2/encoder.pt"
+
+use_floats: false
+float_hidden_dim: 256
+save_float_head: true
+n_actions: 12
+
+use_actions_head: true
+save_actions_head: true
+dense_hidden_dimension: 1024
+dropout: 0.2
+
+batch_size: 4096
+epochs: 50
+lr: 0.0001
+weight_decay: 0.02
+grad_clip: 1.0
+
+workers: 4
+pin_memory: true
+prefetch_factor: 4
+
+val_fraction: 0.1
+seed: 42
+
+use_tqdm: true
+
+lightning:
+  tensorboard: true
+  tensorboard_dir: tensorboard
+  csv_logger: true
+  csv_dir: csv
+  checkpoint_dir: checkpoints
+  save_top_k: 1
+  checkpoint_monitor: auto
+  early_stopping: false
+  patience: 10
+  min_delta: 0.0
+  accelerator: auto
+  precision: auto
+  devices: null
+  log_every_n_steps: 50
+  deterministic: false
+  enable_model_summary: true
+  profiler: null
+  float32_matmul_precision: medium

@@ -1,12 +1,12 @@
 # =============================================================================
 # Level 0 visual pretraining configuration
-# config_files/pretrain_config.yaml
+# config_files/pretrain/vis/pretrain_config.yaml
 #
 # All values here are defaults.  Override priority (highest first):
 #   1. CLI arguments   (scripts/pretrain_visual_backbone.py)
 #   2. Env vars        PRETRAIN_<FIELD>  e.g.  PRETRAIN_TASK=simclr
 #                      Nested fields:   PRETRAIN_LIGHTNING__PATIENCE=5
-#   3. This file       (pretrain_config.yaml)
+#   3. This file       (config_files/pretrain/vis/pretrain_config.yaml)
 #
 # Schema and validation: config_files/pretrain_schema.py
 # Artifact contract   : trackmania_rl/pretrain/contract.py
@@ -91,8 +91,13 @@ framework: lightning
 # ---------------------------------------------------------------------------
 
 # Square input resolution in pixels.
-# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_default.yaml.
+# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_files/rl/config_default.yaml.
 image_size: 64
+
+# Image normalization before feeding to the encoder:
+#   01  — keep [0, 1] (default)
+#   iqn — (x - 0.5) / 0.5 so model sees IQN-style input; use when encoder will be loaded into IQN/BC
+image_normalization: "01"
 
 # Number of consecutive frames per sample.  1 = single frame (recommended default).
 n_stack: 1
@@ -210,7 +215,7 @@ lightning:
   # --- Early stopping ---
 
   # Stop training automatically when the monitored metric stops improving.
-  early_stopping: true
+  early_stopping: false
 
   # Number of epochs with no improvement before stopping.
   patience: 10

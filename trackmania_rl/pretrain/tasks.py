@@ -326,34 +326,98 @@ if _LIGHTNING_AVAILABLE:
     class BCLightningModule(_Base):  # type: ignore[misc]
         """Behavioral cloning: (image, action_idx) → CrossEntropy loss.
 
-        Wraps a full BC model (encoder + action head). Exposes ``self.encoder``
-        for saving the backbone artifact after training.
+        Wraps a full BC model (encoder + action head) or full IQN when use_full_iqn.
+        Exposes ``self.encoder`` for saving the backbone artifact after training.
+
+        When use_full_iqn is True, forward uses num_quantiles=1 and tau either
+        random (full_iqn_random_tau=True) or fixed 0.5 (full_iqn_random_tau=False).
 
         Logs train/val loss, overall train/val accuracy, and per-class validation
         accuracy (val_acc_class_0, ...) for interpretation.
         """
 
-        def __init__(self, model: nn.Module, lr: float = 1e-3) -> None:
+        def __init__(
+            self,
+            model: nn.Module,
+            lr: float = 1e-3,
+            weight_decay: float = 0.0,
+            use_full_iqn: bool = False,
+            full_iqn_random_tau: bool = False,
+            float_dim: int = 0,
+            n_offsets: int = 1,
+            offset_weights: Optional[list[float]] = None,
+            bc_time_offsets_ms: Optional[list[int]] = None,
+        ) -> None:
             super().__init__()
             self.model = model
             self.lr = lr
-            self.encoder = getattr(model, "encoder", model)
-            n_actions = getattr(getattr(model, "action_head", None), "out_features", None)
+            self.weight_decay = weight_decay
+            self.use_full_iqn = use_full_iqn
+            self.full_iqn_random_tau = full_iqn_random_tau
+            self._float_dim = float_dim
+            self._n_offsets = n_offsets
+            self._bc_time_offsets_ms = bc_time_offsets_ms if (bc_time_offsets_ms is not None and len(bc_time_offsets_ms) == n_offsets) else None
+            self._offset_weights = (
+                torch.tensor(offset_weights, dtype=torch.float32)
+                if offset_weights is not None and len(offset_weights) == n_offsets
+                else torch.ones(n_offsets, dtype=torch.float32)
+            )
+            if use_full_iqn:
+                self.encoder = getattr(model, "img_head", model)
+            else:
+                self.encoder = getattr(model, "encoder", model)
+            n_actions = getattr(getattr(model, "action_head", None), "out_features", None) or getattr(model, "n_actions", None)
+            if n_actions is None and getattr(model, "action_head", None) is not None:
+                ah = model.action_head
+                if isinstance(ah, nn.ModuleList) and len(ah) > 0:
+                    first = ah[0]
+                    n_actions = getattr(first, "out_features", None) or (
+                        getattr(first[-1], "out_features", None) if isinstance(first, nn.Sequential) else None
+                    )
+                elif isinstance(ah, nn.Sequential):
+                    n_actions = getattr(ah[-1], "out_features", None)
             self._n_actions = n_actions if n_actions is not None else 12
             self.register_buffer("_train_correct", torch.zeros(self._n_actions, dtype=torch.float))
             self.register_buffer("_train_total", torch.zeros(self._n_actions, dtype=torch.float))
             self.register_buffer("_val_correct", torch.zeros(self._n_actions, dtype=torch.float))
             self.register_buffer("_val_total", torch.zeros(self._n_actions, dtype=torch.float))
 
-        def _forward(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            img, action_idx = batch
+        def _forward(self, batch: tuple) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            if len(batch) == 3:
+                img, float_inputs, action_idx = batch
+            else:
+                img, action_idx = batch
+                float_inputs = None
             if img.dim() == 3:
                 img = img.unsqueeze(1)
             elif img.dim() == 5 and img.shape[1] > 1:
                 img = img[:, -1]
-            logits = self.model(img)
-            loss = F.cross_entropy(logits, action_idx)
-            return loss, logits, action_idx
+            if self.use_full_iqn:
+                if float_inputs is None:
+                    float_inputs = torch.zeros(
+                        img.shape[0], self._float_dim, device=img.device, dtype=torch.float32
+                    )
+                num_quantiles = 1
+                if self.full_iqn_random_tau:
+                    tau = torch.rand(img.shape[0], 1, device=img.device, dtype=torch.float32)
+                else:
+                    tau = torch.full(
+                        (img.shape[0], 1), 0.5, device=img.device, dtype=torch.float32
+                    )
+                Q, _ = self.model(img, float_inputs, num_quantiles, tau=tau)
+                logits = Q
+            else:
+                logits = self.model(img, float_inputs)
+            single_head = action_idx.dim() == 1
+            if single_head:
+                loss = F.cross_entropy(logits, action_idx)
+                return loss, logits, action_idx
+            # Multi-offset: logits (B, n_offsets, n_actions), action_idx (B, n_offsets)
+            w = self._offset_weights.to(logits.device)
+            total = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            for i in range(self._n_offsets):
+                total = total + w[i] * F.cross_entropy(logits[:, i], action_idx[:, i])
+            return total, logits, action_idx
 
         def _update_acc_buffers(
             self,
@@ -370,20 +434,32 @@ if _LIGHTNING_AVAILABLE:
 
         def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
             loss, logits, action_idx = self._forward(batch)
-            pred = logits.argmax(dim=1)
+            pred = logits.argmax(dim=-1)
             acc = (pred == action_idx).float().mean()
             self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("train_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
-            self._update_acc_buffers(pred, action_idx, self._train_correct, self._train_total)
+            if action_idx.dim() == 2:
+                for i in range(self._n_offsets):
+                    acc_i = (pred[:, i] == action_idx[:, i]).float().mean()
+                    name = f"train_acc_offset_ms_{self._bc_time_offsets_ms[i]}" if self._bc_time_offsets_ms is not None else f"train_acc_offset_{i}"
+                    self.log(name, acc_i, on_step=False, on_epoch=True)
+            target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
+            self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._train_correct, self._train_total)
             return loss
 
         def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
             loss, logits, action_idx = self._forward(batch)
-            pred = logits.argmax(dim=1)
+            pred = logits.argmax(dim=-1)
             acc = (pred == action_idx).float().mean()
             self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("val_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
-            self._update_acc_buffers(pred, action_idx, self._val_correct, self._val_total)
+            if action_idx.dim() == 2:
+                for i in range(self._n_offsets):
+                    acc_i = (pred[:, i] == action_idx[:, i]).float().mean()
+                    name = f"val_acc_offset_ms_{self._bc_time_offsets_ms[i]}" if self._bc_time_offsets_ms is not None else f"val_acc_offset_{i}"
+                    self.log(name, acc_i, on_step=False, on_epoch=True)
+            target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
+            self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._val_correct, self._val_total)
 
         def on_train_epoch_end(self) -> None:
             self._log_per_class_acc("train", self._train_correct, self._train_total)
@@ -403,6 +479,8 @@ if _LIGHTNING_AVAILABLE:
                     self.log(f"{stage}_acc_class_{c}", per_class[c].item(), on_epoch=True)
 
         def configure_optimizers(self) -> torch.optim.Optimizer:
+            if self.weight_decay > 0:
+                return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
             return torch.optim.Adam(self.parameters(), lr=self.lr)
 else:
     class BCLightningModule:  # type: ignore[no-redef]

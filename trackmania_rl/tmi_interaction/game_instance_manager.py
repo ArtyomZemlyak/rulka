@@ -412,7 +412,7 @@ class GameInstanceManager:
                     break
             self.tm_process_id = list(tmi_pid_candidates)[0]
         else:
-            configstr = f"set custom_port {self.tmi_port}; set skip_map_load_screens true; set disable_forced_camera true"
+            configstr = f"set custom_port {self.tmi_port}; set skip_map_load_screens true; set disable_forced_camera true; toggle_console"
             launch_string = (
                 'powershell -executionPolicy bypass -command "& {'
                 f" $process = start-process -FilePath '{get_config().windows_TMLoader_path}'"

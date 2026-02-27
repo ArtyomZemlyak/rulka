@@ -130,9 +130,11 @@ class ReplayFrameDataset(Dataset):
         track_ids: Optional[list[str]] = None,
         size: int = 64,
         n_stack: int = 1,
+        image_normalization: str = "01",
     ) -> None:
         self.size = size
         self.n_stack = n_stack
+        self._image_normalization = image_normalization
         root = Path(root)
 
         if track_ids is not None:
@@ -171,9 +173,13 @@ class ReplayFrameDataset(Dataset):
         g_idx, start = self._index[idx]
         frames = self._replay_frames[g_idx]
         if self.n_stack <= 1:
-            return _load_one_frame(frames[start], self.size)
-        stack = [_load_one_frame(frames[start + i], self.size) for i in range(self.n_stack)]
-        return torch.stack(stack, dim=0)  # (N, 1, H, W)
+            t = _load_one_frame(frames[start], self.size)
+        else:
+            stack = [_load_one_frame(frames[start + i], self.size) for i in range(self.n_stack)]
+            t = torch.stack(stack, dim=0)  # (N, 1, H, W)
+        if self._image_normalization == "iqn":
+            t = (t - 0.5) / 0.5
+        return t
 
     @property
     def n_replays(self) -> int:
@@ -227,7 +233,8 @@ class CachedPretrainDataset(Dataset):
     """PyTorch Dataset backed by a preprocessed ``.npy`` cache file.
 
     The cache file is produced by ``build_cache`` (``preprocess.py``) and has
-    shape ``(N, n_stack, 1, H, W)``, dtype float32.
+    shape ``(N, n_stack, 1, H, W)``, dtype float32. Values are in [0, 1].
+    When image_normalization is "iqn", (x - 0.5) / 0.5 is applied in __getitem__.
 
     ``__getitem__`` returns:
       - shape ``(1, H, W)`` when ``n_stack == 1``   (matches ReplayFrameDataset)
@@ -247,6 +254,8 @@ class CachedPretrainDataset(Dataset):
     expected_n_stack:
         Optional sanity-check; raises ``ValueError`` when the file's n_stack
         axis does not match.
+    image_normalization:
+        "01" = return as-is [0,1]; "iqn" = (x - 0.5) / 0.5 for IQN/BC transfer.
     """
 
     def __init__(
@@ -255,6 +264,7 @@ class CachedPretrainDataset(Dataset):
         load_in_ram: bool = False,
         expected_image_size: Optional[int] = None,
         expected_n_stack: Optional[int] = None,
+        image_normalization: str = "01",
     ) -> None:
         npy_path = Path(npy_path)
         if not npy_path.exists():
@@ -264,6 +274,7 @@ class CachedPretrainDataset(Dataset):
 
         mmap_mode = None if load_in_ram else "r"
         self._data: np.ndarray = np.load(str(npy_path), mmap_mode=mmap_mode)
+        self._image_normalization = image_normalization
 
         if self._data.ndim != 5:
             raise ValueError(
@@ -297,6 +308,8 @@ class CachedPretrainDataset(Dataset):
         # process DataLoader workers (each process opens the file independently).
         sample = np.array(self._data[idx], dtype=np.float32)  # (n_stack, 1, H, W)
         t = torch.from_numpy(sample)
+        if self._image_normalization == "iqn":
+            t = (t - 0.5) / 0.5
         if self._n_stack == 1:
             return t.squeeze(0)  # (1, H, W) — same shape as ReplayFrameDataset
         return t  # (n_stack, 1, H, W)
@@ -316,9 +329,10 @@ class CachedPretrainDataset(Dataset):
 
 
 class BCReplayDataset(Dataset):
-    """Dataset for BC: (frame stack, action_idx) from manifest.json on the fly.
+    """Dataset for BC: (frame stack, action_idx or action_indices) from manifest.json on the fly.
 
-    Uses _collect_bc_index from preprocess to build the index; loads frames when needed.
+    Uses _collect_bc_index from preprocess. When bc_time_offsets_ms has one offset, returns
+    (tensor, int); when multiple, returns (tensor, tensor of shape (n_offsets,)).
     """
 
     def __init__(
@@ -327,38 +341,57 @@ class BCReplayDataset(Dataset):
         track_ids: Optional[list[str]],
         size: int = 64,
         n_stack: int = 1,
+        bc_target: str = "current_tick",
+        bc_time_offsets_ms: Optional[list[int]] = None,
+        image_normalization: str = "01",
     ) -> None:
         from trackmania_rl.pretrain.preprocess import _collect_bc_index
 
         root = Path(root)
         if track_ids is None:
             track_ids = sorted(d.name for d in root.iterdir() if d.is_dir())
-        self._items = _collect_bc_index(root, track_ids, n_stack)
+        if bc_time_offsets_ms is None:
+            bc_time_offsets_ms = [0]
+        self._items = _collect_bc_index(root, track_ids, n_stack, bc_target, bc_time_offsets_ms)
         self._size = size
         self._n_stack = max(1, n_stack)
+        self._image_normalization = image_normalization
+        self._n_offsets = len(bc_time_offsets_ms)
 
     def __len__(self) -> int:
         return len(self._items)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
-        paths, action_idx = self._items[idx]
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int | torch.Tensor]:
+        paths, action_indices = self._items[idx]
         stack = [_load_one_frame(paths[i], self._size) for i in range(self._n_stack)]
         t = torch.stack(stack, dim=0)  # (n_stack, 1, H, W)
+        if self._image_normalization == "iqn":
+            t = (t - 0.5) / 0.5
         if self._n_stack == 1:
             t = t.squeeze(0)
-        return t, action_idx
+        if self._n_offsets == 1:
+            return t, action_indices[0]
+        return t, torch.tensor(action_indices, dtype=torch.long)
 
 
 class CachedBCDataset(Dataset):
-    """Dataset backed by BC cache: train.npy + train_actions.npy (or val)."""
+    """Dataset backed by BC cache: train.npy + train_actions.npy (or val).
+
+    Frames in cache are stored in [0, 1]. When image_normalization is "iqn",
+    we apply (x - 0.5) / 0.5 in __getitem__. Actions shape: (N,) for single offset
+    or (N, n_offsets) for multi-offset. When floats_path exists, returns
+    (img, float_inputs, action); else (img, action) for backward compat.
+    """
 
     def __init__(
         self,
         npy_path: Path,
         actions_path: Path,
+        floats_path: Optional[Path] = None,
         load_in_ram: bool = False,
         expected_image_size: Optional[int] = None,
         expected_n_stack: Optional[int] = None,
+        image_normalization: str = "01",
     ) -> None:
         npy_path = Path(npy_path)
         actions_path = Path(actions_path)
@@ -370,11 +403,23 @@ class CachedBCDataset(Dataset):
         mmap_mode = None if load_in_ram else "r"
         self._frames = np.load(str(npy_path), mmap_mode=mmap_mode)
         self._actions = np.load(str(actions_path), mmap_mode=mmap_mode)
+        self._floats: Optional[np.ndarray] = None
+        if floats_path is not None and floats_path.exists():
+            self._floats = np.load(str(floats_path), mmap_mode=mmap_mode)
+        self._image_normalization = image_normalization
 
         if self._frames.ndim != 5:
             raise ValueError(f"Expected 5-D frames (N, n_stack, 1, H, W), got {self._frames.shape}")
-        if self._actions.ndim != 1 or len(self._actions) != len(self._frames):
-            raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
+        if self._actions.ndim == 1:
+            if len(self._actions) != len(self._frames):
+                raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
+            self._n_offsets = 1
+        elif self._actions.ndim == 2:
+            if self._actions.shape[0] != len(self._frames):
+                raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
+            self._n_offsets = self._actions.shape[1]
+        else:
+            raise ValueError(f"Expected actions 1-D or 2-D, got {self._actions.shape}")
 
         _, self._n_stack, _, h, w = self._frames.shape
         if expected_n_stack is not None and self._n_stack != expected_n_stack:
@@ -387,12 +432,18 @@ class CachedBCDataset(Dataset):
     def __len__(self) -> int:
         return len(self._frames)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int | torch.Tensor] | tuple[torch.Tensor, torch.Tensor, int | torch.Tensor]:
         frame = np.array(self._frames[idx], dtype=np.float32)
         t = torch.from_numpy(frame)
+        if self._image_normalization == "iqn":
+            t = (t - 0.5) / 0.5
         if self._n_stack == 1:
             t = t.squeeze(0)
-        return t, int(self._actions[idx])
+        act = int(self._actions[idx]) if self._n_offsets == 1 else torch.from_numpy(self._actions[idx].astype(np.int64))
+        if self._floats is not None:
+            f = torch.from_numpy(np.array(self._floats[idx], dtype=np.float32))
+            return t, f, act
+        return t, act
 
     @property
     def n_stack(self) -> int:
@@ -401,6 +452,10 @@ class CachedBCDataset(Dataset):
     @property
     def image_size(self) -> int:
         return self._image_size
+
+    @property
+    def n_offsets(self) -> int:
+        return self._n_offsets
 
 
 class _EmptyBCDataset(Dataset):
@@ -458,6 +513,7 @@ if _LIGHTNING_AVAILABLE:
             val_fraction: float = 0.1,
             seed: int = 42,
             task: str = "ae",
+            image_normalization: str = "01",
         ) -> None:
             super().__init__()
             self.data_dir = Path(data_dir)
@@ -470,6 +526,7 @@ if _LIGHTNING_AVAILABLE:
             self.val_fraction = val_fraction
             self.seed = seed
             self.task = task
+            self.image_normalization = image_normalization
             self._train_ids: Optional[list[str]] = None
             self._val_ids: Optional[list[str]] = None
             self.n_train_samples: int = 0
@@ -485,17 +542,17 @@ if _LIGHTNING_AVAILABLE:
                 self._val_ids = None
 
             # Pre-compute sample counts for metadata
-            train_ds = ReplayFrameDataset(self.data_dir, self._train_ids, self.image_size, self.n_stack)
+            train_ds = ReplayFrameDataset(self.data_dir, self._train_ids, self.image_size, self.n_stack, self.image_normalization)
             self.n_train_samples = len(train_ds)
             if self._val_ids:
-                val_ds = ReplayFrameDataset(self.data_dir, self._val_ids, self.image_size, self.n_stack)
+                val_ds = ReplayFrameDataset(self.data_dir, self._val_ids, self.image_size, self.n_stack, self.image_normalization)
                 self.n_val_samples = len(val_ds)
             else:
                 self.n_val_samples = 0
 
         def train_dataloader(self) -> DataLoader:
             ds = ReplayFrameDataset(
-                self.data_dir, self._train_ids, self.image_size, self.n_stack
+                self.data_dir, self._train_ids, self.image_size, self.n_stack, self.image_normalization
             )
             return DataLoader(
                 ds,
@@ -511,9 +568,9 @@ if _LIGHTNING_AVAILABLE:
         def val_dataloader(self) -> DataLoader:
             if not self._val_ids:
                 # Return an empty dataset-backed loader so Lightning doesn't complain
-                empty = ReplayFrameDataset(self.data_dir, [], self.image_size, self.n_stack)
+                empty = ReplayFrameDataset(self.data_dir, [], self.image_size, self.n_stack, self.image_normalization)
                 return DataLoader(empty, batch_size=self.batch_size, num_workers=0)
-            ds = ReplayFrameDataset(self.data_dir, self._val_ids, self.image_size, self.n_stack)
+            ds = ReplayFrameDataset(self.data_dir, self._val_ids, self.image_size, self.n_stack, self.image_normalization)
             return DataLoader(
                 ds,
                 batch_size=self.batch_size,
@@ -574,6 +631,7 @@ if _LIGHTNING_AVAILABLE:
             load_in_ram: bool = False,
             expected_image_size: Optional[int] = None,
             expected_n_stack: Optional[int] = None,
+            image_normalization: str = "01",
         ) -> None:
             super().__init__()
             self.cache_dir = Path(cache_dir)
@@ -585,6 +643,7 @@ if _LIGHTNING_AVAILABLE:
             self.load_in_ram = load_in_ram
             self.expected_image_size = expected_image_size
             self.expected_n_stack = expected_n_stack
+            self.image_normalization = image_normalization
             self.n_train_samples: int = 0
             self.n_val_samples: int = 0
             self._has_val: bool = False
@@ -598,12 +657,13 @@ if _LIGHTNING_AVAILABLE:
                 load_in_ram=self.load_in_ram,
                 expected_image_size=self.expected_image_size,
                 expected_n_stack=self.expected_n_stack,
+                image_normalization=self.image_normalization,
             )
             self.n_train_samples = len(train_ds)
 
             val_path = self.cache_dir / CACHE_VAL_FILE
             self._has_val = val_path.exists() and len(
-                CachedPretrainDataset(val_path, load_in_ram=False)
+                CachedPretrainDataset(val_path, load_in_ram=False, image_normalization=self.image_normalization)
             ) > 0
             if self._has_val:
                 val_ds = CachedPretrainDataset(
@@ -611,6 +671,7 @@ if _LIGHTNING_AVAILABLE:
                     load_in_ram=self.load_in_ram,
                     expected_image_size=self.expected_image_size,
                     expected_n_stack=self.expected_n_stack,
+                    image_normalization=self.image_normalization,
                 )
                 self.n_val_samples = len(val_ds)
 
@@ -624,6 +685,7 @@ if _LIGHTNING_AVAILABLE:
                 load_in_ram=self.load_in_ram,
                 expected_image_size=self.expected_image_size,
                 expected_n_stack=self.expected_n_stack,
+                image_normalization=self.image_normalization,
             )
 
         def train_dataloader(self) -> DataLoader:
@@ -686,13 +748,16 @@ if _LIGHTNING_AVAILABLE:
             load_in_ram: bool = False,
             expected_image_size: Optional[int] = None,
             expected_n_stack: Optional[int] = None,
+            image_normalization: str = "01",
         ) -> None:
             super().__init__()
             from trackmania_rl.pretrain.contract import (
                 CACHE_TRAIN_FILE,
                 CACHE_TRAIN_ACTIONS_FILE,
+                CACHE_TRAIN_FLOATS_FILE,
                 CACHE_VAL_FILE,
                 CACHE_VAL_ACTIONS_FILE,
+                CACHE_VAL_FLOATS_FILE,
             )
             self.cache_dir = Path(cache_dir)
             self.batch_size = batch_size
@@ -702,6 +767,7 @@ if _LIGHTNING_AVAILABLE:
             self.load_in_ram = load_in_ram
             self.expected_image_size = expected_image_size
             self.expected_n_stack = expected_n_stack
+            self.image_normalization = image_normalization
             self._train_file = CACHE_TRAIN_FILE
             self._train_actions_file = CACHE_TRAIN_ACTIONS_FILE
             self._val_file = CACHE_VAL_FILE
@@ -709,14 +775,39 @@ if _LIGHTNING_AVAILABLE:
             self.n_train_samples: int = 0
             self.n_val_samples: int = 0
             self._has_val: bool = False
+            self._floats_path_train: Optional[Path] = None
+            self._floats_path_val: Optional[Path] = None
+            self.bc_time_offsets_ms: list[int] = [0]
+            self.bc_offset_weights: Optional[list[float]] = None
+            self.n_offsets: int = 1
 
         def setup(self, stage: Optional[str] = None) -> None:
+            import json
+            meta_path = self.cache_dir / "cache_meta.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path, encoding="utf-8") as fh:
+                        meta = json.load(fh)
+                    self.bc_time_offsets_ms = meta.get("bc_time_offsets_ms", [0])
+                    self.bc_offset_weights = meta.get("bc_offset_weights")
+                    self.n_offsets = len(self.bc_time_offsets_ms)
+                    if meta.get("has_floats"):
+                        tp = self.cache_dir / CACHE_TRAIN_FLOATS_FILE
+                        vp = self.cache_dir / CACHE_VAL_FLOATS_FILE
+                        if tp.exists():
+                            self._floats_path_train = tp
+                        if vp.exists():
+                            self._floats_path_val = vp
+                except (OSError, json.JSONDecodeError):
+                    pass
             train_ds = CachedBCDataset(
                 self.cache_dir / self._train_file,
                 self.cache_dir / self._train_actions_file,
+                floats_path=self._floats_path_train,
                 load_in_ram=self.load_in_ram,
                 expected_image_size=self.expected_image_size,
                 expected_n_stack=self.expected_n_stack,
+                image_normalization=self.image_normalization,
             )
             self.n_train_samples = len(train_ds)
             val_frames = self.cache_dir / self._val_file
@@ -726,9 +817,11 @@ if _LIGHTNING_AVAILABLE:
                 val_ds = CachedBCDataset(
                     val_frames,
                     val_actions,
+                    floats_path=self._floats_path_val,
                     load_in_ram=self.load_in_ram,
                     expected_image_size=self.expected_image_size,
                     expected_n_stack=self.expected_n_stack,
+                    image_normalization=self.image_normalization,
                 )
                 self.n_val_samples = len(val_ds)
 
@@ -736,9 +829,11 @@ if _LIGHTNING_AVAILABLE:
             ds = CachedBCDataset(
                 self.cache_dir / self._train_file,
                 self.cache_dir / self._train_actions_file,
+                floats_path=self._floats_path_train,
                 load_in_ram=self.load_in_ram,
                 expected_image_size=self.expected_image_size,
                 expected_n_stack=self.expected_n_stack,
+                image_normalization=self.image_normalization,
             )
             return DataLoader(
                 ds,
@@ -758,9 +853,11 @@ if _LIGHTNING_AVAILABLE:
             ds = CachedBCDataset(
                 self.cache_dir / self._val_file,
                 self.cache_dir / self._val_actions_file,
+                floats_path=self._floats_path_val,
                 load_in_ram=self.load_in_ram,
                 expected_image_size=self.expected_image_size,
                 expected_n_stack=self.expected_n_stack,
+                image_normalization=self.image_normalization,
             )
             return DataLoader(
                 ds,
@@ -790,6 +887,10 @@ if _LIGHTNING_AVAILABLE:
             prefetch_factor: int = 2,
             val_fraction: float = 0.1,
             seed: int = 42,
+            bc_target: str = "current_tick",
+            bc_time_offsets_ms: Optional[list[int]] = None,
+            bc_offset_weights: Optional[list[float]] = None,
+            image_normalization: str = "01",
         ) -> None:
             super().__init__()
             self.data_dir = Path(data_dir)
@@ -801,6 +902,11 @@ if _LIGHTNING_AVAILABLE:
             self.prefetch_factor = prefetch_factor
             self.val_fraction = val_fraction
             self.seed = seed
+            self.bc_target = bc_target
+            self.bc_time_offsets_ms = bc_time_offsets_ms if bc_time_offsets_ms is not None else [0]
+            self.bc_offset_weights = bc_offset_weights
+            self.n_offsets = len(self.bc_time_offsets_ms)
+            self.image_normalization = image_normalization
             self._train_ids: Optional[list[str]] = None
             self._val_ids: Optional[list[str]] = None
             self.n_train_samples: int = 0
@@ -815,12 +921,16 @@ if _LIGHTNING_AVAILABLE:
                 self._train_ids = sorted(d.name for d in self.data_dir.iterdir() if d.is_dir())
                 self._val_ids = []
             train_ds = BCReplayDataset(
-                self.data_dir, self._train_ids, size=self.image_size, n_stack=self.n_stack
+                self.data_dir, self._train_ids, size=self.image_size, n_stack=self.n_stack,
+                bc_target=self.bc_target, bc_time_offsets_ms=self.bc_time_offsets_ms,
+                image_normalization=self.image_normalization,
             )
             self.n_train_samples = len(train_ds)
             if self._val_ids:
                 val_ds = BCReplayDataset(
-                    self.data_dir, self._val_ids, size=self.image_size, n_stack=self.n_stack
+                    self.data_dir, self._val_ids, size=self.image_size, n_stack=self.n_stack,
+                    bc_target=self.bc_target, bc_time_offsets_ms=self.bc_time_offsets_ms,
+                    image_normalization=self.image_normalization,
                 )
                 self.n_val_samples = len(val_ds)
             else:
@@ -828,7 +938,9 @@ if _LIGHTNING_AVAILABLE:
 
         def train_dataloader(self) -> DataLoader:
             ds = BCReplayDataset(
-                self.data_dir, self._train_ids, size=self.image_size, n_stack=self.n_stack
+                self.data_dir, self._train_ids, size=self.image_size, n_stack=self.n_stack,
+                bc_target=self.bc_target, bc_time_offsets_ms=self.bc_time_offsets_ms,
+                image_normalization=self.image_normalization,
             )
             return DataLoader(
                 ds,
@@ -843,10 +955,16 @@ if _LIGHTNING_AVAILABLE:
 
         def val_dataloader(self) -> DataLoader:
             if not self._val_ids:
-                empty = BCReplayDataset(self.data_dir, [], size=self.image_size, n_stack=self.n_stack)
+                empty = BCReplayDataset(
+                    self.data_dir, [], size=self.image_size, n_stack=self.n_stack,
+                    bc_target=self.bc_target, bc_time_offsets_ms=self.bc_time_offsets_ms,
+                    image_normalization=self.image_normalization,
+                )
                 return DataLoader(empty, batch_size=self.batch_size, num_workers=0)
             ds = BCReplayDataset(
-                self.data_dir, self._val_ids, size=self.image_size, n_stack=self.n_stack
+                self.data_dir, self._val_ids, size=self.image_size, n_stack=self.n_stack,
+                bc_target=self.bc_target, bc_time_offsets_ms=self.bc_time_offsets_ms,
+                image_normalization=self.image_normalization,
             )
             return DataLoader(
                 ds,

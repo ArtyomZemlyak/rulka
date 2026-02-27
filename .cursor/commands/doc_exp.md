@@ -177,7 +177,7 @@ python scripts/analyze_experiment.py uni_5 uni_7 uni_8 uni_9
 
 Read the relevant configs to document parameter changes:
 
-- ``config_files/config_default.yaml`` (or the YAML used for the run): ``training`` section (batch_size, learning rates, schedules), ``performance`` (running_speed, gpu_collectors_count), ``environment`` (if env params changed), ``neural_network`` (if architecture changed)  
+- ``config_files/rl/config_default.yaml`` (or the YAML used for the run): ``training`` section (batch_size, learning rates, schedules), ``performance`` (running_speed, gpu_collectors_count), ``environment`` (if env params changed), ``neural_network`` (if architecture changed)  
 
 ---
 

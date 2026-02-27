@@ -35,6 +35,36 @@ from trackmania_rl.buffer_utilities import make_buffers, resize_buffers
 from trackmania_rl.map_reference_times import reference_times
 
 
+def _get_frozen_param_prefixes():
+    """Return parameter name prefixes to freeze (e.g. 'img_head.') from config _freeze flags."""
+    cfg = get_config()
+    prefixes = []
+    if getattr(cfg, "pretrain_encoder_freeze", False):
+        prefixes.append("img_head.")
+    if getattr(cfg, "pretrain_float_head_freeze", False):
+        prefixes.append("float_feature_extractor.")
+    if getattr(cfg, "pretrain_iqn_fc_freeze", False):
+        prefixes.append("iqn_fc.")
+    if getattr(cfg, "pretrain_actions_head_freeze", False):
+        prefixes.append("A_head.")
+    if getattr(cfg, "pretrain_V_head_freeze", False):
+        prefixes.append("V_head.")
+    return prefixes
+
+
+def _apply_pretrain_freeze(network):
+    """Set requires_grad=False for parameters whose name starts with a frozen prefix."""
+    prefixes = _get_frozen_param_prefixes()
+    if not prefixes:
+        return
+    for name, param in network.named_parameters():
+        if any(name.startswith(p) for p in prefixes):
+            param.requires_grad = False
+    frozen_count = sum(1 for n, p in network.named_parameters() if not p.requires_grad)
+    if frozen_count:
+        print(f"[OK] Pretrain freeze: {frozen_count} parameter tensors frozen (prefixes: {prefixes})")
+
+
 def learner_process_fn(
     rollout_queues,
     uncompiled_shared_network,
@@ -151,6 +181,9 @@ def learner_process_fn(
     except:
         print("[INFO] Starting with fresh weights (no checkpoint found)")
 
+    _apply_pretrain_freeze(online_network)
+    _apply_pretrain_freeze(target_network)
+
     with shared_network_lock:
         uncompiled_shared_network.load_state_dict(uncompiled_online_network.state_dict())
 
@@ -172,7 +205,7 @@ def learner_process_fn(
     single_reset_flag = get_config().single_reset_flag
 
     optimizer1 = torch.optim.RAdam(
-        online_network.parameters(),
+        [p for p in online_network.parameters() if p.requires_grad],
         lr=utilities.from_exponential_schedule(get_config().lr_schedule, accumulated_stats["cumul_number_frames_played"]),
         eps=get_config().adam_epsilon,
         betas=(get_config().adam_beta1, get_config().adam_beta2),
@@ -191,8 +224,8 @@ def learner_process_fn(
         optimizer1.load_state_dict(torch.load(f=save_dir / "optimizer1.torch", weights_only=False))
         scaler.load_state_dict(torch.load(f=save_dir / "scaler.torch", weights_only=False))
         print("[OK] Optimizer loaded")
-    except:
-        print("[INFO] Starting with fresh optimizer")
+    except Exception:
+        print("[INFO] Starting with fresh optimizer (or checkpoint was saved with different trainable params, e.g. freeze config)")
 
     tensorboard_suffix = utilities.from_staircase_schedule(
         get_config().tensorboard_suffix_schedule,
@@ -507,29 +540,35 @@ def learner_process_fn(
                 accumulated_stats["cumul_number_single_memories_should_have_been_used"] += get_config().additional_transition_after_reset
 
                 _, untrained_iqn_network = make_untrained_iqn_network(get_config().use_jit, False)
-                utilities.soft_copy_param(online_network, untrained_iqn_network, get_config().overall_reset_mul_factor)
+                frozen_prefixes = _get_frozen_param_prefixes()
+                utilities.soft_copy_param(
+                    online_network, untrained_iqn_network, get_config().overall_reset_mul_factor,
+                    skip_key_prefixes=frozen_prefixes,
+                )
 
                 with torch.no_grad():
-                    online_network.A_head[2].weight = utilities.linear_combination(
-                        online_network.A_head[2].weight,
-                        untrained_iqn_network.A_head[2].weight,
-                        get_config().last_layer_reset_factor,
-                    )
-                    online_network.A_head[2].bias = utilities.linear_combination(
-                        online_network.A_head[2].bias,
-                        untrained_iqn_network.A_head[2].bias,
-                        get_config().last_layer_reset_factor,
-                    )
-                    online_network.V_head[2].weight = utilities.linear_combination(
-                        online_network.V_head[2].weight,
-                        untrained_iqn_network.V_head[2].weight,
-                        get_config().last_layer_reset_factor,
-                    )
-                    online_network.V_head[2].bias = utilities.linear_combination(
-                        online_network.V_head[2].bias,
-                        untrained_iqn_network.V_head[2].bias,
-                        get_config().last_layer_reset_factor,
-                    )
+                    if not get_config().pretrain_actions_head_freeze:
+                        online_network.A_head[2].weight = utilities.linear_combination(
+                            online_network.A_head[2].weight,
+                            untrained_iqn_network.A_head[2].weight,
+                            get_config().last_layer_reset_factor,
+                        )
+                        online_network.A_head[2].bias = utilities.linear_combination(
+                            online_network.A_head[2].bias,
+                            untrained_iqn_network.A_head[2].bias,
+                            get_config().last_layer_reset_factor,
+                        )
+                    if not get_config().pretrain_V_head_freeze:
+                        online_network.V_head[2].weight = utilities.linear_combination(
+                            online_network.V_head[2].weight,
+                            untrained_iqn_network.V_head[2].weight,
+                            get_config().last_layer_reset_factor,
+                        )
+                        online_network.V_head[2].bias = utilities.linear_combination(
+                            online_network.V_head[2].bias,
+                            untrained_iqn_network.V_head[2].bias,
+                            get_config().last_layer_reset_factor,
+                        )
 
             # ===============================================
             #   LEARN ON BATCH
@@ -570,7 +609,7 @@ def learner_process_fn(
                     accumulated_stats["cumul_number_batches_done"] += 1
                     # Removed noisy training batch log - use TensorBoard for detailed metrics
 
-                    utilities.custom_weight_decay(online_network, 1 - weight_decay)
+                    utilities.custom_weight_decay(online_network, 1 - weight_decay, only_trainable=True)
                     if accumulated_stats["cumul_number_batches_done"] % get_config().send_shared_network_every_n_batches == 0:
                         with shared_network_lock:
                             uncompiled_shared_network.load_state_dict(uncompiled_online_network.state_dict())
@@ -739,12 +778,11 @@ def learner_process_fn(
                 )
             assert len(optimizer1.param_groups) == 1
             try:
-                # Log optimizer state (Adam/RAdam specific)
-                for p, (name, _) in zip(
-                    optimizer1.param_groups[0]["params"],
-                    online_network.named_parameters(),
-                ):
-                    state = optimizer1.state[p]
+                # Log optimizer state (Adam/RAdam specific); only params that are in the optimizer (trainable)
+                for name, param in online_network.named_parameters():
+                    if not param.requires_grad or param not in optimizer1.state:
+                        continue
+                    state = optimizer1.state[param]
                     exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                     mod_lr = 1 / (exp_avg_sq.sqrt() + 1e-4)
                     tensorboard_writer.add_scalar(

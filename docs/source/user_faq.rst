@@ -130,7 +130,7 @@ A: Checkpoints are saved automatically in ``save/{run_name}/``. To resume:
 
 1. Ensure ``.torch`` files exist in ``save/{run_name}/``
 2. Keep the same ``run_name`` in the ``training`` section of your config
-3. Run ``python scripts/train.py --config config_files/config_default.yaml``
+3. Run ``python scripts/train.py --config config_files/rl/config_default.yaml``
 
 Training will load the checkpoint automatically.
 

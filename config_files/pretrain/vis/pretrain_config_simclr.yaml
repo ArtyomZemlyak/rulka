@@ -1,12 +1,12 @@
 # =============================================================================
 # Level 0 visual pretraining configuration
-# config_files/pretrain_config.yaml
+# config_files/pretrain/vis/pretrain_config.yaml
 #
 # All values here are defaults.  Override priority (highest first):
 #   1. CLI arguments   (scripts/pretrain_visual_backbone.py)
 #   2. Env vars        PRETRAIN_<FIELD>  e.g.  PRETRAIN_TASK=simclr
 #                      Nested fields:   PRETRAIN_LIGHTNING__PATIENCE=5
-#   3. This file       (pretrain_config.yaml)
+#   3. This file       (config_files/pretrain/vis/pretrain_config_simclr.yaml)
 #
 # Schema and validation: config_files/pretrain_schema.py
 # Artifact contract   : trackmania_rl/pretrain/contract.py
@@ -91,7 +91,7 @@ framework: lightning
 # ---------------------------------------------------------------------------
 
 # Square input resolution in pixels.
-# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_default.yaml.
+# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_files/rl/config_default.yaml.
 image_size: 64
 
 # Number of consecutive frames per sample.  1 = single frame (recommended default).

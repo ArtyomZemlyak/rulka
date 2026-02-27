@@ -54,7 +54,7 @@ Run the following command:
 Edit the configuration file
 ---------------------------
 
-Configuration is loaded from a YAML file. To train on a new map, edit the config YAML (e.g. ``config_files/config_default.yaml``):
+Configuration is loaded from a YAML file. To train on a new map, edit the config YAML (e.g. ``config_files/rl/config_default.yaml``):
 
 **1. Edit the map_cycle section**
 

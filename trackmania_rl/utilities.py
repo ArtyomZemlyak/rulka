@@ -68,11 +68,16 @@ def linear_combination(a, b, alpha):
 
 
 # From https://github.com/pfnet/pfrl/blob/2ad3d51a7a971f3fe7f2711f024be11642990d61/pfrl/utils/copy_param.py#L37
-def soft_copy_param(target_link, source_link, tau):
-    """Soft-copy parameters of a link to another link."""
+def soft_copy_param(target_link, source_link, tau, skip_key_prefixes=None):
+    """Soft-copy parameters of a link to another link.
+    If skip_key_prefixes is provided (iterable of str), keys starting with any prefix are skipped.
+    """
     target_dict = target_link.state_dict()
     source_dict = source_link.state_dict()
+    skip_prefixes = tuple(skip_key_prefixes or [])
     for k, target_value in target_dict.items():
+        if any(k.startswith(prefix) for prefix in skip_prefixes):
+            continue
         source_value = source_dict[k]
         if source_value.dtype in [torch.float32, torch.float64, torch.float16]:
             linear_combination(target_value, source_value, tau)
@@ -83,10 +88,16 @@ def soft_copy_param(target_link, source_link, tau):
             assert False, "Soft scalar update should not happen"
 
 
-def custom_weight_decay(target_link, decay_factor):
-    target_dict = target_link.state_dict()
-    for k, target_value in target_dict.items():
-        target_value.mul_(decay_factor)
+def custom_weight_decay(target_link, decay_factor, only_trainable=False):
+    """Apply decay_factor to parameters. If only_trainable=True, skip parameters with requires_grad=False."""
+    if only_trainable:
+        for p in target_link.parameters():
+            if p.requires_grad:
+                p.data.mul_(decay_factor)
+    else:
+        target_dict = target_link.state_dict()
+        for k, target_value in target_dict.items():
+            target_value.mul_(decay_factor)
 
 
 def from_exponential_schedule(schedule: List[Tuple[int, float]], current_step: int):

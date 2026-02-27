@@ -23,7 +23,7 @@ The ``config_files/`` folder holds configuration loaded from **YAML** at startup
 
 **Core Files:**
 
-    - ``config_default.yaml``: Default configuration (versioned). Use ``scripts/train.py --config config_files/config_default.yaml``. You can add more YAML files (e.g. ``config_uni18.yaml``) and pass them with ``--config``.
+    - ``config_default.yaml``: Default configuration (versioned). Use ``scripts/train.py --config config_files/rl/config_default.yaml``. You can add more YAML files (e.g. ``config_uni18.yaml``) in ``config_files/rl/`` and pass them with ``--config``.
     - ``config_loader.py``: Loads YAML, validates with Pydantic, and exposes ``load_config(path)``, ``get_config()``, and ``set_config(cfg)``. Config is loaded once per process and cached; there is no hot-reload.
     - ``config_schema.py``: Pydantic models for all config sections (environment, neural_network, training, memory, exploration, rewards, map_cycle, performance, state_normalization, user from ``.env``).
 

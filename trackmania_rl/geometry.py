@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import List
 
@@ -31,9 +33,15 @@ def fraction_time_spent_in_current_zone(
     return max(0, min(1, si))
 
 
-def extract_cp_distance_interval(raw_position_list: List, target_distance_between_cp_m: float, base_dir: Path):
+def extract_cp_distance_interval(
+    raw_position_list: List,
+    target_distance_between_cp_m: float,
+    base_dir: Path,
+    out_path: Path | None = None,
+):
     """
     :param raw_position_list:               a list of 3D coordinates.
+    :param out_path:                        optional; when set, save zone centers here instead of base_dir/maps/map.npy.
 
     This function saves on disk a 2D numpy array of shape (N, 3) with the following properties.
     - The first point of the array is raw_position_list[0]
@@ -66,5 +74,7 @@ def extract_cp_distance_interval(raw_position_list: List, target_distance_betwee
             (2 * raw_position_list[-1] - zone_centers[-1])[None, :],
         )
     )
-    np.save(base_dir / "maps" / "map.npy", np.array(zone_centers).round(4))
+    save_path = out_path if out_path is not None else base_dir / "maps" / "map.npy"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(save_path, np.array(zone_centers).round(4))
     return zone_centers

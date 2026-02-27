@@ -105,9 +105,18 @@ CACHE_VALIDATION_FIELDS = (
 #   val_actions.npy     — (N_val,) int64. Absent when val_fraction == 0.
 #   cache_meta.json     — same fields as Level 0 plus:
 #     n_actions         (int): number of action classes (must match BCPretrainConfig.n_actions)
+#     bc_target         (str): "current_tick" | "next_tick" (current_tick = MDP π(a_t|s_t); next_tick = π(a_{t+1}|s_t); default "current_tick" if missing)
+#     bc_time_offsets_ms (list[int]): time offsets in ms from last frame; one head per offset. Missing or [0] = single head.
+#     bc_offset_weights  (list[float] | null): optional loss weight per offset; same length as bc_time_offsets_ms.
+#
+# train_actions.npy: shape (N_train,) when single offset, else (N_train, n_offsets). Same for val_actions.npy.
+#
+# train_floats.npy / val_floats.npy: optional. When manifest has "meta" (race state snapshots),
+# build_bc_cache produces (N, float_input_dim) float32 arrays. cache_meta.json gets
+# has_floats: true and float_input_dim. Row order matches train.npy / train_actions.npy.
 #
 # Validation: is_bc_cache_valid() checks source_data_dir, image_size, n_stack,
-# val_fraction, seed, source_signature, and n_actions.
+# val_fraction, seed, source_signature, n_actions, and bc_target.
 #
 # Reusing Level 0 cache: You can use the SAME directory for both Level 0 and
 # BC. Build Level 0 first (build_cache → train.npy, val.npy, cache_meta.json).
@@ -118,4 +127,6 @@ CACHE_VALIDATION_FIELDS = (
 
 CACHE_TRAIN_ACTIONS_FILE = "train_actions.npy"
 CACHE_VAL_ACTIONS_FILE = "val_actions.npy"
-BC_CACHE_VALIDATION_FIELDS = CACHE_VALIDATION_FIELDS + ("n_actions",)
+CACHE_TRAIN_FLOATS_FILE = "train_floats.npy"
+CACHE_VAL_FLOATS_FILE = "val_floats.npy"
+BC_CACHE_VALIDATION_FIELDS = CACHE_VALIDATION_FIELDS + ("n_actions", "bc_time_offsets_ms")

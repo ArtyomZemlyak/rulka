@@ -1,0 +1,66 @@
+# =============================================================================
+# Level 1 BC pretraining — full IQN-aligned chain (v2)
+# config_files/pretrain/bc/pretrain_config_bc_v2.yaml
+#
+# Uses visual backbone from vis/v2 (trained WITH IQN normalization).
+# BC also uses image_normalization: "iqn" — full alignment vis → BC → IQN.
+#
+# Run after vis v2: python scripts/pretrain_visual_backbone.py --config config_files/pretrain/vis/pretrain_config_vis_iqn.yaml
+# Then: python scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v2.yaml
+# =============================================================================
+
+data_dir: maps/img
+output_dir: output/ptretrain/bc
+run_name: v2
+
+preprocess_cache_dir: cache/v0
+cache_load_in_ram: true
+cache_build_workers: 4
+
+image_size: 64
+n_stack: 1
+image_normalization: "iqn"
+
+bc_mode: backbone
+bc_target: current_tick
+# Level 0 encoder trained WITH IQN normalization (vis v2).
+encoder_init_path: "output/ptretrain/vis/v2/encoder.pt"
+
+use_floats: false
+float_hidden_dim: 256
+save_float_head: true
+n_actions: 12
+
+batch_size: 4096
+epochs: 50
+lr: 0.0005
+grad_clip: 1.0
+
+workers: 4
+pin_memory: true
+prefetch_factor: 4
+
+val_fraction: 0.1
+seed: 42
+
+use_tqdm: true
+
+lightning:
+  tensorboard: true
+  tensorboard_dir: tensorboard
+  csv_logger: true
+  csv_dir: csv
+  checkpoint_dir: checkpoints
+  save_top_k: 1
+  checkpoint_monitor: auto
+  early_stopping: false
+  patience: 10
+  min_delta: 0.0
+  accelerator: auto
+  precision: auto
+  devices: null
+  log_every_n_steps: 50
+  deterministic: false
+  enable_model_summary: true
+  profiler: null
+  float32_matmul_precision: medium

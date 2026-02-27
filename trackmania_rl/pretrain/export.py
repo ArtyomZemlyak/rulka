@@ -333,6 +333,183 @@ def inject_encoder_into_iqn(
 
 
 # ---------------------------------------------------------------------------
+# BC full IQN injection (all parts from iqn_bc.pt: img_head, float_feature_extractor, iqn_fc, A_head, V_head)
+# ---------------------------------------------------------------------------
+
+def inject_bc_heads_into_iqn(
+    bc_heads_path: Path,
+    save_dir: Path,
+    *,
+    overwrite: bool = False,
+) -> bool:
+    """Load full IQN state from BC artifact into IQN checkpoints.
+
+    ``bc_heads_path`` can be a directory containing ``iqn_bc.pt`` (from BC run with
+    use_full_iqn) or a direct path to ``iqn_bc.pt``. All keys present in both the
+    BC state dict and the IQN checkpoints are copied (img_head, float_feature_extractor,
+    iqn_fc, A_head, V_head). Keys missing in the checkpoint or with shape mismatch
+    are skipped.
+    If weights do not exist yet, a fresh IQN pair is created first (e.g. after
+    encoder injection), then the BC state is merged in.
+
+    Parameters
+    ----------
+    bc_heads_path:
+        Path to BC run directory (must contain iqn_bc.pt) or path to iqn_bc.pt.
+    save_dir:
+        Directory with weights1.torch / weights2.torch (or where to write them).
+    overwrite:
+        Unused; kept for API compatibility.
+
+    Returns
+    -------
+    bool
+        True if injection was performed, False if no keys were copied.
+    """
+    bc_heads_path = Path(bc_heads_path)
+    if bc_heads_path.is_dir():
+        iqn_bc_pt = bc_heads_path / "iqn_bc.pt"
+    else:
+        iqn_bc_pt = bc_heads_path
+    if not iqn_bc_pt.exists():
+        raise FileNotFoundError(
+            f"BC artifact not found: {iqn_bc_pt}  "
+            "(use_full_iqn BC run produces iqn_bc.pt in the run directory)."
+        )
+
+    w1 = save_dir / "weights1.torch"
+    w2 = save_dir / "weights2.torch"
+    if not w1.exists() or not w2.exists():
+        log.info(
+            "No existing IQN weights in %s; creating fresh pair before BC state injection.",
+            save_dir,
+        )
+        from trackmania_rl.agents.iqn import make_untrained_iqn_network
+        online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+        target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(online.state_dict(), w1)
+        torch.save(target.state_dict(), w2)
+
+    bc_sd = torch.load(iqn_bc_pt, map_location="cpu", weights_only=True)
+    online_sd = torch.load(w1, map_location="cpu", weights_only=True)
+    target_sd = torch.load(w2, map_location="cpu", weights_only=True)
+
+    copied = 0
+    for key in bc_sd:
+        if key in online_sd and online_sd[key].shape == bc_sd[key].shape:
+            online_sd[key] = bc_sd[key].clone()
+            target_sd[key] = bc_sd[key].clone()
+            copied += 1
+        elif key not in online_sd:
+            log.debug("Key %s not in IQN checkpoint; skipping.", key)
+        else:
+            log.warning("Key %s shape mismatch in IQN; skipping.", key)
+
+    if copied == 0:
+        log.warning("No keys from %s matched IQN checkpoint; skipping BC state injection.", iqn_bc_pt)
+        return False
+
+    log.info(
+        "Loaded BC full IQN state from %s  (%d tensors: img_head, float_feature_extractor, iqn_fc, A_head, V_head).",
+        iqn_bc_pt,
+        copied,
+    )
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(online_sd, w1)
+    torch.save(target_sd, w2)
+    log.info(
+        "[PRETRAIN] Injected BC full IQN state into %s  (weights1.torch, weights2.torch).",
+        save_dir,
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Piecewise injection: float_head.pt -> float_feature_extractor, actions_head.pt -> A_head
+# ---------------------------------------------------------------------------
+
+def _resolve_head_path(path: Path, filename: str) -> Path:
+    """Return path to file; if path is a directory, append filename."""
+    path = Path(path)
+    if path.is_dir():
+        return path / filename
+    return path
+
+
+def inject_float_head_into_iqn(float_head_path: Path, save_dir: Path) -> bool:
+    """Load BC float_head.pt and merge into IQN float_feature_extractor in checkpoints.
+
+    float_head_path can be a directory containing float_head.pt or path to float_head.pt.
+    Keys from the state dict are prefixed with \"float_feature_extractor.\" and merged
+    into weights1.torch / weights2.torch. Requires existing checkpoints (e.g. after encoder injection).
+    """
+    pt = _resolve_head_path(float_head_path, "float_head.pt")
+    if not pt.exists():
+        raise FileNotFoundError(f"float_head.pt not found: {pt}  (BC run with use_floats + save_float_head).")
+    w1 = save_dir / "weights1.torch"
+    w2 = save_dir / "weights2.torch"
+    if not w1.exists() or not w2.exists():
+        raise FileNotFoundError(f"Checkpoints not found in {save_dir}; run encoder injection first.")
+    head_sd = torch.load(pt, map_location="cpu", weights_only=True)
+    prefixed = {f"float_feature_extractor.{k}": v for k, v in head_sd.items()}
+    online_sd = torch.load(w1, map_location="cpu", weights_only=True)
+    target_sd = torch.load(w2, map_location="cpu", weights_only=True)
+    copied = 0
+    for key in prefixed:
+        if key in online_sd and online_sd[key].shape == prefixed[key].shape:
+            online_sd[key] = prefixed[key].clone()
+            target_sd[key] = prefixed[key].clone()
+            copied += 1
+    if copied == 0:
+        log.warning("No float_feature_extractor keys matched; skipping float head injection.")
+        return False
+    save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(online_sd, w1)
+    torch.save(target_sd, w2)
+    log.info("[PRETRAIN] Injected float_feature_extractor from %s  (%d tensors).", pt, copied)
+    return True
+
+
+def inject_actions_head_into_iqn(actions_head_path: Path, save_dir: Path) -> bool:
+    """Load BC actions_head.pt and merge into IQN A_head in checkpoints.
+
+    actions_head_path can be a directory containing actions_head.pt or path to actions_head.pt.
+    BC actions head (use_actions_head) has same layout as IQN A_head; keys are prefixed with \"A_head.\".
+    When the file was saved with merge_actions_head True, it contains {\"offset_0\": ..., \"offset_1\": ...};
+    offset_0 is used for injection. Requires existing checkpoints (e.g. after encoder injection).
+    """
+    pt = _resolve_head_path(actions_head_path, "actions_head.pt")
+    if not pt.exists():
+        raise FileNotFoundError(f"actions_head.pt not found: {pt}  (BC run with use_actions_head + save_actions_head).")
+    w1 = save_dir / "weights1.torch"
+    w2 = save_dir / "weights2.torch"
+    if not w1.exists() or not w2.exists():
+        raise FileNotFoundError(f"Checkpoints not found in {save_dir}; run encoder injection first.")
+    head_sd = torch.load(pt, map_location="cpu", weights_only=True)
+    if isinstance(head_sd, dict) and "offset_0" in head_sd:
+        head_sd = head_sd["offset_0"]
+    prefixed = {f"A_head.{k}": v for k, v in head_sd.items()}
+    online_sd = torch.load(w1, map_location="cpu", weights_only=True)
+    target_sd = torch.load(w2, map_location="cpu", weights_only=True)
+    copied = 0
+    for key in prefixed:
+        if key in online_sd and online_sd[key].shape == prefixed[key].shape:
+            online_sd[key] = prefixed[key].clone()
+            target_sd[key] = prefixed[key].clone()
+            copied += 1
+    if copied == 0:
+        log.warning("No A_head keys matched; skipping actions head injection.")
+        return False
+    save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(online_sd, w1)
+    torch.save(target_sd, w2)
+    log.info("[PRETRAIN] Injected A_head from %s  (%d tensors).", pt, copied)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Load encoder into BC network (for encoder_init_path)
 # ---------------------------------------------------------------------------
 

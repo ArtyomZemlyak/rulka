@@ -1,14 +1,14 @@
 """
 Unsupervised pretraining of the visual backbone (IQN img_head–compatible CNN) on frames.
 
-Configuration is loaded from ``config_files/pretrain_config.yaml`` via pydantic-settings
+Configuration is loaded from ``config_files/pretrain/vis/pretrain_config.yaml`` via pydantic-settings
 (``PretrainConfig``).  CLI arguments override YAML values; env vars (``PRETRAIN_*``) sit
 between the YAML and CLI in priority.
 
 Priority (highest first):
   1. CLI arguments   (this script)
   2. PRETRAIN_*      env vars  (e.g.  set PRETRAIN_TASK=simclr)
-  3. pretrain_config.yaml      (project-level defaults in config_files/)
+  3. config_files/pretrain/vis/pretrain_config.yaml (project-level defaults)
   4. Field defaults  (in PretrainConfig schema)
 
 Tasks: ae (autoencoder), vae (variational AE), simclr (contrastive).
@@ -64,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=(
             "Unsupervised pretrain visual backbone (IQN img_head-compatible). "
-            "Defaults come from config_files/pretrain_config.yaml."
+            "Defaults come from config_files/pretrain/vis/pretrain_config.yaml."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -72,7 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- Config file ---
     ap.add_argument(
         "--config", type=Path, default=None, metavar="YAML",
-        help="Path to a YAML config file.  If given, it fully replaces pretrain_config.yaml "
+        help="Path to a YAML config file.  If given, it fully replaces config_files/pretrain/vis/pretrain_config.yaml "
              "(all CLI overrides still apply on top).",
     )
 
@@ -99,6 +99,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--image-size", type=int, default=None, dest="image_size",
                     metavar="PX",
                     help="Square input resolution (must match IQN config).")
+    ap.add_argument("--image-normalization", type=str, default=None, dest="image_normalization",
+                    choices=["01", "iqn"],
+                    help="01 = [0,1]; iqn = (x-0.5)/0.5 for IQN/BC transfer (default from config).")
 
     # --- Training ---
     ap.add_argument("--epochs", type=int, default=None)
@@ -165,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # --- Lightning settings (override pretrain_config.yaml lightning: section) ---
+    # --- Lightning settings (override config_files/pretrain/vis/pretrain_config.yaml lightning: section) ---
     lg = ap.add_argument_group(
         "Lightning settings",
         "Applied only when --framework lightning.  "
@@ -218,20 +221,20 @@ def main() -> None:
     # 1. Load base config (YAML → env vars → field defaults)
     # -----------------------------------------------------------------------
     if args.config:
-        # Custom YAML replaces pretrain_config.yaml entirely
+        # Custom YAML replaces config_files/pretrain/vis/pretrain_config.yaml entirely
         base_cfg = load_pretrain_config(args.config)
         log.info("Loaded config from %s", args.config)
     else:
-        # Default: reads config_files/pretrain_config.yaml + PRETRAIN_* env vars
+        # Default: reads config_files/pretrain/vis/pretrain_config.yaml + PRETRAIN_* env vars
         base_cfg = PretrainConfig()
-        log.info("Loaded config from config_files/pretrain_config.yaml")
+        log.info("Loaded config from config_files/pretrain/vis/pretrain_config.yaml")
 
     # -----------------------------------------------------------------------
     # 2. Collect explicit CLI overrides (None = "not set on CLI")
     # -----------------------------------------------------------------------
     overrides: dict = {}
     for field in (
-        "data_dir", "output_dir", "run_name", "task", "framework", "image_size",
+        "data_dir", "output_dir", "run_name", "task", "framework", "image_size", "image_normalization",
         "epochs", "batch_size", "lr", "workers", "grad_clip",
         "vae_latent", "proj_dim", "temperature", "n_stack", "stack_mode",
         "val_fraction", "seed", "kl_weight",

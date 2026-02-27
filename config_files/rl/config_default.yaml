@@ -1,5 +1,5 @@
 # Rulka default configuration
-# Use: python scripts/train.py --config config_files/config_default.yaml
+# Use: python scripts/train.py --config config_files/rl/config_default.yaml
 
 environment:
   tm_engine_step_per_action: 5
@@ -47,7 +47,7 @@ neural_network:
   use_jit: true
 
 training:
-  run_name: "A01_as20_long_vis_bc_pretrained"
+  run_name: "A01_as20_long_engineer_rewards"
   batch_size: 512
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -55,7 +55,8 @@ training:
   weight_decay_lr_ratio: 0.1
   global_schedule_speed: 1
   lr_schedule:
-    - [0, 0.001]
+    # - [0, 0.00005]  # no
+    - [0, 0.001]  # - [0, 0.001] 
     - [3000000, 0.00005]
     - [12000000, 0.00005]
     - [15000000, 0.00001]
@@ -87,7 +88,27 @@ training:
   #            is skipped to preserve training progress.
   # Example:
   #   pretrain_encoder_path: "output/ptretrain/vis/run_001/encoder.pt"
-  pretrain_encoder_path: "output/ptretrain/bc/v1.1/encoder.pt"
+  # pretrain_encoder_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/encoder.pt"
+
+  # BC full IQN state from BC run with use_full_iqn (iqn_bc.pt).
+  # Path: BC run directory containing iqn_bc.pt, or path to iqn_bc.pt.
+  # Loads img_head, float_feature_extractor, iqn_fc, A_head, V_head. Applied after encoder injection on fresh run.
+  #   pretrain_bc_heads_path: "output/ptretrain/bc/v2_full_iqn"
+  pretrain_bc_heads_path: null
+
+  # Piecewise: load only float_feature_extractor or A_head from BC run (use_floats+save_float_head / use_actions_head+save_actions_head).
+  # Path: BC run directory (with float_head.pt / actions_head.pt) or path to the .pt file. Requires existing checkpoints (e.g. after encoder injection).
+  #   pretrain_float_head_path: "output/ptretrain/bc/v2"
+  pretrain_float_head_path: null
+  #   pretrain_actions_head_path: "output/ptretrain/bc/v2"
+  # pretrain_actions_head_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/actions_head.pt"
+
+  # Freeze pretrain parts during RL (default: false).
+  pretrain_encoder_freeze: false
+  pretrain_float_head_freeze: false
+  pretrain_iqn_fc_freeze: false
+  pretrain_actions_head_freeze: false
+  pretrain_V_head_freeze: false
 
 memory:
   memory_size_schedule:
@@ -120,10 +141,11 @@ rewards:
   engineered_reward_min_dist_to_cur_vcp: 5
   engineered_reward_max_dist_to_cur_vcp: 25
   shaped_reward_point_to_vcp_ahead: 0
-  engineered_speedslide_reward_schedule: [[0, 0]]
-  engineered_neoslide_reward_schedule: [[0, 0]]
-  engineered_kamikaze_reward_schedule: [[0, 0]]
-  engineered_close_to_vcp_reward_schedule: [[0, 0]]
+  # Small bonuses/penalties throughout training ([[frames, value]] — constant from start)
+  engineered_speedslide_reward_schedule: [[0, 0.01]]
+  engineered_neoslide_reward_schedule: [[0, 0.01]]
+  engineered_kamikaze_reward_schedule: [[0, 0.0]]
+  engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
   final_speed_reward_as_if_duration_s: 0
 
 map_cycle:

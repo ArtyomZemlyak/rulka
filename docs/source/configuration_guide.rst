@@ -29,14 +29,14 @@ To run training with a specific config:
 
 .. code-block:: bash
 
-   python scripts/train.py --config config_files/config_default.yaml
+   python scripts/train.py --config config_files/rl/config_default.yaml
 
 You can version configs with separate YAML files (e.g. ``config_uni18.yaml``) and pass the path with ``--config``. User-specific settings (paths, usernames) are read from a ``.env`` file in the project root. Config is loaded once per process and cached; there is no hot-reload.
 
 Configuration Structure (YAML)
 ==============================
 
-The default YAML (``config_files/config_default.yaml``) is organized into sections that correspond to the former Python modules:
+The default YAML (``config_files/rl/config_default.yaml``) is organized into sections that correspond to the former Python modules:
 
 1. **environment** - Environment and simulation
 2. **neural_network** - Network architecture

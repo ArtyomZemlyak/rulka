@@ -13,3 +13,11 @@ Use that file for:
 - One-topic-per-file rule (e.g. training_speed.rst for batch/speed/collectors)
 
 Do not duplicate or override those instructions here.
+
+---
+
+**For running new experiments (config, run, analyze, document):**
+
+**.cursor/commands/run_exp.md**
+
+Use that file when you run a new experiment: new config only (no editing existing configs), always use .venv, mandatory full analysis comparing all relevant runs, and doc updates. See run_exp.md for the full checklist and BC pretrain commands.

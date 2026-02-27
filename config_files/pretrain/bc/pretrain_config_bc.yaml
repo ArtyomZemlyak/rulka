@@ -1,6 +1,6 @@
 # =============================================================================
 # Level 1 BC (behavioral cloning) pretraining configuration
-# config_files/pretrain_config_bc.yaml
+# config_files/pretrain/bc/pretrain_config_bc.yaml
 #
 # Override priority (highest first):
 #   1. CLI arguments   (scripts/pretrain_bc.py)
@@ -23,7 +23,7 @@ data_dir: maps/img
 output_dir: output/ptretrain/bc
 
 # Subdirectory name for this run. null = auto-increment run_001, run_002, ...
-run_name: v1.1
+run_name: v1.2
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,11 @@ image_size: 64
 # Number of consecutive frames per sample (1 = single frame).
 n_stack: 1
 
+# Normalization of image inputs:
+#   "01"  — [0, 1] (current default; pretrain cache stores /255).
+#   "iqn" — (x - 128) / 128 to match IQN at transfer (better alignment when loading encoder into img_head).
+image_normalization: "iqn"
+
 
 # ---------------------------------------------------------------------------
 # BC mode and encoder init
@@ -61,9 +66,52 @@ n_stack: 1
 #   auxiliary_head — separate BC head as auxiliary signal in IQN
 bc_mode: backbone
 
+# BC target: which action to predict for the frame window.
+#   current_tick — action at the last frame of the window (MDP-aligned: observe s_t → output a_t; what we press now).
+#   next_tick    — action at the next timestep (observe s_t → output a_{t+1}; one-step-ahead, e.g. for delay).
+# With next_tick the last frame of each replay has no "next" action and is dropped.
+bc_target: current_tick
+
+# Multi-offset BC: predict action at several time offsets (ms) from last frame. Engine step ≥10ms.
+# [0] = single head (current tick only). Example: [-10, 0, 10, 100] = past, current (MDP), near future, farther.
+# bc_time_offsets_ms: [-10, 0, 10, 100]
+# bc_offset_weights: [0.2, 1.0, 0.5, 0.3]  # optional; default all 1.0. Same length as bc_time_offsets_ms.
+
 # Path to Level 0 encoder.pt to initialize BC CNN. null = train from scratch.
 encoder_init_path: "output/ptretrain/vis/v1/encoder.pt"
+
+# Use float (scalar) state features in BC; requires float data in cache and float_input_dim set.
 use_floats: false
+
+# When use_floats is true: length of float state vector (must match RL float_input_dim).
+# Copy from config_files/rl/config_default.yaml state_normalization or from env-derived config.
+# float_input_dim: null
+
+# Output dimension of BC float head; must match RL neural_network.float_hidden_dim for IQN transfer.
+float_hidden_dim: 256
+
+# Normalization of float inputs (same as RL state_normalization). Length must equal float_input_dim.
+# float_inputs_mean: []   # e.g. from state_normalization in RL config
+# float_inputs_std: []    # e.g. from state_normalization in RL config
+
+# When use_floats is true: save float head weights for future injection into IQN float_feature_extractor.
+save_float_head: true
+
+# Actions head: same layout as IQN A_head (two-layer MLP) for transfer into RL.
+# use_actions_head: true → action head = Linear(concat_dim, dense_hidden_dimension//2) -> LeakyReLU -> Linear(..., n_actions).
+use_actions_head: false
+# When use_actions_head true: save action head as actions_head.pt for RL A_head injection.
+save_actions_head: true
+# dense_hidden_dimension used when use_actions_head or use_full_iqn; must match RL neural_network.dense_hidden_dimension.
+dense_hidden_dimension: 1024
+
+# Full IQN in BC (both off by default).
+# use_full_iqn: true → train full IQN (img_head + float_feature_extractor + iqn_fc + A_head + V_head) for 1:1 RL transfer; requires use_floats and float_input_dim.
+use_full_iqn: false
+# When use_full_iqn true: true = sample tau ~ U(0,1) per batch; false = fixed tau=0.5.
+full_iqn_random_tau: false
+# When use_full_iqn true: must match RL config (neural_network).
+# iqn_embedding_dimension: 128
 
 # Must match len(config.inputs) in RL config (e.g. 12).
 n_actions: 12

@@ -8,7 +8,7 @@ writes the full "actions" list (one action index per physics step) in the manife
 
 Usage:
   python scripts/backfill_manifest_actions.py --data-dir maps/img --replays-dir maps/replays
-  python scripts/backfill_manifest_actions.py --data-dir maps/img --replays-dir maps/replays --config config_files/config_default.yaml --step-ms 10
+  python scripts/backfill_manifest_actions.py --data-dir maps/img --replays-dir maps/replays --config config_files/rl/config_default.yaml --step-ms 10
   python scripts/backfill_manifest_actions.py --data-dir maps/img --replays-dir maps/replays --dry-run
 """
 
@@ -53,7 +53,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s:%(name)s:%(message)s")
 
-    config_path = args.config or (_script_root / "config_files" / "config_default.yaml")
+    config_path = args.config or (_script_root / "config_files" / "rl" / "config_default.yaml")
     if not config_path.exists():
         log.error("Config not found: %s", config_path)
         sys.exit(1)

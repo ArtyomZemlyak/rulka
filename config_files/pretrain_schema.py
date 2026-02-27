@@ -8,7 +8,7 @@ Configuration is loaded from (highest priority first):
                            (nested lightning config).  Examples:
                              PRETRAIN_TASK=simclr
                              PRETRAIN_LIGHTNING__PATIENCE=5
-  3. pretrain_config.yaml — persisted defaults in config_files/
+  3. pretrain_config.yaml — persisted defaults in config_files/pretrain/vis/
 
 Examples
 --------
@@ -44,7 +44,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
-_DEFAULT_CONFIG_PATH = Path(__file__).parent / "pretrain_config.yaml"
+_DEFAULT_CONFIG_PATH = Path(__file__).parent / "pretrain" / "vis" / "pretrain_config.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ class PretrainConfig(BaseSettings):
 
       Constructor kwargs  → env vars (PRETRAIN_*)  → pretrain_config.yaml  → field defaults
 
-    The ``pretrain_config.yaml`` file lives in ``config_files/`` and is always
+    The ``pretrain_config.yaml`` file lives in ``config_files/pretrain/vis/`` and is always
     resolved relative to that directory (independent of working directory).
     """
 
@@ -311,6 +311,10 @@ class PretrainConfig(BaseSettings):
     image_size: int = Field(
         default=64, ge=16, le=512,
         description="Square input resolution. Must match IQN w_downsized / h_downsized.",
+    )
+    image_normalization: Literal["01", "iqn"] = Field(
+        default="01",
+        description="01 = [0,1] (default); iqn = (x-0.5)/0.5 for IQN/BC transfer alignment.",
     )
     n_stack: int = Field(default=1, ge=1, le=32, description="Consecutive frames per sample.")
     stack_mode: Literal["channel", "concat"] = Field(

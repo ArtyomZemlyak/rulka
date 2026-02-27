@@ -10,7 +10,7 @@ and writes a pre-processed cache to ``--output-dir``:
     cache_meta.json  — parameters + source fingerprint for cache validation
 
 The cache can then be used by setting ``preprocess_cache_dir`` in
-``config_files/pretrain_config.yaml`` (or via ``--preprocess-cache-dir`` on
+``config_files/pretrain/vis/pretrain_config.yaml`` (or via ``--preprocess-cache-dir`` on
 the pretrain script).
 
 Training will **automatically** build the cache when ``preprocess_cache_dir``
@@ -34,7 +34,7 @@ Any mismatch causes a rebuild.
 
 Usage examples
 --------------
-# Minimal: defaults match pretrain_config.yaml defaults.
+# Minimal: defaults match config_files/pretrain/vis/pretrain_config.yaml defaults.
 python scripts/prepare_pretrain_data.py \\
     --data-dir maps/img --output-dir cache/pretrain_64
 
@@ -164,7 +164,7 @@ def main() -> None:
     )
 
     log.info(
-        "Done.  Set  preprocess_cache_dir: %s  in pretrain_config.yaml "
+        "Done.  Set  preprocess_cache_dir: %s  in config_files/pretrain/vis/pretrain_config.yaml "
         "to use this cache for training.",
         output_dir,
     )

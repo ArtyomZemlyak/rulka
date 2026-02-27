@@ -54,7 +54,7 @@ Coding Guidelines
 **Testing:**
 
 - Test changes before committing
-- Verify configuration loads: ``python -c "from config_files.config_loader import load_config; load_config('config_files/config_default.yaml')"``
+- Verify configuration loads: ``python -c "from config_files.config_loader import load_config; load_config('config_files/rl/config_default.yaml')"``
 - For algorithmic changes, provide multiple training runs demonstrating improvements
 
 Documentation

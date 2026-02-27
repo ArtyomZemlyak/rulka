@@ -1,7 +1,7 @@
 """
 Level 0 visual pretraining — unified entry point.
 
-Configuration is loaded from ``config_files/pretrain_config.yaml`` via
+Configuration is loaded from ``config_files/pretrain/vis/pretrain_config.yaml`` via
 ``PretrainConfig`` (pydantic-settings).  CLI overrides, env vars (``PRETRAIN_*``),
 and programmatic construction all have higher priority than the YAML file.
 
@@ -11,7 +11,7 @@ Usage
     from trackmania_rl.pretrain import train_pretrain
     from pathlib import Path
 
-    # Defaults from pretrain_config.yaml:
+    # Defaults from config_files/pretrain/vis/pretrain_config.yaml:
     cfg = PretrainConfig()
 
     # Override specific fields:
@@ -134,6 +134,7 @@ def _make_encoder_and_loader(
             load_in_ram=cfg.cache_load_in_ram,
             expected_image_size=cfg.image_size,
             expected_n_stack=cfg.n_stack,
+            image_normalization=cfg.image_normalization,
         )
         if len(ds) == 0:
             raise RuntimeError(f"Cached train.npy is empty: {cache_dir / CACHE_TRAIN_FILE}")
@@ -146,7 +147,7 @@ def _make_encoder_and_loader(
         # Raw image tree path (original behaviour).
         if cfg.val_fraction > 0:
             train_ids, _ = split_track_ids(cfg.data_dir, cfg.val_fraction, cfg.seed)
-            ds = ReplayFrameDataset(cfg.data_dir, track_ids=train_ids, size=cfg.image_size, n_stack=cfg.n_stack)
+            ds = ReplayFrameDataset(cfg.data_dir, track_ids=train_ids, size=cfg.image_size, n_stack=cfg.n_stack, image_normalization=cfg.image_normalization)
         else:
             ds = FlatFrameDataset(cfg.data_dir, size=cfg.image_size, n_stack=cfg.n_stack)
 
@@ -554,6 +555,7 @@ def _train_lightning(
             load_in_ram=cfg.cache_load_in_ram,
             expected_image_size=cfg.image_size,
             expected_n_stack=cfg.n_stack,
+            image_normalization=cfg.image_normalization,
         )
     else:
         data_module = ReplayFrameDataModule(
@@ -567,6 +569,7 @@ def _train_lightning(
             val_fraction=cfg.val_fraction,
             seed=cfg.seed,
             task=cfg.task,
+            image_normalization=cfg.image_normalization,
         )
     data_module.setup()
 
@@ -744,6 +747,7 @@ def _build_meta(
         "task": cfg.task,
         "framework": cfg.framework,
         "image_size": cfg.image_size,
+        "image_normalization": cfg.image_normalization,
         "n_stack": cfg.n_stack,
         "stack_mode": cfg.stack_mode,
         "in_channels": in_channels,
