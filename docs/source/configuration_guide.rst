@@ -503,6 +503,8 @@ Input Dimensions
    
    **Current**: 27 + 120 + 20 + 16 + 1 = 184 features
 
+   For a detailed mapping of each segment to game data (SimStateData) and a list of **game fields we do not use**, see :doc:`game_inputs_and_float_vector`.
+
 State Normalization (float_inputs_mean / float_inputs_std)
 ---------------------------------------------------------
 
@@ -1243,20 +1245,108 @@ Base Rewards
    - Time: 10s → Time penalty: -12
    - Net: Must drive efficiently for positive reward
 
+.. py:data:: final_speed_reward_as_if_duration_s
+   :type: float
+   :value: 0
+
+   **Bonus reward for gaining speed** (scale as "virtual duration in seconds")
+   
+   When > 0, each transition gets an extra reward proportional to the **increase in
+   speed** (norm of velocity): ``reward += final_speed_reward_per_m_per_s * (speed_now - speed_prev)``.
+   The coefficient ``final_speed_reward_per_m_per_s`` is computed as
+   ``reward_per_m_advanced_along_centerline * final_speed_reward_as_if_duration_s``, so
+   gaining 1 m/s is valued the same as advancing ``final_speed_reward_as_if_duration_s``
+   meters along the centerline.
+   
+   **Purpose:** Encourage acceleration and maintaining high speed, not only covering
+   distance. Useful if the agent under-exploits speed on straights.
+   
+   - **0** (default): No speed bonus; only progress and time penalty.
+   - **e.g. 2**: Each m/s gained gives the same reward as 2 m of progress. Tune
+     together with ``reward_per_m_advanced_along_centerline``.
+
 Shaped Rewards
 --------------
 
-Currently all shaped and engineered rewards are **disabled** (set to 0).
+Potential-based shaping (distance to current VCP and direction toward next). Uses
+``shaped_reward_*`` and clamps distance with min/max. Currently **disabled** (0) by default.
 
-This creates a clean reward structure: **"go fast, go forward"**
+.. py:data:: shaped_reward_dist_to_cur_vcp
+   :type: float
+   :value: -0.1
 
-Avoids reward hacking and unintended behaviors from complex shaping.
+   Coefficient for potential based on distance to current checkpoint (VCP). Negative
+   encourages getting closer. Used with ``shaped_reward_min_dist_to_cur_vcp`` and
+   ``shaped_reward_max_dist_to_cur_vcp`` for clamping.
+
+.. py:data:: shaped_reward_min_dist_to_cur_vcp
+   :type: float
+   :value: 2
+
+   Minimum distance (m) to current VCP in the potential; distance is clamped to
+   [min, max] before multiplying by ``shaped_reward_dist_to_cur_vcp``.
+
+.. py:data:: shaped_reward_max_dist_to_cur_vcp
+   :type: float
+   :value: 25
+
+   Maximum distance (m) to current VCP in the potential (see above).
+
+.. py:data:: shaped_reward_point_to_vcp_ahead
+   :type: float
+   :value: 0
+
+   Coefficient for potential term that rewards pointing toward the next VCP (forward
+   component of direction). 0 = disabled.
+
+Engineered rewards (technique bonuses, schedule by frame count). All use schedules
+``[[step, value], ...]`` and are **disabled** (0) by default.
+
+.. py:data:: engineered_reward_min_dist_to_cur_vcp
+   :type: float
+   :value: 5
+
+   Lower bound (m) for "close to VCP" engineered reward; distance clamped to
+   [min, max].
+
+.. py:data:: engineered_reward_max_dist_to_cur_vcp
+   :type: float
+   :value: 25
+
+   Upper bound (m) for "close to VCP" engineered reward (see above).
+
+.. py:data:: engineered_speedslide_reward_schedule
+   :type: list
+   :value: [[0, 0]]
+
+   Schedule of reward per step for good speedslide (sliding) on tarmac. Format:
+   ``[[frame_step, coefficient], ...]``.
+
+.. py:data:: engineered_neoslide_reward_schedule
+   :type: list
+   :value: [[0, 0]]
+
+   Schedule of reward when lateral speed is high (≥2 m/s), encouraging neoslide-style
+   drifts.
+
+.. py:data:: engineered_kamikaze_reward_schedule
+   :type: list
+   :value: [[0, 0.0]]
+
+   Schedule of reward for "kamikaze" behavior (e.g. gas without steering in air or
+   when wheels not all grounded).
+
+.. py:data:: engineered_close_to_vcp_reward_schedule
+   :type: list
+   :value: [[0, 0.0]]
+
+   Schedule of reward for being close to current VCP (distance clamped by
+   ``engineered_reward_min_dist_to_cur_vcp`` / ``engineered_reward_max_dist_to_cur_vcp``).
 
 .. tip::
-   If learning is too slow, consider enabling:
-   
-   - ``shaped_reward_dist_to_cur_vcp`` for denser checkpoint guidance
-   - Engineered technique rewards (after basic driving is learned)
+   Default setup keeps a clean reward: **"go fast, go forward"**. If learning is too
+   slow, consider enabling ``shaped_reward_dist_to_cur_vcp`` for denser checkpoint
+   guidance, or engineered technique rewards after basic driving is learned.
 
 Map Cycle Configuration
 ========================
@@ -1318,6 +1408,54 @@ Parallelization
    - 16-core CPU: 8-16 collectors
    
    **Memory**: ~2GB RAM per instance
+
+.. py:data:: max_rollout_queue_size
+   :type: int
+   :value: 1
+
+   **Maximum size of the rollout queue per collector**
+   
+   Each collector process sends finished rollouts to the learner via a multiprocessing
+   ``Queue``. This option sets the maximum number of rollout results that can be
+   buffered in that queue per collector.
+   
+   **Behavior:**
+   
+   - **1** (default): Collector blocks after each rollout until the learner has taken
+     the result. Tight coupling: learner and collectors stay in sync; no extra memory
+     for queued rollouts.
+   - **> 1**: Collector can push several rollouts into the queue before blocking. If
+     the learner is temporarily slower, collectors can "get ahead" and reduce learner
+     idle time; if collectors are slower, the learner may drain the queue and then
+     wait.
+   
+   **When to increase:**
+   
+   - Learner is often waiting for rollouts (e.g. "Learner waited Xs for workers").
+   - You have many collectors and want to smooth short bursts of slow rollouts.
+   
+   **Trade-off:** Higher values use more memory (one queued item per collector per
+   slot) and can increase latency between policy updates and the data used for
+   training.
+   
+   **Effect on training speed:**
+   
+   - **1**: Learner and collectors are tightly coupled. If the learner is fast (e.g.
+     small batch, few collectors), it may often wait for the next rollout; if
+     collectors are fast, they may block on ``put()`` until the learner takes the
+     data. Throughput is limited by whoever is slower at that moment.
+   - **2–4**: Small buffer smooths short imbalances: a collector can push 2–4
+     rollouts while the learner is busy, so the learner has work ready when it
+     finishes a batch. Often gives a modest speedup (fewer "Learner waited for
+     workers" pauses) with little extra memory.
+   - **Large (e.g. 8+)**: More buffering can help only if the learner is
+     *consistently* faster than collection (e.g. many collectors, very fast
+     learner). Otherwise the queue rarely fills, and you mainly pay in memory and
+     slightly staler data.
+   
+   **Recommendation:** Keep **1** by default. If logs show the learner often
+   waiting several seconds for workers, try **2** or **4** and compare batches
+   per minute; going beyond 4 is rarely needed.
 
 .. py:data:: running_speed
    :type: int

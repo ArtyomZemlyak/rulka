@@ -23,5 +23,6 @@ Contents
    pretrain_visual_backbone
    pretrain_bc
    pretrain/index
+   iqn_no_image_head
    models/iqn_architecture
    models/iqn

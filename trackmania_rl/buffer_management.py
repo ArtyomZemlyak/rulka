@@ -49,127 +49,184 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     engineered_kamikaze_reward: float,
     engineered_close_to_vcp_reward: float,
 ):
+    import torch
+    
     cfg = get_config()
     assert len(rollout_results["frames"]) == len(rollout_results["current_zone_idx"])
     n_frames = len(rollout_results["frames"])
+    n_states = len(rollout_results["state_float"])
+    # Collector/TMI can produce off-by-one in edge cases (dummy frame, race end). Align all to same length.
+    required_keys = ("frames", "state_float", "current_zone_idx", "actions", "action_was_greedy", "meters_advanced_along_centerline")
+    n_align = min(len(rollout_results.get(k, [])) for k in required_keys if k in rollout_results)
+    n_frames = n_align
+    for key in required_keys:
+        if key in rollout_results and len(rollout_results[key]) > n_frames:
+            rollout_results[key] = rollout_results[key][:n_frames]
+    
+    if n_frames <= 1:
+        return buffer, buffer_test, 0, 0
 
     number_memories_added_train = 0
     number_memories_added_test = 0
+
+    # =========================================================================
+    # 1. Convert all inputs to PyTorch tensors for vectorized processing
+    # =========================================================================
+    # state_float: shape (N, D)
+    state_float = torch.tensor(np.stack(rollout_results["state_float"]), dtype=torch.float32)
+    # rollout_results["actions"] can sometimes contain floats or NaNs due to how TMI deals with invalid frames.
+    # Convert safely by passing it to float first, fixing NaNs, and then casting to integer
+    actions_raw = np.array(rollout_results["actions"], dtype=np.float32)
+    actions_raw[np.isnan(actions_raw) | np.isinf(actions_raw)] = 0
+    actions = torch.tensor(actions_raw, dtype=torch.int64)
+
+    action_was_greedy = torch.tensor(rollout_results["action_was_greedy"], dtype=torch.bool)
+    meters_advanced = torch.tensor(rollout_results["meters_advanced_along_centerline"], dtype=torch.float32)
+    race_time_finished = "race_time" in rollout_results
+    race_time = rollout_results.get("race_time", 0.0)
+
+    gammas_arr = (gamma ** np.linspace(1, n_steps_max, n_steps_max)).astype(np.float32)
+
+    # =========================================================================
+    # 2. Vectorized Step-by-Step Reward Calculation
+    # =========================================================================
+    n_states = state_float.shape[0]
+    # Align length: frames and state_float can differ by 1 (e.g. T+1 frames vs T states)
+    n_mid = min(n_frames - 2, n_states - 2)
+    if n_mid < 0:
+        n_mid = 0
+
+    rewards_into = torch.zeros(n_frames, dtype=torch.float32)
+    
+    # Base constant reward
+    rewards_into[1:-1] += cfg.constant_reward_per_ms * cfg.ms_per_action
+    if race_time_finished:
+        rewards_into[-1] += cfg.constant_reward_per_ms * (race_time - (n_frames - 2) * cfg.ms_per_action)
+    else:
+        rewards_into[-1] += cfg.constant_reward_per_ms * cfg.ms_per_action
+        
+    # Reward for meters advanced
+    rewards_into[1:] += (meters_advanced[1:] - meters_advanced[:-1]) * cfg.reward_per_m_advanced_along_centerline
+    
+    # Vectorized physics rewards (only applied to non-terminal frames: indices 1 to n_frames-2)
+    if n_mid > 0:
+        # V Forward diff
+        if cfg.final_speed_reward_per_m_per_s != 0:
+            vel_forward = state_float[1 : 1 + n_mid, 58]
+            vel_norm_curr = torch.linalg.norm(state_float[1 : 1 + n_mid, 56:59], dim=1)
+            vel_norm_prev = torch.linalg.norm(state_float[:n_mid, 56:59], dim=1)
+            fwd_mask = vel_forward > 0
+            rewards_into[1 : 1 + n_mid] += torch.where(fwd_mask, (vel_norm_curr - vel_norm_prev) * cfg.final_speed_reward_per_m_per_s, 0.0)
+
+        # Speedslide reward
+        if engineered_speedslide_reward != 0:
+            wheels_ground_mask = torch.all(state_float[1 : 1 + n_mid, 25:29] > 0, dim=1)
+            lat = state_float[1 : 1 + n_mid, 56]
+            fwd = state_float[1 : 1 + n_mid, 58]
+            
+            from trackmania_rl.reward_shaping import speedslide_quality_tarmac
+            ss_qualities = torch.tensor([
+                speedslide_quality_tarmac(l.item(), f.item())
+                for (l, f, mask) in zip(lat, fwd, wheels_ground_mask) if mask.item()
+            ], dtype=torch.float32)
+            
+            ss_rewards = torch.zeros(n_mid, dtype=torch.float32)
+            if len(ss_qualities) > 0:
+                ss_rewards[wheels_ground_mask] = engineered_speedslide_reward * torch.clamp(1.0 - torch.abs(ss_qualities - 1.0), min=0.0)
+            rewards_into[1 : 1 + n_mid] += ss_rewards
+
+        # Neoslide
+        if engineered_neoslide_reward != 0:
+            neo_mask = torch.abs(state_float[1 : 1 + n_mid, 56]) >= 2.0
+            rewards_into[1 : 1 + n_mid] += torch.where(neo_mask, engineered_neoslide_reward, 0.0)
+            
+        # Kamikaze
+        if engineered_kamikaze_reward != 0:
+            kamikaze_mask = (actions[1 : 1 + n_mid] <= 2) | (torch.sum(state_float[1 : 1 + n_mid, 25:29] > 0, dim=1) <= 1)
+            rewards_into[1 : 1 + n_mid] += torch.where(kamikaze_mask, engineered_kamikaze_reward, 0.0)
+
+        # Close to VCP
+        if engineered_close_to_vcp_reward != 0:
+            vcp_dist = torch.linalg.norm(state_float[1 : 1 + n_mid, 62:65], dim=1)
+            clamped_dist = torch.clamp(vcp_dist, min=cfg.engineered_reward_min_dist_to_cur_vcp, max=cfg.engineered_reward_max_dist_to_cur_vcp)
+            rewards_into[1 : 1 + n_mid] += engineered_close_to_vcp_reward * clamped_dist
+
+    # =========================================================================
+    # 3. Vectorized Potentials
+    # =========================================================================
+    vcp_to_vcp = state_float[:, 65:68] - state_float[:, 62:65]
+    vcp_to_vcp_norm = vcp_to_vcp / (torch.linalg.norm(vcp_to_vcp, dim=1, keepdim=True) + 1e-8)
+    dist_cur_vcp = torch.linalg.norm(state_float[:, 62:65], dim=1)
+    clamped_dist_potential = torch.clamp(dist_cur_vcp, min=cfg.shaped_reward_min_dist_to_cur_vcp, max=cfg.shaped_reward_max_dist_to_cur_vcp)
+    
+    potentials = (cfg.shaped_reward_dist_to_cur_vcp * clamped_dist_potential) + \
+                 (cfg.shaped_reward_point_to_vcp_ahead * (vcp_to_vcp_norm[:, 2] - 1.0))
+    if len(potentials) < n_frames:
+        potentials = torch.cat([potentials, torch.zeros(n_frames - len(potentials), dtype=torch.float32)])
+
+    # =========================================================================
+    # 4. Extracting Experiences
+    # =========================================================================
+    # Build transition buffers
+    ValidIdx = n_frames - 1
+    
     Experiences_For_Buffer = []
     Experiences_For_Buffer_Test = []
-    list_to_fill = Experiences_For_Buffer_Test if random.random() < cfg.buffer_test_ratio else Experiences_For_Buffer
 
-    gammas = (gamma ** np.linspace(1, n_steps_max, n_steps_max)).astype(
-        np.float32
-    )  # Discount factor that will be placed in front of next_step in Bellman equation, depending on n_steps chosen
+    # Optimization: Pre-compute N-step rewards for all starting indices
+    # We do a rolling sum discount. 
+    # Because n_frames can be thousands and n_steps_max is small (e.g. 5), a loop over n_steps_max is super fast
+    # Rewards_n_step_matrix initialized to max potential shape (ValidIdx, n_steps_max)
+    R_matrix = torch.zeros((n_frames, n_steps_max), dtype=torch.float32)
+    gamma_vec = gamma ** torch.arange(n_steps_max, dtype=torch.float32)
+    
+    # We want R_matrix[i, j] = reward_into[i + j + 1] (discounted later or sequentially accumulated)
+    # R_out[i, k] = sum_{j=0}^{k} (gamma**j) * reward_into[i+1+j]
+    padded_rewards = torch.cat([rewards_into, torch.zeros(n_steps_max, dtype=torch.float32)])
+    raw_step_rewards = torch.stack([padded_rewards[j+1 : j+1+n_frames] for j in range(n_steps_max)], dim=1) # (n_frames, n_steps_max)
+    raw_discounted = raw_step_rewards * gamma_vec.unsqueeze(0)
+    accum_discounted_rewards = torch.cumsum(raw_discounted, dim=1) # (n_frames, n_steps_max)
 
-    reward_into = np.zeros(n_frames)
-    for i in range(1, n_frames):
-        reward_into[i] += cfg.constant_reward_per_ms * (
-            cfg.ms_per_action
-            if (i < n_frames - 1 or ("race_time" not in rollout_results))
-            else rollout_results["race_time"] - (n_frames - 2) * cfg.ms_per_action
-        )
-        reward_into[i] += (
-            rollout_results["meters_advanced_along_centerline"][i] - rollout_results["meters_advanced_along_centerline"][i - 1]
-        ) * cfg.reward_per_m_advanced_along_centerline
-        if i < n_frames - 1:
-            if cfg.final_speed_reward_per_m_per_s != 0 and rollout_results["state_float"][i][58] > 0:
-                # car has velocity *forward*
-                reward_into[i] += cfg.final_speed_reward_per_m_per_s * (
-                    np.linalg.norm(rollout_results["state_float"][i][56:59]) - np.linalg.norm(rollout_results["state_float"][i - 1][56:59])
-                )
-            if engineered_speedslide_reward != 0 and np.all(rollout_results["state_float"][i][25:29]):
-                # all wheels touch the ground
-                reward_into[i] += engineered_speedslide_reward * max(
-                    0.0,
-                    1 - abs(speedslide_quality_tarmac(rollout_results["state_float"][i][56], rollout_results["state_float"][i][58]) - 1),
-                )  # TODO : indices 25:29, 56 and 58 are hardcoded, this is bad....
-
-            # lateral speed is higher than 2 meters per second
-            reward_into[i] += (
-                engineered_neoslide_reward if abs(rollout_results["state_float"][i][56]) >= 2.0 else 0
-            )  # TODO : 56 is hardcoded, this is bad....
-            # kamikaze reward
-            if (
-                engineered_kamikaze_reward != 0
-                and rollout_results["actions"][i] <= 2
-                or np.sum(rollout_results["state_float"][i][25:29]) <= 1
-            ):
-                reward_into[i] += engineered_kamikaze_reward
-            if engineered_close_to_vcp_reward != 0:
-                reward_into[i] += engineered_close_to_vcp_reward * max(
-                    cfg.engineered_reward_min_dist_to_cur_vcp,
-                    min(cfg.engineered_reward_max_dist_to_cur_vcp, np.linalg.norm(rollout_results["state_float"][i][62:65])),
-                )
-    for i in range(n_frames - 1):  # Loop over all frames that were generated
-        # Switch memory buffer sometimes
-        if random.random() < 0.1:
-            list_to_fill = Experiences_For_Buffer_Test if random.random() < cfg.buffer_test_ratio else Experiences_For_Buffer
-
+    for i in range(ValidIdx):
         n_steps = min(n_steps_max, n_frames - 1 - i)
+        
         if discard_non_greedy_actions_in_nsteps:
-            try:
-                first_non_greedy = rollout_results["action_was_greedy"][i + 1 : i + n_steps].index(False) + 1
-                n_steps = min(n_steps, first_non_greedy)
-            except ValueError:
-                pass
+            # Find first non-greedy in the window
+            window_greedy = action_was_greedy[(i + 1) : (i + n_steps)]
+            first_false_idx = (window_greedy == False).nonzero(as_tuple=True)[0]
+            if len(first_false_idx) > 0:
+                n_steps = min(n_steps, first_false_idx[0].item() + 1)
 
-        rewards = np.empty(n_steps_max).astype(np.float32)
-        for j in range(n_steps):
-            rewards[j] = (gamma**j) * reward_into[i + j + 1] + (rewards[j - 1] if j >= 1 else 0)
+        final_rewards = accum_discounted_rewards[i, :n_steps_max].numpy()
+        
+        terminal_actions = float((n_frames - 1) - i) if race_time_finished else math.inf
+        next_state_has_passed_finish = ((i + n_steps) == (n_frames - 1)) and race_time_finished
 
-        state_img = rollout_results["frames"][i]
-        state_float = rollout_results["state_float"][i]
-        state_potential = get_potential(
+        next_idx = i + n_steps if not next_state_has_passed_finish else i
+        
+        is_test = random.random() < cfg.buffer_test_ratio or random.random() < 0.1
+        list_to_fill = Experiences_For_Buffer_Test if is_test else Experiences_For_Buffer
+        
+        list_to_fill.append( Experience(
+            rollout_results["frames"][i],
             rollout_results["state_float"][i],
-            cfg.shaped_reward_dist_to_cur_vcp,
-            cfg.shaped_reward_min_dist_to_cur_vcp,
-            cfg.shaped_reward_max_dist_to_cur_vcp,
-            cfg.shaped_reward_point_to_vcp_ahead,
-        )
+            potentials[i].item(),
+            actions[i].item(),
+            n_steps,
+            final_rewards,
+            rollout_results["frames"][next_idx] if not next_state_has_passed_finish else rollout_results["frames"][i],
+            rollout_results["state_float"][next_idx] if not next_state_has_passed_finish else rollout_results["state_float"][i],
+            potentials[next_idx].item() if not next_state_has_passed_finish else 0.0,
+            gammas_arr,
+            terminal_actions,
+        ))
 
-        # Get action that was played
-        action = rollout_results["actions"][i]
-        terminal_actions = float((n_frames - 1) - i) if "race_time" in rollout_results else math.inf
-        next_state_has_passed_finish = ((i + n_steps) == (n_frames - 1)) and ("race_time" in rollout_results)
-
-        if not next_state_has_passed_finish:
-            next_state_img = rollout_results["frames"][i + n_steps]
-            next_state_float = rollout_results["state_float"][i + n_steps]
-            next_state_potential = get_potential(
-                rollout_results["state_float"][i + n_steps],
-                cfg.shaped_reward_dist_to_cur_vcp,
-                cfg.shaped_reward_min_dist_to_cur_vcp,
-                cfg.shaped_reward_max_dist_to_cur_vcp,
-                cfg.shaped_reward_point_to_vcp_ahead,
-            )
-        else:
-            # It doesn't matter what next_state_img and next_state_float contain, as the transition will be forced to be final
-            next_state_img = state_img
-            next_state_float = state_float
-            next_state_potential = 0
-
-        list_to_fill.append(
-            Experience(
-                state_img,
-                state_float,
-                state_potential,
-                action,
-                n_steps,
-                rewards,
-                next_state_img,
-                next_state_float,
-                next_state_potential,
-                gammas,
-                terminal_actions,
-            )
-        )
     number_memories_added_train += len(Experiences_For_Buffer)
     if len(Experiences_For_Buffer) > 1:
         buffer.extend(Experiences_For_Buffer)
     elif len(Experiences_For_Buffer) == 1:
         buffer.add(Experiences_For_Buffer[0])
+        
     number_memories_added_test += len(Experiences_For_Buffer_Test)
     if len(Experiences_For_Buffer_Test) > 1:
         buffer_test.extend(Experiences_For_Buffer_Test)
@@ -177,3 +234,4 @@ def fill_buffer_from_rollout_with_n_steps_rule(
         buffer_test.add(Experiences_For_Buffer_Test[0])
 
     return buffer, buffer_test, number_memories_added_train, number_memories_added_test
+

@@ -288,6 +288,11 @@ class PretrainConfig(BaseSettings):
             "Only has effect when the cache needs to be (re)built."
         ),
     )
+    # Path to RL config. image_size (w_downsized) is loaded from it.
+    rl_config_path: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent / "rl" / "config_default.yaml",
+        description="Path to RL config; image_size is loaded from neural_network.w_downsized.",
+    )
 
     # ---------- Task ----------
     task: Literal["ae", "vae", "simclr"] = Field(
@@ -308,10 +313,7 @@ class PretrainConfig(BaseSettings):
     )
 
     # ---------- Image / stacking ----------
-    image_size: int = Field(
-        default=64, ge=16, le=512,
-        description="Square input resolution. Must match IQN w_downsized / h_downsized.",
-    )
+    # image_size loaded from rl_config_path (neural_network.w_downsized).
     image_normalization: Literal["01", "iqn"] = Field(
         default="01",
         description="01 = [0,1] (default); iqn = (x-0.5)/0.5 for IQN/BC transfer alignment.",
@@ -393,6 +395,13 @@ class PretrainConfig(BaseSettings):
     @classmethod
     def _coerce_cache_dir(cls, v: Any) -> Optional[Path]:
         return None if v is None else Path(v)
+
+    @field_validator("rl_config_path", mode="before")
+    @classmethod
+    def _coerce_rl_config_path(cls, v: Any) -> Path:
+        if v is None:
+            return Path(__file__).resolve().parent / "rl" / "config_default.yaml"
+        return Path(v)
 
     @model_validator(mode="after")
     def _check_cross_constraints(self) -> "PretrainConfig":

@@ -69,22 +69,27 @@ class IQN_Network(torch.nn.Module):
         n_actions: int,
         float_inputs_mean: npt.NDArray,
         float_inputs_std: npt.NDArray,
+        use_image_head: bool = True,
     ):
         super().__init__()
         self.iqn_embedding_dimension = iqn_embedding_dimension
-        img_head_channels = [1, 16, 32, 64, 32]
+        self.use_image_head = use_image_head
         activation_function = torch.nn.LeakyReLU
-        self.img_head = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels=img_head_channels[0], out_channels=img_head_channels[1], kernel_size=(4, 4), stride=2),
-            activation_function(inplace=True),
-            torch.nn.Conv2d(in_channels=img_head_channels[1], out_channels=img_head_channels[2], kernel_size=(4, 4), stride=2),
-            activation_function(inplace=True),
-            torch.nn.Conv2d(in_channels=img_head_channels[2], out_channels=img_head_channels[3], kernel_size=(3, 3), stride=2),
-            activation_function(inplace=True),
-            torch.nn.Conv2d(in_channels=img_head_channels[3], out_channels=img_head_channels[4], kernel_size=(3, 3), stride=1),
-            activation_function(inplace=True),
-            torch.nn.Flatten(),
-        )
+        if use_image_head:
+            img_head_channels = [1, 16, 32, 64, 32]
+            self.img_head = torch.nn.Sequential(
+                torch.nn.Conv2d(in_channels=img_head_channels[0], out_channels=img_head_channels[1], kernel_size=(4, 4), stride=2),
+                activation_function(inplace=True),
+                torch.nn.Conv2d(in_channels=img_head_channels[1], out_channels=img_head_channels[2], kernel_size=(4, 4), stride=2),
+                activation_function(inplace=True),
+                torch.nn.Conv2d(in_channels=img_head_channels[2], out_channels=img_head_channels[3], kernel_size=(3, 3), stride=2),
+                activation_function(inplace=True),
+                torch.nn.Conv2d(in_channels=img_head_channels[3], out_channels=img_head_channels[4], kernel_size=(3, 3), stride=1),
+                activation_function(inplace=True),
+                torch.nn.Flatten(),
+            )
+        else:
+            self.img_head = None
         self.float_feature_extractor = torch.nn.Sequential(
             torch.nn.Linear(float_inputs_dim, float_hidden_dim),
             activation_function(inplace=True),
@@ -92,7 +97,7 @@ class IQN_Network(torch.nn.Module):
             activation_function(inplace=True),
         )
 
-        dense_input_dimension = conv_head_output_dim + float_hidden_dim
+        dense_input_dimension = (conv_head_output_dim if use_image_head else 0) + float_hidden_dim
 
         self.A_head = torch.nn.Sequential(
             torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
@@ -116,7 +121,10 @@ class IQN_Network(torch.nn.Module):
     def initialize_weights(self):
         lrelu_neg_slope = 1e-2
         activation_gain = torch.nn.init.calculate_gain("leaky_relu", lrelu_neg_slope)
-        for module in [self.img_head, self.float_feature_extractor, self.A_head[:-1], self.V_head[:-1]]:
+        modules_to_init = [self.float_feature_extractor, self.A_head[:-1], self.V_head[:-1]]
+        if self.img_head is not None:
+            modules_to_init.insert(0, self.img_head)
+        for module in modules_to_init:
             for m in module:
                 if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Linear):
                     utilities.init_orthogonal(m, activation_gain)
@@ -156,9 +164,12 @@ class IQN_Network(torch.nn.Module):
             tau: a torch.Tensor of shape (batch_size * num_quantiles, 1) representing the quantiles used to make each prediction
         """
         batch_size = img.shape[0]
-        img_outputs = self.img_head(img)
         float_outputs = self.float_feature_extractor((float_inputs - self.float_inputs_mean) / self.float_inputs_std)
-        concat = torch.cat((img_outputs, float_outputs), 1)  # (batch_size, dense_input_dimension)
+        if self.img_head is not None:
+            img_outputs = self.img_head(img)
+            concat = torch.cat((img_outputs, float_outputs), 1)  # (batch_size, dense_input_dimension)
+        else:
+            concat = float_outputs  # (batch_size, dense_input_dimension)
         if tau is None:
             tau = (
                 torch.arange(num_quantiles // 2, device="cuda", dtype=torch.float32).repeat_interleave(batch_size).unsqueeze(1)
@@ -191,7 +202,15 @@ class IQN_Network(torch.nn.Module):
         return self
 
 
-@torch.compile(disable=not get_config().is_linux, dynamic=False)
+# Decorator evaluated at import time; worker processes may not have config set — disable compile there.
+# torch.compile works on Windows since PyTorch 2.3+ (requires `pip install triton-windows` for CUDA).
+try:
+    _iqn_compile_disable = not get_config().use_jit
+except RuntimeError:
+    _iqn_compile_disable = True
+
+
+@torch.compile(disable=_iqn_compile_disable, dynamic=False)
 def iqn_loss(targets: torch.Tensor, outputs: torch.Tensor, tau_outputs: torch.Tensor, num_quantiles: int, batch_size: int):
     """
     Implements the IQN loss as defined in the IQN paper (https://arxiv.org/pdf/1806.06923)
@@ -249,31 +268,36 @@ class Trainer:
         self.typical_self_loss = 0.01
         self.typical_clamped_self_loss = 0.01
 
-    def train_on_batch(self, buffer: ReplayBuffer, do_learn: bool):
+    def sample_batch(self, buffer: ReplayBuffer):
         """
-        Implements one iteration of the training loop:
-            1) Sample a batch of transitions from the replay buffer
-            2) Calculate the IQN loss
-            3) Obtain gradients through backpropagation
-            4) Update the neural network weights using the optimizer
+        Phase A: Sample a batch from the replay buffer (CPU operation, needs buffer_lock).
 
-        The training loop may be configured to use DDQN-style updates with config.use_ddqn.
+        Returns:
+            batch: tuple of tensors (already on GPU via collate_fn)
+            batch_info: dict with sampling metadata (indices, weights)
+        """
+        return buffer.sample(self.batch_size, return_info=True)
+
+    def train_on_data(self, batch, batch_info, do_learn: bool):
+        """
+        Phase B: GPU compute — forward pass, loss, backward, optimizer step.
+        Does NOT touch the buffer. No lock needed.
 
         Args:
-            buffer: a ReplayBuffer object from which transitions are sampled. Currently, handles a basic buffer or a prioritized replay buffer.
-            do_learn: a boolean indicating whether steps 3 and 4 should be applied. If these are not applied, the method only returns total_loss, grad_norm, and grad_norm_before_clip for logging purposes.
+            batch: tuple from sample_batch (tensors already on GPU)
+            batch_info: dict from sample_batch
+            do_learn: whether to backprop and update weights
 
         Returns:
             total_loss: a float
-            grad_norm: a float (gradient norm after clipping)
-            grad_norm_before_clip: a float (gradient norm before clipping, for monitoring)
-
+            grad_norm: a float (after clipping)
+            grad_norm_before_clip: a float (before clipping)
+            priority_update: None or (indices, priorities) tuple for Phase C
         """
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             with torch.no_grad():
-                batch, batch_info = buffer.sample(self.batch_size, return_info=True)
                 (
                     state_img_tensor,
                     state_float_tensor,
@@ -288,7 +312,7 @@ class Trainer:
 
                 rewards = rewards.unsqueeze(-1).repeat(
                     [self.iqn_n, 1]
-                )  # (batch_size*iqn_n, 1)     a,b,c,d becomes a,b,c,d,a,b,c,d,a,b,c,d,... (iqn_n times)
+                )  # (batch_size*iqn_n, 1)
                 gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
                 actions = actions.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
                 #
@@ -381,17 +405,47 @@ class Trainer:
                 grad_norm_before_clip = 0
 
             total_loss = total_loss.detach().cpu()
+
+            # Compute priority update data (CPU tensors) but don't write to buffer yet
+            priority_update = None
             if get_config().prio_alpha > 0:
                 mask_update_priority = torch.lt(state_float_tensor[:, 0], get_config().min_horizon_to_update_priority_actions).detach().cpu()
-                # Only update the transition priority if the transition was sampled with a sufficiently long-term horizon.
-                buffer.update_priority(
-                    batch_info["index"][mask_update_priority],
+                priority_indices = batch_info["index"][mask_update_priority]
+                priority_values = (
                     (outputs_tau3.mean(axis=1) - outputs_target_tau2.mean(axis=1))
                     .abs()[mask_update_priority]
                     .detach()
                     .cpu()
-                    .type(torch.float64),
+                    .type(torch.float64)
                 )
+                priority_update = (priority_indices, priority_values)
+
+        return total_loss, grad_norm, grad_norm_before_clip, priority_update
+
+    @staticmethod
+    def apply_priority_update(buffer: ReplayBuffer, priority_update):
+        """
+        Phase C: Write priority updates back to the buffer (CPU operation, needs buffer_lock).
+
+        Args:
+            buffer: the replay buffer
+            priority_update: (indices, priorities) tuple from train_on_data, or None
+        """
+        if priority_update is not None:
+            indices, priorities = priority_update
+            buffer.update_priority(indices, priorities)
+
+    def train_on_batch(self, buffer: ReplayBuffer, do_learn: bool):
+        """
+        Backward-compatible wrapper that calls all three phases.
+        Use sample_batch + train_on_data + apply_priority_update for fine-grained locking.
+
+        Returns:
+            total_loss, grad_norm, grad_norm_before_clip
+        """
+        batch, batch_info = self.sample_batch(buffer)
+        total_loss, grad_norm, grad_norm_before_clip, priority_update = self.train_on_data(batch, batch_info, do_learn)
+        self.apply_priority_update(buffer, priority_update)
         return total_loss, grad_norm, grad_norm_before_clip
 
 
@@ -495,9 +549,13 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
     Args:
         jit: a boolean indicating whether compilation should be used
     """
-    # Calculate conv_head_output_dim dynamically based on image dimensions
-    # This is computed once at network creation time (during config loading), not during training
-    conv_head_output_dim = calculate_conv_output_dim(get_config().H_downsized, get_config().W_downsized)
+    use_image_head = get_config().use_iqn_image_head
+    # When image head is disabled, conv_head_output_dim is 0; otherwise compute from image size
+    conv_head_output_dim = (
+        calculate_conv_output_dim(get_config().H_downsized, get_config().W_downsized)
+        if use_image_head
+        else 0
+    )
 
     uncompiled_model = IQN_Network(
         float_inputs_dim=get_config().float_input_dim,
@@ -508,13 +566,21 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
         n_actions=len(get_config().inputs),
         float_inputs_mean=get_config().float_inputs_mean,
         float_inputs_std=get_config().float_inputs_std,
+        use_image_head=use_image_head,
     )
     if jit:
-        if get_config().is_linux:
-            compile_mode = None if "rocm" in torch.__version__ else ("max-autotune" if is_inference else "max-autotune-no-cudagraphs")
+        # torch.compile; multi-process stability is handled by warmup in main process + collector warmup under game_spawning_lock (see train.py, collector_process.py).
+
+        # On ROCm, compile_mode is set to None (max-autotune not supported).
+        compile_mode = None if "rocm" in torch.__version__ else ("max-autotune" if is_inference else "max-autotune-no-cudagraphs")
+        
+        try:
             model = torch.compile(uncompiled_model, dynamic=False, mode=compile_mode)
-        else:
-            model = torch.jit.script(uncompiled_model)
+            print(f"[OK] torch.compile enabled (mode={compile_mode})")
+        except Exception as e:
+            print(f"Warning: torch.compile failed ({e}). Falling back to uncompiled model.")
+            print(f"  Hint: On Windows, install Triton with: pip install triton-windows")
+            model = copy.deepcopy(uncompiled_model)
     else:
         model = copy.deepcopy(uncompiled_model)
     return (

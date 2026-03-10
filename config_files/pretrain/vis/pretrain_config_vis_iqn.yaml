@@ -1,5 +1,7 @@
 # =============================================================================
 # Level 0 visual pretraining — v2: run_name v2, image_normalization iqn, preprocess_cache_dir cache/v0.
+#
+# IMPORTANT: image_size is loaded from rl_config_path. Change it in RL config.
 # =============================================================================
 
 
@@ -78,10 +80,9 @@ framework: lightning
 # ---------------------------------------------------------------------------
 # Image / temporal stacking
 # ---------------------------------------------------------------------------
+# image_size loaded from rl_config_path.
 
-# Square input resolution in pixels.
-# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_files/rl/config_default.yaml.
-image_size: 64
+rl_config_path: config_files/rl/config_default.yaml
 
 # Image normalization before feeding to the encoder:
 #   01  — keep [0, 1] (default)

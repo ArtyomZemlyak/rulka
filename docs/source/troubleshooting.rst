@@ -93,6 +93,45 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 - Try launching game manually first to verify it works
 - Check Windows firewall isn't blocking TMLoader/TMInterface
 
+.. _bc-cache-skip-indices:
+
+**BC cache: "Sample missing meta/float" or skip_indices**
+
+When building BC cache with float inputs (``use_full_iqn`` or ``use_floats``), some frames may lack required metadata (race state snapshots in ``manifest.json``) for the float vector. The cache builder skips such samples and writes ``skip_indices.json``; bad samples are removed from the cache.
+
+*Prevention — avoid bad samples at capture time:*
+
+.. code-block:: bash
+
+   # Capture with validation: skip bad frames, replays with no valid frames, and tracks with no replays
+   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --vcp-dir maps/vcp --skip-bad-float-samples ...
+
+*Prevention — clean source data before cache build (if not using --skip-bad-float-samples):*
+
+.. code-block:: bash
+
+   # Scan for bad samples (no output = none found)
+   python scripts/cleanup_source_metadata.py --data-dir maps/img
+
+   # Remove bad samples and empty dirs
+   python scripts/cleanup_source_metadata.py --data-dir maps/img --apply --yes
+
+Run this **before** ``pretrain_bc.py`` to avoid skip_indices during cache build.
+
+*If cache was already built and skip_indices exist — fix cache and optionally clean source:*
+
+.. code-block:: bash
+
+   # Fix .npy files (remove skip rows) and clean source
+   python scripts/cleanup_skip_indices.py --cache-dir cache/v1 --fix-npy --clean-source --yes
+
+This repairs the cache and removes bad frames from ``maps/img``. After ``--clean-source``, the script updates ``source_signature`` in ``cache_meta.json`` so the cache stays valid and is not rebuilt.
+
+*Scripts:*
+
+- **cleanup_source_metadata.py** — validates metadata in source replays before cache build; removes bad frames, empty replays, empty tracks.
+- **cleanup_skip_indices.py** — after cache build: fixes .npy files using ``skip_indices.json``, optionally cleans source data.
+
 Linux-specific:
 ---------------
 

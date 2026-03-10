@@ -50,6 +50,7 @@ automatically and rebuilds it when stale.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,6 +69,7 @@ from trackmania_rl.pretrain.datasets import (
     IMAGE_EXTS,
     _load_one_frame,
     split_track_ids,
+    split_track_ids_from_list,
 )
 
 log = logging.getLogger(__name__)
@@ -79,6 +81,7 @@ log = logging.getLogger(__name__)
 CACHE_TRAIN_FILE = "train.npy"
 CACHE_VAL_FILE = "val.npy"
 CACHE_META_FILE = "cache_meta.json"
+CACHE_SKIP_INDICES_FILE = "skip_indices.json"
 
 
 def _manifest_entries(data: list | dict) -> list:
@@ -98,11 +101,11 @@ def _manifest_entries(data: list | dict) -> list:
 # Source signature
 # ---------------------------------------------------------------------------
 
-def compute_source_signature(data_dir: Path) -> dict:
+def compute_source_signature(data_dir: Path, track_ids: list[str] | None = None) -> dict:
     """Scan *data_dir* and return a lightweight fingerprint of its contents.
 
     Only traverses directory metadata (no file reads), so this is fast even
-    for large datasets.
+    for large datasets. When *track_ids* is given, only those subdirs are scanned.
 
     Returns
     -------
@@ -114,9 +117,12 @@ def compute_source_signature(data_dir: Path) -> dict:
     n_replays = 0
     n_frame_files = 0
 
-    for track_dir in sorted(data_dir.iterdir()):
-        if not track_dir.is_dir():
-            continue
+    if track_ids is not None:
+        track_dirs = [data_dir / tid for tid in sorted(track_ids) if (data_dir / tid).is_dir()]
+    else:
+        track_dirs = sorted(d for d in data_dir.iterdir() if d.is_dir())
+
+    for track_dir in track_dirs:
         n_tracks += 1
         for replay_dir in sorted(track_dir.iterdir()):
             if not replay_dir.is_dir():
@@ -607,72 +613,75 @@ def _collect_bc_index(
     )
     use_next_tick = not use_multi_offset and bc_target == "next_tick"
 
-    items: list[tuple[list[Path], list[int]]] = []
+    replay_dirs = []
     for tid in sorted(track_ids):
         track_dir = data_dir / tid
         if not track_dir.is_dir():
             continue
         for replay_dir in sorted(track_dir.iterdir()):
-            if not replay_dir.is_dir():
-                continue
-            entries, actions_timeline, step_ms, _ = _load_replay_manifest_and_timeline(replay_dir)
-            if not entries:
-                continue
-            if len(entries) < max(1, n_stack):
-                continue
-            if use_next_tick:
-                n_win = max(0, len(entries) - n_stack)
+            if replay_dir.is_dir():
+                replay_dirs.append(replay_dir)
+
+    items: list[tuple[list[Path], list[int]]] = []
+    for replay_dir in tqdm(replay_dirs, desc="BC index", unit="replay"):
+        entries, actions_timeline, step_ms, _ = _load_replay_manifest_and_timeline(replay_dir)
+        if not entries:
+            continue
+        if len(entries) < max(1, n_stack):
+            continue
+        if use_next_tick:
+            n_win = max(0, len(entries) - n_stack)
+        else:
+            n_win = len(entries) - n_stack + 1 if n_stack > 1 else len(entries)
+        for start in range(n_win):
+            if n_stack > 1:
+                end = start + n_stack
+                window = entries[start:end]
             else:
-                n_win = len(entries) - n_stack + 1 if n_stack > 1 else len(entries)
-            for start in range(n_win):
-                if n_stack > 1:
-                    end = start + n_stack
-                    window = entries[start:end]
-                else:
-                    window = [entries[start]]
-                if use_multi_offset:
-                    last_time = window[-1].get("time_ms")
-                    if last_time is None:
-                        continue
-                    try:
-                        T = float(last_time)
-                    except (TypeError, ValueError):
-                        continue
-                    action_indices: list[int] = []
-                    use_timeline = actions_timeline is not None and step_ms is not None
-                    for d in bc_time_offsets_ms:
-                        if use_timeline:
-                            a = _action_at_time_from_timeline(actions_timeline, step_ms, T + d)
-                        else:
-                            a = _action_at_time(entries, T + d)
-                        if a is None:
-                            break
-                        action_indices.append(a)
-                    if len(action_indices) != len(bc_time_offsets_ms):
-                        continue
-                else:
-                    if use_next_tick:
-                        next_entry = entries[start + n_stack]
-                        action_idx = next_entry.get("action_idx")
+                window = [entries[start]]
+            if use_multi_offset:
+                last_time = window[-1].get("time_ms")
+                if last_time is None:
+                    continue
+                try:
+                    T = float(last_time)
+                except (TypeError, ValueError):
+                    continue
+                action_indices: list[int] = []
+                use_timeline = actions_timeline is not None and step_ms is not None
+                for d in bc_time_offsets_ms:
+                    if use_timeline:
+                        a = _action_at_time_from_timeline(actions_timeline, step_ms, T + d)
                     else:
-                        action_idx = window[-1].get("action_idx")
-                    if action_idx is None:
-                        continue
-                    try:
-                        action_indices = [int(action_idx)]
-                    except (TypeError, ValueError):
-                        continue
-                paths = []
-                for ent in window:
-                    fname = ent.get("file")
-                    if not fname:
+                        a = _action_at_time(entries, T + d)
+                    if a is None:
                         break
-                    p = replay_dir / fname
-                    if not p.exists():
-                        break
-                    paths.append(p)
-                if len(paths) == len(window):
-                    items.append((paths, action_indices))
+                    action_indices.append(a)
+                if len(action_indices) != len(bc_time_offsets_ms):
+                    continue
+            else:
+                if use_next_tick:
+                    next_entry = entries[start + n_stack]
+                    action_idx = next_entry.get("action_idx")
+                else:
+                    action_idx = window[-1].get("action_idx")
+                if action_idx is None:
+                    continue
+                try:
+                    action_indices = [int(action_idx)]
+                except (TypeError, ValueError):
+                    continue
+            paths = []
+            for ent in window:
+                fname = ent.get("file")
+                if not fname:
+                    break
+                p = replay_dir / fname
+                if not p.exists():
+                    break
+                paths.append(p)
+            if len(paths) == len(window):
+                items.append((paths, action_indices))
     return items
 
 
@@ -776,64 +785,22 @@ def _nearest_meta_by_time(meta_list: list[dict], target_time_ms: float) -> dict 
     return meta_list[best_i]
 
 
-def _build_float_vector_from_meta(
-    meta_dict: dict,
-    prev_action_indices: list[int],
-) -> np.ndarray:
-    """Build RL-compatible float vector from meta dict and prev_actions. Returns float32 array."""
-    cfg = None
-    try:
-        from config_files.config_loader import load_config, set_config, get_config
-        _rl_default = Path(__file__).resolve().parents[2] / "config_files" / "rl" / "config_default.yaml"
-        if _rl_default.exists():
-            set_config(load_config(_rl_default))
-            cfg = get_config()
-    except Exception:
-        pass
-    if cfg is None:
-        raise RuntimeError("RL config required for float building")
-    inputs = cfg.inputs
-    action_forward_idx = cfg.action_forward_idx
-    n_prev = cfg.n_prev_actions_in_inputs
-    n_zone = cfg.n_zone_centers_in_inputs
-    prev_actions_flat = []
-    for idx in prev_action_indices:
-        if idx < 0 or idx >= len(inputs):
-            act = inputs[action_forward_idx]
-        else:
-            act = inputs[idx]
-        for k in ["accelerate", "brake", "left", "right"]:
-            prev_actions_flat.append(float(act.get(k, False)))
-    gear = np.array(meta_dict.get("gear_and_wheels", []), dtype=np.float32)
-    ang_vel = np.array(meta_dict.get("angular_velocity", [0, 0, 0]), dtype=np.float32)
-    vel = np.array(meta_dict.get("velocity", [0, 0, 0]), dtype=np.float32)
-    ori = np.array(meta_dict.get("orientation_flat", list(np.eye(3).ravel())), dtype=np.float32).reshape(3, 3)
-    y_map = (ori @ np.array([0, 1, 0], dtype=np.float32)).ravel()
-    zone_in_car = meta_dict.get("zone_centers_in_car_frame")
-    if zone_in_car is not None:
-        zone_arr = np.array(zone_in_car, dtype=np.float32)
-        if len(zone_arr) > n_zone * 3:
-            zone_arr = zone_arr[: n_zone * 3]
-        elif len(zone_arr) < n_zone * 3:
-            zone_arr = np.pad(zone_arr, (0, n_zone * 3 - len(zone_arr)))
-    else:
-        zone_arr = np.zeros(n_zone * 3, dtype=np.float32)
-    margin = float(meta_dict.get("margin", 0.0))
-    freewheel = float(meta_dict.get("is_freewheeling", 0.0))
-    temporal = 0.0
-    return np.hstack(
-        (
-            temporal,
-            prev_actions_flat,
-            gear.ravel(),
-            ang_vel.ravel(),
-            vel.ravel(),
-            y_map.ravel(),
-            zone_arr.ravel(),
-            margin,
-            freewheel,
-        )
-    ).astype(np.float32)
+def _get_float_config_signature(floats_config) -> dict:
+    """Build a deterministic signature of float-related config for cache invalidation."""
+    inputs_hash = hashlib.sha256(
+        json.dumps(floats_config.inputs, sort_keys=True).encode()
+    ).hexdigest()
+    return {
+        "n_zone_centers_in_inputs": floats_config.n_zone_centers_in_inputs,
+        "one_every_n_zone_centers_in_inputs": floats_config.one_every_n_zone_centers_in_inputs,
+        "n_prev_actions_in_inputs": floats_config.n_prev_actions_in_inputs,
+        "n_contact_material_physics_behavior_types": floats_config.n_contact_material_physics_behavior_types,
+        "action_forward_idx": floats_config.action_forward_idx,
+        "float_input_dim": int(floats_config.float_input_dim),
+        "inputs_hash": inputs_hash,
+        # v2: prev_actions exclude current step (RL-aligned; was v1 leaky)
+        "bc_prev_actions_version": 2,
+    }
 
 
 def _add_bc_actions_to_level0_cache(
@@ -957,6 +924,22 @@ def _add_bc_actions_to_level0_cache(
     return True
 
 
+def _bc_cache_data_dir_matches(meta: dict, data_dir: Path) -> bool:
+    """True iff cache_meta.source_data_dir matches current data_dir (resolved paths)."""
+    stored = meta.get("source_data_dir") or ""
+    if not stored:
+        return False
+    try:
+        stored_path = Path(stored).resolve()
+        current_path = Path(data_dir).resolve()
+        # Same path: use samefile if both exist (handles symlinks/case), else strict equality
+        if stored_path.exists() and current_path.exists():
+            return stored_path.samefile(current_path)
+        return stored_path == current_path
+    except (OSError, TypeError):
+        return False
+
+
 def is_bc_cache_valid(
     cache_dir: Path,
     data_dir: Path,
@@ -967,9 +950,20 @@ def is_bc_cache_valid(
     n_actions: int,
     bc_target: str = "current_tick",
     bc_time_offsets_ms: list[int] | None = None,
+    use_floats: bool = False,
+    floats_config: Any = None,
+    track_ids: list[str] | None = None,
 ) -> bool:
     """Return True iff the BC cache in *cache_dir* is valid for the given params.
-    Old caches without bc_time_offsets_ms are treated as [0].
+
+    All of the following from cache_meta.json must match; otherwise cache is invalid and
+    train_bc will call build_bc_cache() to rebuild:
+      - source_data_dir (must match current data_dir)
+      - track_ids (if present in meta or in args, must match)
+      - image_size, n_stack, val_fraction, seed, n_actions
+      - bc_target, bc_time_offsets_ms
+      - source_signature (fingerprint of data_dir contents, or subset when track_ids set)
+      - if use_floats and cache has_floats: float_config_signature
     """
     if bc_time_offsets_ms is None:
         bc_time_offsets_ms = [0]
@@ -985,11 +979,6 @@ def is_bc_cache_valid(
         )
         return False
 
-    if val_fraction > 0:
-        if not (cache_dir / CACHE_VAL_FILE).exists() or not (cache_dir / CACHE_VAL_ACTIONS_FILE).exists():
-            log.info("BC cache invalid: val_fraction=%g but val.npy or val_actions.npy missing", val_fraction)
-            return False
-
     try:
         with open(meta_path, encoding="utf-8") as fh:
             meta = json.load(fh)
@@ -997,8 +986,34 @@ def is_bc_cache_valid(
         log.info("BC cache invalid: cannot read %s: %s", meta_path, exc)
         return False
 
-    if Path(meta.get("source_data_dir", "")).resolve() != Path(data_dir).resolve():
-        log.info("BC cache invalid: source_data_dir mismatch")
+    # Require val files only when cache was built with a val split (n_val > 0), e.g. multiple tracks.
+    # Single-track runs have n_val=0 and no val.npy/val_actions.npy by design.
+    n_val = meta.get("n_val", 0)
+    if val_fraction > 0 and n_val > 0:
+        if not (cache_dir / CACHE_VAL_FILE).exists() or not (cache_dir / CACHE_VAL_ACTIONS_FILE).exists():
+            log.info("BC cache invalid: val_fraction=%g and n_val=%d but val.npy or val_actions.npy missing", val_fraction, n_val)
+            return False
+
+    if not _bc_cache_data_dir_matches(meta, data_dir):
+        log.info(
+            "BC cache invalid: source_data_dir mismatch (stored=%s, current=%s)",
+            meta.get("source_data_dir"), Path(data_dir).resolve(),
+        )
+        return False
+
+    stored_track_ids = meta.get("track_ids")
+    if (stored_track_ids is None) != (track_ids is None):
+        log.info(
+            "BC cache invalid: track_ids mismatch (cache built for %s, current track_ids=%s)",
+            "all tracks" if stored_track_ids is None else stored_track_ids,
+            "all tracks" if track_ids is None else track_ids,
+        )
+        return False
+    if track_ids is not None and sorted(stored_track_ids) != sorted(track_ids):
+        log.info(
+            "BC cache invalid: track_ids mismatch (stored=%s, current=%s)",
+            stored_track_ids, track_ids,
+        )
         return False
 
     for key, current_val in [
@@ -1024,15 +1039,274 @@ def is_bc_cache_valid(
     if stored_sig is None:
         log.info("BC cache invalid: source_signature missing")
         return False
-    if stored_sig != compute_source_signature(data_dir):
+    if stored_sig != compute_source_signature(data_dir, track_ids=track_ids):
         log.info("BC cache invalid: source_signature changed")
         return False
+
+    if use_floats and meta.get("has_floats"):
+        if floats_config is None:
+            log.info("BC cache invalid: use_floats but floats_config is None")
+            return False
+        current_sig = _get_float_config_signature(floats_config)
+        stored_float_sig = meta.get("float_config_signature")
+        if stored_float_sig is None:
+            log.info("BC cache invalid: has_floats but float_config_signature missing")
+            return False
+        if stored_float_sig != current_sig:
+            log.info(
+                "BC cache invalid: float_config_signature changed (stored=%s, current=%s)",
+                stored_float_sig, current_sig,
+            )
+            return False
 
     log.info(
         "BC cache valid: %d train + %d val (image_size=%d n_stack=%d n_actions=%d)",
         meta.get("n_train", 0), meta.get("n_val", 0), image_size, n_stack, n_actions,
     )
     return True
+
+
+def is_bc_cache_valid_except_float_signature(
+    cache_dir: Path,
+    data_dir: Path,
+    image_size: int,
+    n_stack: int,
+    val_fraction: float,
+    seed: int,
+    n_actions: int,
+    bc_target: str = "current_tick",
+    bc_time_offsets_ms: list[int] | None = None,
+    track_ids: list[str] | None = None,
+) -> bool:
+    """Like is_bc_cache_valid but skips float_config_signature check.
+
+    Use to detect when train/val/actions are valid and only floats need rebuilding
+    (e.g. after prev_actions formula change).
+    """
+    if bc_time_offsets_ms is None:
+        bc_time_offsets_ms = [0]
+    cache_dir = Path(cache_dir)
+    meta_path = cache_dir / CACHE_META_FILE
+    train_path = cache_dir / CACHE_TRAIN_FILE
+    train_actions_path = cache_dir / CACHE_TRAIN_ACTIONS_FILE
+
+    if not meta_path.exists() or not train_path.exists() or not train_actions_path.exists():
+        return False
+    try:
+        with open(meta_path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return False
+    n_val = meta.get("n_val", 0)
+    if val_fraction > 0 and n_val > 0:
+        if not (cache_dir / CACHE_VAL_FILE).exists() or not (cache_dir / CACHE_VAL_ACTIONS_FILE).exists():
+            return False
+    if not _bc_cache_data_dir_matches(meta, data_dir):
+        return False
+    stored_track_ids = meta.get("track_ids")
+    if (stored_track_ids is None) != (track_ids is None):
+        return False
+    if track_ids is not None and sorted(stored_track_ids) != sorted(track_ids):
+        return False
+    for key, current_val in [
+        ("image_size", image_size),
+        ("n_stack", n_stack),
+        ("val_fraction", val_fraction),
+        ("seed", seed),
+        ("n_actions", n_actions),
+        ("bc_target", bc_target),
+        ("bc_time_offsets_ms", bc_time_offsets_ms),
+    ]:
+        stored = meta.get("bc_target", "current_tick") if key == "bc_target" else (
+            meta.get("bc_time_offsets_ms", [0]) if key == "bc_time_offsets_ms" else meta.get(key)
+        )
+        if stored != current_val:
+            return False
+    stored_sig = meta.get("source_signature")
+    if stored_sig is None or stored_sig != compute_source_signature(data_dir, track_ids=track_ids):
+        return False
+    return True
+
+
+def build_bc_cache_floats_only(
+    cache_dir: Path,
+    data_dir: Path,
+    floats_config: Any,
+) -> None:
+    """Build only train_floats.npy / val_floats.npy for an existing BC cache.
+
+    Use when the cache is valid (substantive params match) but has_floats=False
+    (e.g. float build was skipped due to bad samples). Re-indexes, builds floats
+    with skip logic, and removes bad samples from all cache files.
+    """
+    cache_dir = Path(cache_dir)
+    data_dir = Path(data_dir).resolve()
+    meta_path = cache_dir / CACHE_META_FILE
+    if not meta_path.exists() or not (cache_dir / CACHE_TRAIN_FILE).exists() or not (cache_dir / CACHE_TRAIN_ACTIONS_FILE).exists():
+        raise RuntimeError(
+            f"Cannot build floats only: cache incomplete (need {CACHE_META_FILE}, {CACHE_TRAIN_FILE}, {CACHE_TRAIN_ACTIONS_FILE})"
+        )
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+
+    val_fraction = meta.get("val_fraction", 0.1)
+    seed = meta.get("seed", 42)
+    n_stack = meta.get("n_stack", 1)
+    bc_target = meta.get("bc_target", "current_tick")
+    bc_time_offsets_ms = meta.get("bc_time_offsets_ms") or [0]
+    actions_path = cache_dir / CACHE_TRAIN_ACTIONS_FILE
+
+    if val_fraction > 0:
+        train_ids, val_ids = split_track_ids(data_dir, val_fraction=val_fraction, seed=seed)
+    else:
+        train_ids = sorted(d.name for d in data_dir.iterdir() if d.is_dir())
+        val_ids = []
+    train_items = _collect_bc_index(data_dir, train_ids, n_stack, bc_target=bc_target, bc_time_offsets_ms=bc_time_offsets_ms)
+    val_items = _collect_bc_index(data_dir, val_ids, n_stack, bc_target=bc_target, bc_time_offsets_ms=bc_time_offsets_ms) if val_ids else []
+
+    log.info("Building BC float inputs (floats only): %d train + %d val samples", len(train_items), len(val_items))
+    _build_bc_floats_and_update_meta(
+        train_items, val_items, cache_dir, meta, floats_config, actions_path, bc_time_offsets_ms,
+    )
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    _verify_bc_cache_consistency(actions_path, meta, bc_time_offsets_ms)
+
+
+def _build_bc_floats_and_update_meta(
+    train_items: list,
+    val_items: list,
+    cache_dir: Path,
+    meta: dict,
+    floats_config: Any,
+    actions_path: Path,
+    bc_time_offsets_ms: list[int],
+) -> None:
+    """Build train_floats.npy / val_floats.npy, update meta, optionally remove skip indices from cache."""
+    manifest_cache: dict = {}
+    has_meta = False
+    float_dim = 0
+    if train_items and floats_config is not None:
+        try:
+            entries, _, _, meta_list = _load_replay_manifest_and_timeline(train_items[0][0][-1].parent)
+            has_meta = meta_list is not None and len(meta_list) > 0
+            if has_meta:
+                float_dim = int(floats_config.float_input_dim)
+        except Exception as e:
+            log.debug("Skipping float build: %s", e)
+
+    if not (has_meta and float_dim > 0 and floats_config is not None):
+        meta["has_floats"] = False
+        return
+
+    def _get_float_for_sample(paths: list[Path], _mc: dict) -> np.ndarray | None:
+        replay_dir = paths[-1].parent
+        if replay_dir not in _mc:
+            _mc[replay_dir] = _load_replay_manifest_and_timeline(replay_dir)
+        entries, actions_tl, step_ms_v, meta_list = _mc[replay_dir]
+        if not meta_list or not entries:
+            return None
+        last_name = paths[-1].name
+        t_ms = None
+        for e in entries:
+            if Path(e.get("file", "")).name == last_name:
+                t_ms = e.get("time_ms")
+                break
+        if t_ms is None:
+            return None
+        try:
+            t = float(t_ms)
+        except (TypeError, ValueError):
+            return None
+        nearest = _nearest_meta_by_time(meta_list, t)
+        if nearest is None:
+            return None
+        # Match RL: prev_actions are the n_prev actions *before* the current step (step_idx).
+        # In RL: indices [len(actions)-n_prev, len(actions)-1] = steps t-n_prev..t-1 (exclude current).
+        # Here: step_idx is "current" (frame time); we want steps step_idx-n_prev..step_idx-1.
+        n_prev = floats_config.n_prev_actions_in_inputs
+        prev_indices: list[int] = []
+        if actions_tl is not None and step_ms_v is not None and step_ms_v > 0:
+            step_idx = int(round(t / step_ms_v))
+            for k in range(n_prev):
+                idx = step_idx - n_prev + k
+                prev_indices.append(floats_config.action_forward_idx if idx < 0 or idx >= len(actions_tl) else actions_tl[idx])
+        else:
+            prev_indices = [floats_config.action_forward_idx] * n_prev
+        from trackmania_rl.float_inputs import build_float_vector, prev_actions_flat_from_indices, state_dict_from_meta
+        state_dict = state_dict_from_meta(nearest, floats_config)
+        prev_flat = prev_actions_flat_from_indices(prev_indices, floats_config.inputs, floats_config.action_forward_idx)
+        return build_float_vector(state_dict, prev_flat, 0.0, floats_config)
+
+    train_skip_indices: list[int] = []
+    val_skip_indices: list[int] = []
+    train_floats_list: list[np.ndarray] = []
+    for i, (paths, _) in enumerate(tqdm(train_items, desc="BC floats train", unit="sample")):
+        fv = _get_float_for_sample(paths, manifest_cache)
+        if fv is None:
+            log.info("Sample %d missing meta/float, adding to skip list", i)
+            train_skip_indices.append(i)
+            continue
+        train_floats_list.append(fv)
+    if not train_floats_list:
+        meta["has_floats"] = False
+        return
+    np.save(cache_dir / CACHE_TRAIN_FLOATS_FILE, np.stack(train_floats_list, axis=0).astype(np.float32))
+    val_floats_list: list[np.ndarray] = []
+    if val_items:
+        for j, (paths, _) in enumerate(tqdm(val_items, desc="BC floats val", unit="sample")):
+            fv = _get_float_for_sample(paths, manifest_cache)
+            if fv is None:
+                log.info("Val sample %d missing meta/float, adding to skip list", j)
+                val_skip_indices.append(j)
+                continue
+            val_floats_list.append(fv)
+        if val_floats_list:
+            np.save(cache_dir / CACHE_VAL_FLOATS_FILE, np.stack(val_floats_list, axis=0).astype(np.float32))
+    meta["has_floats"] = True
+    meta["float_input_dim"] = float_dim
+    meta["float_config_signature"] = _get_float_config_signature(floats_config)
+
+    if train_skip_indices or val_skip_indices:
+        with open(cache_dir / CACHE_SKIP_INDICES_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"train": train_skip_indices, "val": val_skip_indices}, fh, indent=2)
+        log.info("Skipped %d train + %d val samples (saved to %s)", len(train_skip_indices), len(val_skip_indices), CACHE_SKIP_INDICES_FILE)
+
+        def _remove_rows(path: Path, skip_indices: list[int]) -> None:
+            if not skip_indices or not path.exists():
+                return
+            data = np.load(str(path), mmap_mode="r")
+            keep = np.ones(data.shape[0], dtype=bool)
+            keep[np.asarray(skip_indices)] = False
+            filtered = np.asarray(data[keep], dtype=data.dtype)
+            del data  # release mmap so we can overwrite on Windows
+            tmp_path = path.with_suffix(".npy.tmp")
+            np.save(tmp_path, filtered)
+            path.unlink()
+            tmp_path.rename(path)
+            log.info("Removed %d rows from %s", len(skip_indices), path.name)
+
+        _remove_rows(cache_dir / CACHE_TRAIN_FILE, train_skip_indices)
+        _remove_rows(cache_dir / CACHE_TRAIN_ACTIONS_FILE, train_skip_indices)
+        _remove_rows(cache_dir / CACHE_VAL_FILE, val_skip_indices)
+        _remove_rows(cache_dir / CACHE_VAL_ACTIONS_FILE, val_skip_indices)
+        meta["n_train"] = len(train_items) - len(train_skip_indices)
+        meta["n_val"] = len(val_items) - len(val_skip_indices)
+
+
+def _verify_bc_cache_consistency(actions_path: Path, meta: dict, bc_time_offsets_ms: list[int]) -> None:
+    train_actions_arr = np.load(str(actions_path), mmap_mode="r")
+    n_train_final = meta["n_train"]
+    n_offsets = len(bc_time_offsets_ms)
+    if train_actions_arr.shape[0] != n_train_final:
+        raise RuntimeError(f"BC cache inconsistent: train_actions.npy shape[0]={train_actions_arr.shape[0]} != n_train={n_train_final}")
+    if n_offsets == 1:
+        if train_actions_arr.ndim != 1:
+            raise RuntimeError(f"BC cache inconsistent: single offset but train_actions.npy ndim={train_actions_arr.ndim}")
+    else:
+        if train_actions_arr.ndim != 2 or train_actions_arr.shape[1] != n_offsets:
+            raise RuntimeError(f"BC cache inconsistent: multi-offset expected shape (N, {n_offsets}), got {train_actions_arr.shape}")
+    log.info("BC cache verification passed: train_actions shape %s, n_offsets=%d", train_actions_arr.shape, n_offsets)
 
 
 def build_bc_cache(
@@ -1047,12 +1321,15 @@ def build_bc_cache(
     bc_target: str = "current_tick",
     bc_time_offsets_ms: list[int] | None = None,
     bc_offset_weights: list[float] | None = None,
+    floats_config: Any = None,
+    track_ids: list[str] | None = None,
 ) -> None:
     """Build BC preprocessed cache: train.npy, train_actions.npy, val.npy, val_actions.npy, cache_meta.json.
 
     If *cache_dir* already contains a valid Level 0 cache and bc_time_offsets_ms is [0],
     only train_actions.npy and val_actions.npy are added. With multiple offsets a full
     BC cache is built. Actions shape: (N,) when single offset, (N, n_offsets) otherwise.
+    When *track_ids* is set, only those tracks are indexed and signature is computed for them.
     """
     if bc_time_offsets_ms is None:
         bc_time_offsets_ms = [0]
@@ -1068,16 +1345,29 @@ def build_bc_cache(
             return
 
     log.info("Building BC cache: data_dir=%s -> cache_dir=%s (bc_time_offsets_ms=%s)", data_dir, cache_dir, bc_time_offsets_ms)
-    signature = compute_source_signature(data_dir)
+    signature = compute_source_signature(data_dir, track_ids=track_ids)
 
-    if val_fraction > 0:
+    if track_ids is not None:
+        if val_fraction > 0:
+            train_ids, val_ids = split_track_ids_from_list(track_ids, val_fraction, seed)
+        else:
+            train_ids = list(track_ids)
+            val_ids = []
+    elif val_fraction > 0:
         train_ids, val_ids = split_track_ids(data_dir, val_fraction, seed)
     else:
         train_ids = sorted(d.name for d in data_dir.iterdir() if d.is_dir())
         val_ids = []
 
+    log.info("Indexing BC train samples (scanning manifests)...")
     train_items = _collect_bc_index(data_dir, train_ids, n_stack, bc_target, bc_time_offsets_ms)
-    val_items = _collect_bc_index(data_dir, val_ids, n_stack, bc_target, bc_time_offsets_ms) if val_ids else []
+    log.info("Indexed %d train samples", len(train_items))
+    if val_ids:
+        log.info("Indexing BC val samples...")
+        val_items = _collect_bc_index(data_dir, val_ids, n_stack, bc_target, bc_time_offsets_ms)
+        log.info("Indexed %d val samples", len(val_items))
+    else:
+        val_items = []
 
     if len(train_items) == 0:
         raise RuntimeError(
@@ -1146,115 +1436,18 @@ def build_bc_cache(
         "n_val": len(val_items),
         "n_actions": n_actions,
     }
+    if track_ids is not None:
+        meta["track_ids"] = track_ids
     if bc_offset_weights is not None:
         meta["bc_offset_weights"] = bc_offset_weights
 
-    # Build train_floats.npy / val_floats.npy when manifest has meta
-    manifest_cache: dict[Path, tuple[list[dict], list[int] | None, int | None, list[dict] | None]] = {}
-    has_meta = False
-    float_dim = 0
-    try:
-        if train_items:
-            last_path = train_items[0][0][-1]
-            replay_dir = last_path.parent
-            entries, actions_tl, step_ms_val, meta_list = _load_replay_manifest_and_timeline(replay_dir)
-            has_meta = meta_list is not None and len(meta_list) > 0
-        if has_meta:
-            from config_files.config_loader import load_config, set_config, get_config
-            _rl_cfg = Path(__file__).resolve().parents[2] / "config_files" / "rl" / "config_default.yaml"
-            if _rl_cfg.exists():
-                set_config(load_config(_rl_cfg))
-                float_dim = int(get_config().float_input_dim)
-    except Exception as e:
-        log.debug("Skipping float build: %s", e)
-        has_meta = False
-
-    if has_meta and float_dim > 0:
-        from config_files.config_loader import get_config as _get_cfg
-
-        def _get_float_for_sample(
-            paths: list[Path],
-            _manifest_cache: dict,
-        ) -> np.ndarray | None:
-            replay_dir = paths[-1].parent
-            if replay_dir not in _manifest_cache:
-                _manifest_cache[replay_dir] = _load_replay_manifest_and_timeline(replay_dir)
-            entries, actions_tl, step_ms_v, meta_list = _manifest_cache[replay_dir]
-            if not meta_list or not entries:
-                return None
-            last_name = paths[-1].name
-            t_ms = None
-            for e in entries:
-                if Path(e.get("file", "")).name == last_name:
-                    t_ms = e.get("time_ms")
-                    break
-            if t_ms is None:
-                return None
-            try:
-                t = float(t_ms)
-            except (TypeError, ValueError):
-                return None
-            nearest = _nearest_meta_by_time(meta_list, t)
-            if nearest is None:
-                return None
-            cfg = _get_cfg()
-            n_prev = cfg.n_prev_actions_in_inputs
-            prev_indices: list[int] = []
-            if actions_tl is not None and step_ms_v is not None and step_ms_v > 0:
-                step_idx = int(round(t / step_ms_v))
-                for k in range(n_prev):
-                    idx = step_idx - n_prev + 1 + k
-                    if idx < 0:
-                        prev_indices.append(cfg.action_forward_idx)
-                    elif idx >= len(actions_tl):
-                        prev_indices.append(cfg.action_forward_idx)
-                    else:
-                        prev_indices.append(actions_tl[idx])
-            else:
-                prev_indices = [cfg.action_forward_idx] * n_prev
-            return _build_float_vector_from_meta(nearest, prev_indices)
-
-        train_floats_list: list[np.ndarray] = []
-        for paths, _ in tqdm(train_items, desc="BC floats train", unit="sample"):
-            fv = _get_float_for_sample(paths, manifest_cache)
-            if fv is None:
-                log.info("Sample missing meta/float, skipping float cache")
-                train_floats_list = []
-                has_meta = False
-                break
-            train_floats_list.append(fv)
-        if train_floats_list:
-            np.save(cache_dir / CACHE_TRAIN_FLOATS_FILE, np.stack(train_floats_list, axis=0).astype(np.float32))
-            if val_items:
-                val_floats_list: list[np.ndarray] = []
-                for paths, _ in tqdm(val_items, desc="BC floats val", unit="sample"):
-                    fv = _get_float_for_sample(paths, manifest_cache)
-                    if fv is None:
-                        val_floats_list = []
-                        break
-                    val_floats_list.append(fv)
-                if val_floats_list:
-                    np.save(cache_dir / CACHE_VAL_FLOATS_FILE, np.stack(val_floats_list, axis=0).astype(np.float32))
-            meta["has_floats"] = True
-            meta["float_input_dim"] = float_dim
-
+    _build_bc_floats_and_update_meta(
+        train_items, val_items, cache_dir, meta, floats_config, actions_path, bc_time_offsets_ms,
+    )
     if not meta.get("has_floats"):
         meta["has_floats"] = False
 
     with open(cache_dir / CACHE_META_FILE, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
-    log.info("BC cache build complete: %d train + %d val", len(train_items), len(val_items))
-    # Verify cache consistency
-    train_actions_arr = np.load(str(actions_path), mmap_mode="r")
-    n_offsets = len(bc_time_offsets_ms)
-    if train_actions_arr.shape[0] != len(train_items):
-        raise RuntimeError(f"BC cache inconsistent: train_actions.npy shape[0]={train_actions_arr.shape[0]} != n_train={len(train_items)}")
-    if n_offsets == 1:
-        if train_actions_arr.ndim != 1:
-            raise RuntimeError(f"BC cache inconsistent: single offset but train_actions.npy ndim={train_actions_arr.ndim}")
-    else:
-        if train_actions_arr.ndim != 2 or train_actions_arr.shape[1] != n_offsets:
-            raise RuntimeError(
-                f"BC cache inconsistent: multi-offset expected shape (N, {n_offsets}), got {train_actions_arr.shape}"
-            )
-    log.info("BC cache verification passed: train_actions shape %s, n_offsets=%d", train_actions_arr.shape, n_offsets)
+    log.info("BC cache build complete: %d train + %d val", meta["n_train"], meta["n_val"])
+    _verify_bc_cache_consistency(actions_path, meta, bc_time_offsets_ms)

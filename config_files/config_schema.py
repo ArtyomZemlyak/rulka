@@ -94,6 +94,8 @@ class NeuralNetworkConfig(BaseModel):
     last_layer_reset_factor: float = 0.8
     overall_reset_mul_factor: float = 0.01
     use_jit: bool = True
+    # If False, IQN uses only float features (no CNN image head). Useful for ablation or float-only training.
+    use_iqn_image_head: bool = True
 
     # Computed by loader (depends on environment)
     float_input_dim: int = 0

@@ -54,7 +54,6 @@ import logging
 from pathlib import Path
 
 from config_files.pretrain_schema import LightningConfig, PretrainConfig, load_pretrain_config
-from trackmania_rl.pretrain.train import train_pretrain
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -96,9 +95,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Training backend.")
 
     # --- Image ---
-    ap.add_argument("--image-size", type=int, default=None, dest="image_size",
-                    metavar="PX",
-                    help="Square input resolution (must match IQN config).")
+    ap.add_argument("--rl-config-path", type=Path, default=None, dest="rl_config_path",
+                    metavar="PATH",
+                    help="Path to RL config; image_size is loaded from neural_network.w_downsized.")
     ap.add_argument("--image-normalization", type=str, default=None, dest="image_normalization",
                     choices=["01", "iqn"],
                     help="01 = [0,1]; iqn = (x-0.5)/0.5 for IQN/BC transfer (default from config).")
@@ -234,7 +233,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     overrides: dict = {}
     for field in (
-        "data_dir", "output_dir", "run_name", "task", "framework", "image_size", "image_normalization",
+        "data_dir", "output_dir", "run_name", "task", "framework", "rl_config_path", "image_normalization",
         "epochs", "batch_size", "lr", "workers", "grad_clip",
         "vae_latent", "proj_dim", "temperature", "n_stack", "stack_mode",
         "val_fraction", "seed", "kl_weight",
@@ -291,13 +290,23 @@ def main() -> None:
     else:
         cfg = base_cfg
 
+    # Initialize RL config before importing train (iqn.py calls get_config() at import time)
+    from config_files.config_loader import load_config, set_config
+    rl_path = Path(cfg.rl_config_path).resolve()
+    if not rl_path.exists():
+        raise FileNotFoundError(f"rl_config_path {rl_path} not found")
+    set_config(load_config(rl_path))
+
+    from trackmania_rl.pretrain.train import _get_image_size_from_rl, train_pretrain
+
     # -----------------------------------------------------------------------
     # 4. Diagnostics
     # -----------------------------------------------------------------------
+    img_sz = _get_image_size_from_rl(cfg)
     log.info(
-        "Pretrain config: task=%s  framework=%s  image_size=%d  epochs=%d  "
+        "Pretrain config: task=%s  framework=%s  image_size=%d (from RL)  epochs=%d  "
         "batch_size=%d  lr=%g  n_stack=%d  stack_mode=%s  val_fraction=%g",
-        cfg.task, cfg.framework, cfg.image_size, cfg.epochs,
+        cfg.task, cfg.framework, img_sz, cfg.epochs,
         cfg.batch_size, cfg.lr, cfg.n_stack, cfg.stack_mode, cfg.val_fraction,
     )
     log.info("data_dir=%s  →  output_dir=%s", cfg.data_dir, cfg.output_dir)

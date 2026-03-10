@@ -63,17 +63,29 @@ This removes maps with non-standard environments (e.g., not Stadium/Speed/Alpine
 
    python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --workers 1 --width 256 --height 256 --running-speed 16 --fps 100 --track-ids maps/track_ids_no_respawn.txt --max-replays-per-track 1 --vcp-dir maps/vcp
 
+   python scripts/capture_replays_tmnf.py --replays-dir maps/replays-A01 --output-dir maps/img-A01 --workers 1 --width 256 --height 256 --running-speed 1 --fps 100 --track-ids maps/replays-A01/track_ids.txt --max-replays-per-track 2 --vcp-dir maps/vcp-A01
+
 **Multi-worker capture:** Running with ``--workers N`` (N > 1) is **not yet working reliably** (multiple game windows, key input and preview handling are not coordinated). Use **``--workers 1``** for now.
 
 **Map preview handling:** Previews and "Press Enter to start" screens are handled automatically via ``disable_forced_camera`` + ``skip_map_load_screens``. If the game still doesn't start within 3 seconds (no RUN_STEP messages), the script sends TMInterface ``give_up`` / ``press delete`` commands to restart the race every 3 seconds (up to 25 seconds total), then skips the map. Use ``--write-enter-maps`` to collect track IDs of maps that didn't start, then ``--exclude-enter-maps`` on the next run.
 
-**Stale / hang detection:** Several levels detect when the capture gets stuck and force a switch to the next replay: (1) socket timeout during race (20s with no messages → unload); (2) wall-clock progress (no RUN_STEP for 25s even if CHECKPOINT/LAP arrive → unload); (3) total rollout limit (5 min); (4) on any exception, the script attempts ``unload`` before returning.
+**Stale / hang detection:** Several levels detect when the capture gets stuck and force a switch to the next replay: (1) map load wait — no RUN_STEP for 25s (preview/Enter, socket timeout 3s); (2) "Not in menus" wait — no RUN_STEP for 25s when waiting to request map (e.g. medals/Enter screen, socket timeout 3s); (3) race phase — socket timeout 20s or no RUN_STEP for 25s wall-clock; (4) total rollout limit (5 min); (5) on any exception, the script attempts ``unload`` before returning.
 
 **Note on --running-speed:** Higher values may cause the game to skip inputs or desync (e.g. 8 can break replay, 4 works reliably). Use 4–6 for capture.
 
 **VCP (zone centers):** To enable zone-based meta in manifests (for BC with float inputs), add ``--vcp-dir maps/vcp``. VCP files are auto-generated from replays when missing; defaults: ``--vcp-distance 0.5``, ``--vcp-suffix cl``, ``--vcp-auto-generate``. Use ``--no-vcp-auto-generate`` to disable auto-generation.
 
+**Skip bad float samples:** With ``--skip-bad-float-samples`` (and ``--vcp-dir``), each frame is validated before writing. Frames that fail BC float validation are not saved. Replays with no valid frames are skipped entirely. Tracks with no saved replays produce no output dir. Use this to avoid bad samples at capture time instead of cleaning later with ``cleanup_source_metadata.py``.
+
 Output: ``maps/img/<track_id>/<replay_name>/`` — frames (jpeg), ``metadata.json``, ``manifest.json``. Details below.
+
+**Step 5.** (Optional, before BC pretrain with float inputs) Validate metadata and remove bad samples. BC with float inputs requires meta snapshots in each replay; some frames may lack them. If you used ``--skip-bad-float-samples`` in step 4, this step is usually redundant. Otherwise, run:
+
+.. code-block:: bash
+
+   python scripts/cleanup_source_metadata.py --data-dir maps/img --apply --yes
+
+This removes frames without valid metadata, updates manifests, and deletes empty replay/track dirs. See :ref:`bc-cache-skip-indices` for details.
 
 ---
 
@@ -180,7 +192,42 @@ Frame capture (capture_replays_tmnf.py)
 - **frame_<step>_<time_ms>ms.jpeg** — images (step = frame index, time_ms = simulation time).
 - **frame_<step>_<time_ms>ms.json** — optional (``--per-frame-json``).
 
-**Arguments:** ``--replays-dir``, ``--output-dir``, ``--tracks-dir``, ``--width``, ``--height``, ``--fps``, ``--workers``, ``--base-tmi-port``, ``--track-ids``, ``--track-id``, ``--max-replays-per-track``, ``--per-frame-json``, ``--running-speed``, ``--write-enter-maps``, ``--exclude-enter-maps``, ``--log-level``, ``--config``.
+**Main arguments (capture_replays_tmnf):**
+
++----------------------------------+----------------------------------------------------------------------------------+
+| Argument                         | Effect                                                                           |
++==================================+==================================================================================+
+| ``--replays-dir``                | Directory with ``track_id/*.replay.gbx`` (default ``maps/replays``).             |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--output-dir``                 | Output root: ``output_dir/track_id/replay_name/`` (default ``capture_frames_out``)|
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--tracks-dir``                 | Extracted challenges (default ``maps/tracks``).                                  |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--vcp-dir``                    | VCP (zone) files dir; enables meta for BC float inputs (default ``maps/vcp``).   |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--skip-bad-float-samples``     | Validate each frame before write; skip bad frames, replays with none valid,      |
+|                                  | and tracks with no replays saved. Requires ``--vcp-dir``.                        |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--exclude-respawn-maps``       | Skip tracks that have at least one replay with respawn events.                   |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--exclude-enter-maps``         | Skip track IDs listed in file (e.g. maps that need "Press Enter").               |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--write-enter-maps``           | Append track IDs that did not start to file; use with ``--exclude-enter-maps``.  |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--track-ids``, ``--track-id``  | Track list file or single ID.                                                    |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--max-replays-per-track``      | Limit replays per track (top N by filename).                                     |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--width``, ``--height``        | Frame size (default from config).                                                |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--fps``                        | Frames per simulation second (default 10).                                       |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--running-speed``              | Override running_speed from config (e.g. 4–16).                                  |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--workers``                    | Number of game instances (use 1 for now).                                        |
++----------------------------------+----------------------------------------------------------------------------------+
+| ``--config``                     | Config YAML (default RL config).                                                 |
++----------------------------------+----------------------------------------------------------------------------------+
 
 **FPS and simulation time (time_ms in filenames):** ``--fps`` is **frames per simulation second** (per second of race time). The interval between captures in sim time is ``1000 / fps`` ms. So with ``--fps 64`` you get ~15.6 ms between frames (e.g. ``frame_00000_0ms.jpeg``, ``frame_00001_20ms.jpeg``, …). ``--running-speed`` does not change this interval; it only affects how fast the race runs in real time.
 
@@ -208,6 +255,9 @@ Examples (from project root)
 
    # Per-frame JSON
    python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir out --per-frame-json
+
+   # BC-ready capture: skip bad float samples, VCP for zone meta
+   python scripts/capture_replays_tmnf.py --replays-dir maps/replays --output-dir maps/img --vcp-dir maps/vcp --skip-bad-float-samples
 
    # Single track
    python scripts/capture_replays_tmnf.py --track-id 12345 --replays-dir maps/replays --output-dir out

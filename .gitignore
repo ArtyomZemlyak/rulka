@@ -35,6 +35,7 @@ Nadeo.ini
 .env
 /cache
 /output
+/data
 
 # Documentation build artifacts
 /docs/build/

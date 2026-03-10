@@ -28,12 +28,16 @@ import numpy as np
 import numpy.typing as npt
 
 from config_files.config_loader import get_config
-from trackmania_rl import contact_materials, map_loader
+from trackmania_rl import map_loader
+from trackmania_rl.float_inputs import (
+    build_float_vector,
+    prev_actions_flat_from_indices,
+    state_dict_from_sim_state,
+)
 from trackmania_rl.tmi_interaction.game_instance_manager import (
     GameInstanceManager,
     ensure_not_minimized,
     ensure_window_focused,
-    update_current_zone_idx,
 )
 
 
@@ -221,107 +225,43 @@ class GameEnvBackend:
                     if compute_action_asap_floats:
                         pc2 = time.perf_counter_ns()
                         sim_state_race_time = last_known_simulation_state.race_time
-                        sim_state_dyna_current = last_known_simulation_state.dyna.current_state
-                        sim_state_mobil = last_known_simulation_state.scene_mobil
-                        sim_state_mobil_engine = sim_state_mobil.engine
-                        simulation_wheels = last_known_simulation_state.simulation_wheels
-                        wheel_state = [simulation_wheels[i].real_time_state for i in range(4)]
-                        sim_state_position = np.array(sim_state_dyna_current.position, dtype=np.float32)
-                        sim_state_orientation = sim_state_dyna_current.rotation.to_numpy().T
-                        sim_state_velocity = np.array(sim_state_dyna_current.linear_speed, dtype=np.float32)
-                        sim_state_angular_speed = np.array(sim_state_dyna_current.angular_speed, dtype=np.float32)
-                        gearbox_state = sim_state_mobil.gearbox_state
-                        counter_gearbox_state = 0
-                        if gearbox_state != 0 and len(rollout_results["car_gear_and_wheels"]) > 0:
-                            counter_gearbox_state = 1 + rollout_results["car_gear_and_wheels"][-1][15]
-                        sim_state_car_gear_and_wheels = np.array(
-                            [
-                                *(ws.is_sliding for ws in wheel_state),
-                                *(ws.has_ground_contact for ws in wheel_state),
-                                *(ws.damper_absorb for ws in wheel_state),
-                                gearbox_state,
-                                sim_state_mobil_engine.gear,
-                                sim_state_mobil_engine.actual_rpm,
-                                counter_gearbox_state,
-                                *(
-                                    i == contact_materials.physics_behavior_fromint[ws.contact_material_id & 0xFFFF]
-                                    for ws in wheel_state
-                                    for i in range(cfg.n_contact_material_physics_behavior_types)
-                                ),
-                            ],
-                            dtype=np.float32,
+                        last_gear = (
+                            rollout_results["car_gear_and_wheels"][-1]
+                            if len(rollout_results["car_gear_and_wheels"]) > 0
+                            else None
                         )
-                        if sim_state_position[1] > get_config().deck_height:
-                            current_zone_idx = update_current_zone_idx(
-                                current_zone_idx,
-                                zone_centers,
-                                sim_state_position,
-                                cfg.max_allowable_distance_to_virtual_checkpoint,
-                                gim.next_real_checkpoint_positions,
-                                gim.max_allowable_distance_to_real_checkpoint,
-                                cfg.n_zone_centers_extrapolate_after_end_of_map,
-                            )
+                        state_dict, current_zone_idx, distance_since_track_begin = state_dict_from_sim_state(
+                            last_known_simulation_state,
+                            zone_centers,
+                            zone_transitions,
+                            distance_between_zone_transitions,
+                            distance_from_start_track_to_prev_zone_transition,
+                            normalized_vector_along_track_axis,
+                            current_zone_idx,
+                            gim.next_real_checkpoint_positions,
+                            gim.max_allowable_distance_to_real_checkpoint,
+                            last_gear,
+                            cfg,
+                        )
                         if current_zone_idx > rollout_results["furthest_zone_idx"]:
                             last_progress_improvement_ms = sim_state_race_time
                             rollout_results["furthest_zone_idx"] = current_zone_idx
                         rollout_results["current_zone_idx"].append(current_zone_idx)
-                        meters_in_current_zone = np.clip(
-                            (sim_state_position - zone_transitions[current_zone_idx - 1]).dot(
-                                normalized_vector_along_track_axis[current_zone_idx - 1]
-                            ),
-                            0,
-                            distance_between_zone_transitions[current_zone_idx - 1],
+                        sim_state_car_gear_and_wheels = state_dict["gear_and_wheels"]
+                        rollout_results["car_gear_and_wheels"].append(
+                            sim_state_car_gear_and_wheels
                         )
-                        distance_since_track_begin = (
-                            distance_from_start_track_to_prev_zone_transition[current_zone_idx - 1] + meters_in_current_zone
-                        )
-                        state_zone_center_coordinates_in_car_reference_system = sim_state_orientation.dot(
-                            (
-                                zone_centers[
-                                    current_zone_idx : current_zone_idx
-                                    + cfg.one_every_n_zone_centers_in_inputs * cfg.n_zone_centers_in_inputs : cfg.one_every_n_zone_centers_in_inputs,
-                                    :,
-                                ]
-                                - sim_state_position
-                            ).T
-                        ).T
-                        state_y_map_vector_in_car_reference_system = sim_state_orientation.dot(np.array([0, 1, 0]))
-                        state_car_velocity_in_car_reference_system = sim_state_orientation.dot(sim_state_velocity)
-                        state_car_angular_velocity_in_car_reference_system = sim_state_orientation.dot(sim_state_angular_speed)
-                        previous_actions = [
-                            get_config().inputs[
-                                rollout_results["actions"][k] if k >= 0 else get_config().action_forward_idx
-                            ]
+                        prev_indices = [
+                            rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
                             for k in range(
                                 len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
                                 len(rollout_results["actions"]),
                             )
                         ]
-                        floats = np.hstack(
-                            (
-                                0,
-                                np.array(
-                                    [
-                                        pa[input_str]
-                                        for pa in previous_actions
-                                        for input_str in ["accelerate", "brake", "left", "right"]
-                                    ]
-                                ),
-                                sim_state_car_gear_and_wheels.ravel(),
-                                state_car_angular_velocity_in_car_reference_system.ravel(),
-                                state_car_velocity_in_car_reference_system.ravel(),
-                                state_y_map_vector_in_car_reference_system.ravel(),
-                                state_zone_center_coordinates_in_car_reference_system.ravel(),
-                                min(
-                                    cfg.margin_to_announce_finish_meters,
-                                    distance_from_start_track_to_prev_zone_transition[
-                                        len(zone_centers) - cfg.n_zone_centers_extrapolate_after_end_of_map
-                                    ]
-                                    - distance_since_track_begin,
-                                ),
-                                sim_state_mobil.is_freewheeling,
-                            )
-                        ).astype(np.float32)
+                        prev_flat = prev_actions_flat_from_indices(
+                            prev_indices, cfg.inputs, cfg.action_forward_idx
+                        )
+                        floats = build_float_vector(state_dict, prev_flat, 0, cfg)
                         pc5 = time.perf_counter_ns()
                         instrumentation__grab_floats += pc5 - pc2
                         compute_action_asap_floats = False
@@ -855,105 +795,40 @@ class GameEnvBackend:
                     if compute_action_asap_floats:
                         pc2 = time.perf_counter_ns()
                         sim_state_race_time = last_known_simulation_state.race_time
-                        sim_state_dyna_current = last_known_simulation_state.dyna.current_state
-                        sim_state_mobil = last_known_simulation_state.scene_mobil
-                        sim_state_mobil_engine = sim_state_mobil.engine
-                        simulation_wheels = last_known_simulation_state.simulation_wheels
-                        wheel_state = [simulation_wheels[i].real_time_state for i in range(4)]
-                        sim_state_position = np.array(sim_state_dyna_current.position, dtype=np.float32)
-                        sim_state_orientation = sim_state_dyna_current.rotation.to_numpy().T
-                        sim_state_velocity = np.array(sim_state_dyna_current.linear_speed, dtype=np.float32)
-                        sim_state_angular_speed = np.array(sim_state_dyna_current.angular_speed, dtype=np.float32)
-                        gearbox_state = sim_state_mobil.gearbox_state
-                        counter_gearbox_state = 0
-                        if gearbox_state != 0 and len(rollout_results["car_gear_and_wheels"]) > 0:
-                            counter_gearbox_state = 1 + rollout_results["car_gear_and_wheels"][-1][15]
-                        sim_state_car_gear_and_wheels = np.array(
-                            [
-                                *(ws.is_sliding for ws in wheel_state),
-                                *(ws.has_ground_contact for ws in wheel_state),
-                                *(ws.damper_absorb for ws in wheel_state),
-                                gearbox_state,
-                                sim_state_mobil_engine.gear,
-                                sim_state_mobil_engine.actual_rpm,
-                                counter_gearbox_state,
-                                *(
-                                    i == contact_materials.physics_behavior_fromint[ws.contact_material_id & 0xFFFF]
-                                    for ws in wheel_state
-                                    for i in range(cfg.n_contact_material_physics_behavior_types)
-                                ),
-                            ],
-                            dtype=np.float32,
+                        last_gear = (
+                            rollout_results["car_gear_and_wheels"][-1]
+                            if len(rollout_results["car_gear_and_wheels"]) > 0
+                            else None
                         )
-                        if sim_state_position[1] > get_config().deck_height:
-                            current_zone_idx = update_current_zone_idx(
-                                current_zone_idx,
-                                zone_centers,
-                                sim_state_position,
-                                cfg.max_allowable_distance_to_virtual_checkpoint,
-                                gim.next_real_checkpoint_positions,
-                                gim.max_allowable_distance_to_real_checkpoint,
-                                cfg.n_zone_centers_extrapolate_after_end_of_map,
-                            )
+                        state_dict, current_zone_idx, distance_since_track_begin = state_dict_from_sim_state(
+                            last_known_simulation_state,
+                            zone_centers,
+                            zone_transitions,
+                            distance_between_zone_transitions,
+                            distance_from_start_track_to_prev_zone_transition,
+                            normalized_vector_along_track_axis,
+                            current_zone_idx,
+                            gim.next_real_checkpoint_positions,
+                            gim.max_allowable_distance_to_real_checkpoint,
+                            last_gear,
+                            cfg,
+                        )
                         if current_zone_idx > rollout_results["furthest_zone_idx"]:
                             last_progress_improvement_ms = sim_state_race_time
                             rollout_results["furthest_zone_idx"] = current_zone_idx
                         rollout_results["current_zone_idx"].append(current_zone_idx)
-                        meters_in_current_zone = np.clip(
-                            (sim_state_position - zone_transitions[current_zone_idx - 1]).dot(
-                                normalized_vector_along_track_axis[current_zone_idx - 1]
-                            ),
-                            0,
-                            distance_between_zone_transitions[current_zone_idx - 1],
-                        )
-                        distance_since_track_begin = (
-                            distance_from_start_track_to_prev_zone_transition[current_zone_idx - 1] + meters_in_current_zone
-                        )
-                        state_zone_center_coordinates_in_car_reference_system = sim_state_orientation.dot(
-                            (
-                                zone_centers[
-                                    current_zone_idx : current_zone_idx
-                                    + cfg.one_every_n_zone_centers_in_inputs * cfg.n_zone_centers_in_inputs : cfg.one_every_n_zone_centers_in_inputs,
-                                    :,
-                                ]
-                                - sim_state_position
-                            ).T
-                        ).T
-                        state_y_map_vector_in_car_reference_system = sim_state_orientation.dot(np.array([0, 1, 0]))
-                        state_car_velocity_in_car_reference_system = sim_state_orientation.dot(sim_state_velocity)
-                        state_car_angular_velocity_in_car_reference_system = sim_state_orientation.dot(sim_state_angular_speed)
-                        previous_actions = [
-                            get_config().inputs[rollout_results["actions"][k] if k >= 0 else get_config().action_forward_idx]
+                        sim_state_car_gear_and_wheels = state_dict["gear_and_wheels"]
+                        prev_indices = [
+                            rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
                             for k in range(
                                 len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
                                 len(rollout_results["actions"]),
                             )
                         ]
-                        floats = np.hstack(
-                            (
-                                0,
-                                np.array(
-                                    [
-                                        pa[input_str]
-                                        for pa in previous_actions
-                                        for input_str in ["accelerate", "brake", "left", "right"]
-                                    ]
-                                ),
-                                sim_state_car_gear_and_wheels.ravel(),
-                                state_car_angular_velocity_in_car_reference_system.ravel(),
-                                state_car_velocity_in_car_reference_system.ravel(),
-                                state_y_map_vector_in_car_reference_system.ravel(),
-                                state_zone_center_coordinates_in_car_reference_system.ravel(),
-                                min(
-                                    cfg.margin_to_announce_finish_meters,
-                                    distance_from_start_track_to_prev_zone_transition[
-                                        len(zone_centers) - cfg.n_zone_centers_extrapolate_after_end_of_map
-                                    ]
-                                    - distance_since_track_begin,
-                                ),
-                                sim_state_mobil.is_freewheeling,
-                            )
-                        ).astype(np.float32)
+                        prev_flat = prev_actions_flat_from_indices(
+                            prev_indices, cfg.inputs, cfg.action_forward_idx
+                        )
+                        floats = build_float_vector(state_dict, prev_flat, 0, cfg)
                         pc5 = time.perf_counter_ns()
                         instrumentation__grab_floats += pc5 - pc2
                         compute_action_asap_floats = False

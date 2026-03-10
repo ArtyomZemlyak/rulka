@@ -1,6 +1,6 @@
 [project]
 name = "rulka"
-version = "1.4.0"
+version = "1.5.0"
 description = "Trackmania AI with reinforcement learning - Rulka fork"
 license = {text = "MIT"}
 requires-python = ">=3.10,<3.12"
@@ -47,6 +47,7 @@ dependencies = [
     
     # Windows specific
     "pywin32>=306 ; sys_platform == 'win32'",
+    "triton-windows>=3.2.0 ; sys_platform == 'win32'",  # Triton backend for torch.compile on Windows
     
     # Linux specific
     "python-libxdo>=0.1.0 ; sys_platform == 'linux'",
@@ -67,6 +68,11 @@ doc = [
     "sphinx>=8.0.0",
     "sphinx_rtd_theme>=3.0.0",
     "sphinxcontrib-youtube>=1.4.0",
+]
+# For scripts/dataset/convert_to_hf_dataset.py and push_to_hf.py: Hugging Face Hub upload.
+hf = [
+    "datasets>=3.0.0",
+    "huggingface_hub>=0.25.0",
 ]
 
 [build-system]

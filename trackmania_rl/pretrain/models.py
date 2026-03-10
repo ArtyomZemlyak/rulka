@@ -374,7 +374,14 @@ class IQN_BC_MultiOffset(nn.Module):
         quantile_net = quantile_net.expand(-1, self.iqn_embedding_dimension)
         quantile_net = self.iqn_fc(quantile_net)
         concat = concat.repeat(num_quantiles, 1) * quantile_net
-        out = torch.stack([self.A_heads[i](concat) for i in range(len(self.A_heads))], dim=1)
+        # Dueling: Q = V + A - A.mean(-1) so V_head gets gradients during BC (same as RL forward).
+        V = self.V_head(concat)  # (B*num_quantiles, 1)
+        q_list = []
+        for i in range(len(self.A_heads)):
+            A_i = self.A_heads[i](concat)  # (B*num_quantiles, n_actions)
+            Q_i = V + A_i - A_i.mean(dim=-1, keepdim=True)
+            q_list.append(Q_i)
+        out = torch.stack(q_list, dim=1)
         return out, tau
 
     def state_dict_for_iqn_transfer(self, merge_all_heads: bool = False) -> dict:

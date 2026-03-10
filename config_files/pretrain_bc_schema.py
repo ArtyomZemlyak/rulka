@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
 import yaml
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from config_files.pretrain_schema import LightningConfig
@@ -76,17 +76,28 @@ class BCPretrainConfig(BaseSettings):
         default=None,
         description="Subdirectory name for this run. null = auto-increment run_001, run_002, ...",
     )
+    # Restrict training/val to these track IDs only (e.g. ['A01-Race']). null = use all tracks in data_dir.
+    track_ids: Optional[list[str]] = Field(
+        default=None,
+        description="If set, only these track IDs are used for train/val. Useful for fine-tuning on a single track.",
+    )
 
     # ---------- Preprocessed cache ----------
     preprocess_cache_dir: Optional[Path] = Field(
         default=None,
         description="Directory for BC cache (train.npy, train_actions.npy, etc.). null = disabled.",
     )
+    # Path to RL config. Required: image_size, n_actions, dense_hidden_dimension,
+    # iqn_embedding_dimension, float params (when use_floats) all come from here.
+    rl_config_path: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent / "rl" / "config_default.yaml",
+        description="Path to RL config; all RL-matching params are loaded from it.",
+    )
     cache_load_in_ram: bool = Field(default=False, description="Load cache arrays into RAM.")
     cache_build_workers: int = Field(default=0, ge=0, description="Threads for cache construction.")
 
     # ---------- Image ----------
-    image_size: int = Field(default=64, ge=16, le=512, description="Square input resolution.")
+    # image_size loaded from rl_config_path (neural_network.w_downsized).
     n_stack: int = Field(default=1, ge=1, le=32, description="Consecutive frames per sample.")
 
     # Image normalization: "01" = [0, 1] (current pretrain default); "iqn" = (x-128)/128
@@ -122,27 +133,12 @@ class BCPretrainConfig(BaseSettings):
         default=None,
         description="Path to Level 0 encoder.pt to initialize BC CNN. null = train from scratch.",
     )
-    use_floats: bool = Field(default=False, description="Use float features in BC (requires float data in cache and float_input_dim).")
-    n_actions: int = Field(default=12, ge=2, description="Number of discrete actions (must match RL config.inputs).")
-
-    # When use_floats is True: BC float head matches IQN float_feature_extractor for transfer.
-    # Set from RL config (neural_network.float_hidden_dim, state_normalization float_inputs_mean/std).
-    float_input_dim: Optional[int] = Field(
+    # Path to a previous BC run directory (e.g. output/ptretrain/bc/v3_multi_offset) to load full model from iqn_bc.pt for fine-tuning. Overrides encoder_init_path when use_full_iqn.
+    bc_resume_run_dir: Optional[Path] = Field(
         default=None,
-        description="Length of float state vector. Required when use_floats is True.",
+        description="Path to BC run dir containing iqn_bc.pt (and pretrain_meta.json) to resume/fine-tune from. Use with use_full_iqn.",
     )
-    float_hidden_dim: int = Field(
-        default=256,
-        description="Output dim of BC float head; must match RL neural_network.float_hidden_dim for IQN transfer.",
-    )
-    float_inputs_mean: Optional[list[float]] = Field(
-        default=None,
-        description="Mean for normalizing float inputs (same as RL state_normalization). Length = float_input_dim.",
-    )
-    float_inputs_std: Optional[list[float]] = Field(
-        default=None,
-        description="Std for normalizing float inputs (same as RL state_normalization). Length = float_input_dim.",
-    )
+    use_floats: bool = Field(default=False, description="Use float features in BC.")
     save_float_head: bool = Field(
         default=True,
         description="When use_floats True, save float head weights for IQN float_feature_extractor injection (future).",
@@ -161,21 +157,16 @@ class BCPretrainConfig(BaseSettings):
         default=False,
         description="When True and multi-offset (a_head or full IQN), save all offset heads into the same file: actions_head.pt gets {offset_0: ..., offset_1: ...}; iqn_bc.pt gets A_head.* (first) plus A_head_offset_1.*, A_head_offset_2.*, .... If False, only the first head is saved (default for RL merge).",
     )
-    # dense_hidden_dimension is used when use_actions_head or use_full_iqn; must match RL neural_network.dense_hidden_dimension.
-
     # ---------- Full IQN in BC (two variants) ----------
     use_full_iqn: bool = Field(
         default=False,
-        description="If True, train full IQN network in BC (img_head + float_feature_extractor + iqn_fc + A_head + V_head) for 1:1 transfer. Requires use_floats and float_input_dim.",
+        description="If True, train full IQN network in BC (img_head + float_feature_extractor + iqn_fc + A_head + V_head) for 1:1 transfer. Requires use_floats and rl_config_path.",
     )
     full_iqn_random_tau: bool = Field(
         default=False,
         description="When use_full_iqn True: if True sample tau ~ U(0,1) per batch; if False use fixed tau=0.5. Only used when use_full_iqn is True.",
     )
-    dense_hidden_dimension: int = Field(
-        default=1024,
-        description="Used when use_actions_head or use_full_iqn: hidden size of A_head middle layer; must match RL neural_network.dense_hidden_dimension.",
-    )
+    # dense_hidden_dimension, iqn_embedding_dimension loaded from rl_config_path.
     dropout: float = Field(
         default=0.0,
         ge=0.0,
@@ -187,10 +178,6 @@ class BCPretrainConfig(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Dropout between the two Linear layers of A_head MLP (use_actions_head only). Saved state_dict is remapped to IQN layout (no dropout in file).",
-    )
-    iqn_embedding_dimension: int = Field(
-        default=128,
-        description="IQN quantile embedding dimension. Used when use_full_iqn True; must match RL config.",
     )
 
     # ---------- Training ----------
@@ -230,23 +217,28 @@ class BCPretrainConfig(BaseSettings):
     def _coerce_path(cls, v: Any) -> Path:
         return Path(v)
 
-    @field_validator("preprocess_cache_dir", "encoder_init_path", mode="before")
+    @field_validator("preprocess_cache_dir", "encoder_init_path", "bc_resume_run_dir", mode="before")
     @classmethod
     def _coerce_optional_path(cls, v: Any) -> Optional[Path]:
         return None if v is None else Path(v)
 
+    @field_validator("rl_config_path", mode="before")
+    @classmethod
+    def _coerce_rl_config_path(cls, v: Any) -> Path:
+        if v is None:
+            return Path(__file__).resolve().parent / "rl" / "config_default.yaml"
+        return Path(v)
+
     @model_validator(mode="after")
-    def _require_float_dim_when_floats(self) -> "BCPretrainConfig":
-        if self.use_floats and (self.float_input_dim is None or self.float_input_dim < 1):
-            raise ValueError("use_floats is True but float_input_dim is not set or < 1")
+    def _require_rl_config_exists(self) -> "BCPretrainConfig":
+        if not Path(self.rl_config_path).exists():
+            raise ValueError(f"rl_config_path {self.rl_config_path} does not exist")
         return self
 
     @model_validator(mode="after")
     def _require_floats_when_full_iqn(self) -> "BCPretrainConfig":
         if self.use_full_iqn and not self.use_floats:
             raise ValueError("use_full_iqn is True but use_floats is False; full IQN requires float inputs.")
-        if self.use_full_iqn and (self.float_input_dim is None or self.float_input_dim < 1):
-            raise ValueError("use_full_iqn is True but float_input_dim is not set or < 1")
         return self
 
     @model_validator(mode="after")
@@ -272,15 +264,28 @@ class BCPretrainConfig(BaseSettings):
         )
 
 
+def _load_pretrain_bc_yaml(path: Path) -> dict[str, Any]:
+    """Load a single YAML file. If it contains _base_, load that file first and merge (current file wins)."""
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    base_name = data.pop("_base_", None)
+    if base_name is None:
+        return data
+    base_path = path.parent / base_name
+    base_data = _load_pretrain_bc_yaml(base_path)
+    base_data.update(data)
+    return base_data
+
+
 def load_pretrain_bc_config(
     yaml_path: Optional[Path | str] = None,
     **overrides: Any,
 ) -> BCPretrainConfig:
-    """Load BCPretrainConfig from a YAML file, then apply overrides. Missing file uses empty dict."""
+    """Load BCPretrainConfig from a YAML file, then apply overrides. Missing file uses empty dict.
+    If the YAML contains _base_: <filename>, that file is loaded first and the current file overrides it."""
     path = Path(yaml_path) if yaml_path else _DEFAULT_BC_CONFIG_PATH
-    data: dict[str, Any] = {}
-    if path.exists():
-        with open(path, encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
+    data = _load_pretrain_bc_yaml(path)
     data.update(overrides)
     return BCPretrainConfig.model_validate(data)

@@ -16,6 +16,9 @@ loss/overall-acc and "main-actions" validation accuracy (mean over classes 0,1,2
 Usage:
   python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v1 output/ptretrain/bc/v1.1
   python scripts/analyze_pretrain_bc.py --base-dir output/ptretrain/bc v1 v1.1 --plot --output-dir docs/source/_static
+
+Plot filenames are derived from run names (e.g. exp_pretrain_bc_v1_v1.1_per_action_accuracy.jpg)
+so different comparisons do not overwrite each other. Use --prefix to override.
 """
 
 from __future__ import annotations
@@ -160,6 +163,7 @@ def run_analysis(
     interval_epochs: int,
     plot: bool = False,
     output_dir: Path | None = None,
+    plot_prefix: str | None = None,
 ) -> None:
     if csv_paths:
         # Explicit CSV paths: names from parent dir or file stem
@@ -334,12 +338,105 @@ def run_analysis(
     print("\n" + "=" * 80)
 
     if plot and output_dir is not None:
-        _plot_per_action_accuracy(runs, output_dir)
+        prefix = plot_prefix if plot_prefix else "_".join(
+            n.replace("/", "_").replace(" ", "_") for n, _, _, _ in runs
+        )
+        _plot_per_action_accuracy(runs, output_dir, prefix)
+        if has_offset:
+            _plot_per_offset_accuracy(runs, output_dir)
+
+
+def _offset_cols_sorted(merged: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """Return (col_name, offset_ms) sorted by offset_ms."""
+    cols = set()
+    for row in merged:
+        for k in row:
+            if k.startswith("val_acc_offset_ms_") and row.get(k) is not None:
+                try:
+                    ms = int(k.split("_")[-1])
+                    cols.add((k, ms))
+                except (ValueError, IndexError):
+                    pass
+    return sorted(cols, key=lambda x: x[1])
+
+
+def _plot_per_offset_accuracy(
+    runs: list[tuple[str, Path, list[dict[str, Any]], dict[str, Any] | None]],
+    output_dir: Path,
+) -> None:
+    """Plot per-offset val_acc: (1) vs epoch for each offset, (2) bar chart at final epoch."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("Warning: matplotlib not installed; skipping per-offset plot")
+        return
+    offset_runs = [(n, m) for n, _, m, _ in runs if _offset_cols_sorted(m)]
+    if not offset_runs:
+        return
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, merged in offset_runs:
+        cols_sorted = _offset_cols_sorted(merged)
+        if not cols_sorted:
+            continue
+        by_ep: dict[int, dict[str, Any]] = {}
+        for row in merged:
+            ep = row.get("epoch")
+            if ep is None or row.get("val_loss") is None:
+                continue
+            ep = int(ep) if isinstance(ep, (int, float)) else int(ep)
+            by_ep[ep] = row
+        epochs = sorted(by_ep.keys())
+
+        # Plot 1: val_acc per offset vs epoch
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for col, ms in cols_sorted:
+            ys = [by_ep[ep].get(col) for ep in epochs]
+            ys = [float(y) if y is not None else float("nan") for y in ys]
+            ax.plot(epochs, ys, label=f"{ms} ms", alpha=0.9)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Validation accuracy")
+        ax.set_title(f"Per-offset validation accuracy vs epoch ({name})")
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(loc="lower left", fontsize=8, ncol=3)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        safe_name = name.replace("/", "_").replace(" ", "_")
+        out1 = output_dir / f"exp_pretrain_bc_{safe_name}_per_offset_vs_epoch.jpg"
+        plt.savefig(out1, dpi=120)
+        plt.close()
+        print(f"Saved plot: {out1}")
+
+        # Plot 2: bar chart at final epoch
+        last_ep = max(epochs)
+        last_row = by_ep[last_ep]
+        offsets_ms = [ms for _, ms in cols_sorted]
+        accs = [float(last_row.get(col, 0) or 0) for col, _ in cols_sorted]
+        fig, ax = plt.subplots(figsize=(8, 5))
+        x = np.arange(len(offsets_ms))
+        bars = ax.bar(x, accs, color="steelblue", alpha=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{ms} ms" for ms in offsets_ms], rotation=45, ha="right")
+        ax.set_ylabel("Validation accuracy")
+        ax.set_xlabel("Offset (ms)")
+        ax.set_title(f"Per-offset validation accuracy at epoch {last_ep} ({name})")
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        out2 = output_dir / f"exp_pretrain_bc_{safe_name}_per_offset_final_epoch.jpg"
+        plt.savefig(out2, dpi=120)
+        plt.close()
+        print(f"Saved plot: {out2}")
 
 
 def _plot_per_action_accuracy(
     runs: list[tuple[str, Path, list[dict[str, Any]], dict[str, Any] | None]],
     output_dir: Path,
+    prefix: str,
 ) -> None:
     """Plot val_acc_class_* vs epoch for each run; one subplot per run, 12 lines (actions) per subplot."""
     try:
@@ -387,7 +484,7 @@ def _plot_per_action_accuracy(
         ax.legend(loc="lower left", fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    out_path = output_dir / "exp_pretrain_bc_per_action_accuracy.jpg"
+    out_path = output_dir / f"exp_pretrain_bc_{prefix}_per_action_accuracy.jpg"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=120)
     plt.close()
@@ -442,6 +539,12 @@ def main() -> None:
         default=None,
         help="Directory to save plot (e.g. docs/source/_static). Required if --plot.",
     )
+    ap.add_argument(
+        "--prefix",
+        type=str,
+        default=None,
+        help="Prefix for plot filenames (default: run names joined with _). E.g. --prefix v3_comparison.",
+    )
     args = ap.parse_args()
 
     if args.plot and args.output_dir is None:
@@ -455,6 +558,7 @@ def main() -> None:
         interval_epochs=args.interval_epochs,
         plot=args.plot,
         output_dir=args.output_dir,
+        plot_prefix=args.prefix,
     )
 
 

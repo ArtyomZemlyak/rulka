@@ -1,0 +1,35 @@
+# Fine-tune BC on a single track (A01-Race) from v3_multi_offset.
+# Data: maps/img-A01 (capture from maps/replays-A01 via setup_a01_for_bc.py).
+#
+# 1) Prepare data:
+#    python scripts/setup_a01_for_bc.py download
+#    python scripts/setup_a01_for_bc.py capture   # TMInterface + game must be running
+#    python scripts/setup_a01_for_bc.py verify
+# 2) Run BC:
+#    python scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v3_multi_offset_A01_Race.yaml
+#
+# Cache is built/used for the selected track(s) when preprocess_cache_dir is set (e.g. cache/A01).
+
+_base_: pretrain_config_bc_v3_multi_offset.yaml
+
+run_name: v3_multi_offset_A01_Race
+
+# Data from A01-only capture: maps/replays-A01 (replay) -> maps/img-A01 (frames).
+data_dir: maps/img-A01
+# Directory for BC cache. null = load on-the-fly from data_dir (slower, no preprocessing).
+preprocess_cache_dir: cache/A01
+
+# Load full BC model from this run for fine-tuning (iqn_bc.pt).
+bc_resume_run_dir: output/ptretrain/bc/v3_multi_offset
+
+# Only use data from this track. Must match folder name under data_dir (A01-Race).
+track_ids:
+  - A01-Race
+
+# Typically use fewer epochs for fine-tuning.
+epochs: 20
+
+batch_size: 128
+
+# Optional: lower LR for fine-tuning.
+lr: 0.0001

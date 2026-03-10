@@ -7,8 +7,9 @@ import math
 import random
 import sys
 import time
+import threading
 import typing
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 from multiprocessing.connection import wait
 from pathlib import Path
@@ -171,15 +172,40 @@ def learner_process_fn(
     # ========================================================
     # Load existing stuff
     # ========================================================
-    # noinspection PyBroadException
+    def _state_dict_for_model(loaded_sd: dict, model: torch.nn.Module) -> dict:
+        """Remap checkpoint keys if it was saved without torch.compile (no _orig_mod. prefix)."""
+        model_keys = list(model.state_dict().keys())
+        loaded_keys = list(loaded_sd.keys())
+        if not loaded_keys or not model_keys:
+            return loaded_sd
+        model_has_prefix = model_keys[0].startswith("_orig_mod.")
+        loaded_has_prefix = loaded_keys[0].startswith("_orig_mod.")
+        if model_has_prefix and not loaded_has_prefix:
+            return {"_orig_mod." + k: v for k, v in loaded_sd.items()}
+        return loaded_sd
+
+    w1_path = save_dir / "weights1.torch"
+    w2_path = save_dir / "weights2.torch"
     try:
-        online_network.load_state_dict(torch.load(f=save_dir / "weights1.torch", weights_only=False))
-        target_network.load_state_dict(torch.load(f=save_dir / "weights2.torch", weights_only=False))
+        if not w1_path.exists() or not w2_path.exists():
+            raise FileNotFoundError(
+                f"Checkpoint files missing in {save_dir}: "
+                f"weights1.torch exists={w1_path.exists()}, weights2.torch exists={w2_path.exists()}"
+            )
+        sd1 = torch.load(f=w1_path, weights_only=False)
+        sd2 = torch.load(f=w2_path, weights_only=False)
+        sd1 = _state_dict_for_model(sd1, online_network)
+        sd2 = _state_dict_for_model(sd2, target_network)
+        online_network.load_state_dict(sd1, strict=True)
+        target_network.load_state_dict(sd2, strict=True)
         print("[OK] Weights loaded successfully")
         if get_config().pretrain_encoder_path:
             print("[OK] Pretrain: img_head loaded from checkpoint (initialized via pretrain_encoder_path).")
-    except:
-        print("[INFO] Starting with fresh weights (no checkpoint found)")
+    except FileNotFoundError as e:
+        print(f"[INFO] Starting with fresh weights: {e}")
+    except Exception as e:
+        print(f"[WARNING] Could not load checkpoint from {save_dir}: {e}")
+        print("[INFO] Starting with fresh weights (fix config/architecture or remove old .torch to avoid this message)")
 
     _apply_pretrain_freeze(online_network)
     _apply_pretrain_freeze(target_network)
@@ -258,365 +284,386 @@ def learner_process_fn(
         tau_epsilon_boltzmann=get_config().tau_epsilon_boltzmann,
     )
 
-    while True:  # Trainer loop
-        before_wait_time = time.perf_counter()
-        wait(rollout_queue_readers)
-        time_waited = time.perf_counter() - before_wait_time
-        if time_waited > 5:  # Only warn if waited more than 5 seconds
-            print(f"[WARNING] Learner waited {time_waited:.1f}s for workers (workers might be slow)")
-        time_waited_for_workers_since_last_tensorboard_write += time_waited
-        for idx in queue_check_order:
-            if not rollout_queues[idx].empty():
+    # ================================================================
+    #   PHASE 3: IngestThread — offload rollout ingestion to background
+    # ================================================================
+    # The buffer stays in-process so train_on_batch(buffer) and
+    # buffer.update_priority() work unchanged.
+    # The IngestThread reads rollouts, fills the buffer, and pushes
+    # race metrics into a deque for the main thread to log to TB.
+    # GIL is released during PyTorch tensor ops (vectorized buffer fill),
+    # so the thread truly runs in parallel with GPU training.
+    # ================================================================
+
+    buffer_lock = threading.Lock()  # protects buffer/buffer_test during concurrent access
+    metrics_deque = deque(maxlen=1024)  # thread-safe; main thread pops for TB logging
+    ingest_stats_lock = threading.Lock()  # protects accumulated_stats fields written by ingest thread
+
+    # Mutable containers shared between threads
+    ingest_state = {
+        "buffer": buffer,
+        "buffer_test": buffer_test,
+        "memory_size": memory_size,
+        "memory_size_start_learn": memory_size_start_learn,
+        "neural_net_reset_counter": 0,
+    }
+
+    def _ingest_thread_fn():
+        """Background thread: reads rollouts from collectors, fills the replay buffer."""
+        nonlocal offset_cumul_number_single_memories_used
+        queue_check_order_t = list(range(len(rollout_queues)))
+        rollout_queue_readers_t = [q._reader for q in rollout_queues]
+
+        while True:
+            try:
+                wait(rollout_queue_readers_t)
+                for idx in queue_check_order_t:
+                    if not rollout_queues[idx].empty():
+                        (
+                            rollout_results_t,
+                            end_race_stats_t,
+                            fill_buffer_t,
+                            is_explo_t,
+                            map_name_t,
+                            map_status_t,
+                            rollout_duration_t,
+                            loop_number_t,
+                        ) = rollout_queues[idx].get()
+                        queue_check_order_t.append(queue_check_order_t.pop(queue_check_order_t.index(idx)))
+                        break
+                else:
+                    continue
+
+                # Push race metrics for TB logging by main thread
+                metrics_deque.append((
+                    rollout_results_t, end_race_stats_t, fill_buffer_t,
+                    is_explo_t, map_name_t, map_status_t, rollout_duration_t, loop_number_t,
+                ))
+
+                if fill_buffer_t:
+                    # Dynamic reward annealing (read shared counter)
+                    frames_played = accumulated_stats["cumul_number_frames_played"]
+                    gamma_t = utilities.from_linear_schedule(get_config().gamma_schedule, frames_played)
+                    eng_ss = utilities.from_linear_schedule(get_config().engineered_speedslide_reward_schedule, frames_played)
+                    eng_ns = utilities.from_linear_schedule(get_config().engineered_neoslide_reward_schedule, frames_played)
+                    eng_kk = utilities.from_linear_schedule(get_config().engineered_kamikaze_reward_schedule, frames_played)
+                    eng_vcp = utilities.from_linear_schedule(get_config().engineered_close_to_vcp_reward_schedule, frames_played)
+
+                    # Check memory resize
+                    new_msz, new_msl = utilities.from_staircase_schedule(get_config().memory_size_schedule, frames_played)
+                    if new_msz != ingest_state["memory_size"]:
+                        with buffer_lock:
+                            ingest_state["buffer"], ingest_state["buffer_test"] = resize_buffers(
+                                ingest_state["buffer"], ingest_state["buffer_test"], new_msz
+                            )
+                        with ingest_stats_lock:
+                            offset_cumul_number_single_memories_used += (
+                                new_msl - ingest_state["memory_size_start_learn"]
+                            ) * get_config().number_times_single_memory_is_used_before_discard
+                        ingest_state["memory_size_start_learn"] = new_msl
+                        ingest_state["memory_size"] = new_msz
+
+                    # Fill buffer (CPU-heavy, vectorized PyTorch — GIL released during tensor ops)
+                    with buffer_lock:
+                        (
+                            ingest_state["buffer"],
+                            ingest_state["buffer_test"],
+                            n_added_train,
+                            n_added_test,
+                        ) = buffer_management.fill_buffer_from_rollout_with_n_steps_rule(
+                            ingest_state["buffer"],
+                            ingest_state["buffer_test"],
+                            rollout_results_t,
+                            get_config().n_steps,
+                            gamma_t,
+                            get_config().discard_non_greedy_actions_in_nsteps,
+                            eng_ss, eng_ns, eng_kk, eng_vcp,
+                        )
+
+                    # Update shared counters (thread-safe)
+                    with ingest_stats_lock:
+                        accumulated_stats["cumul_number_memories_generated"] += n_added_train + n_added_test
+                        accumulated_stats["cumul_number_single_memories_should_have_been_used"] += (
+                            get_config().number_times_single_memory_is_used_before_discard * n_added_train
+                        )
+                        ingest_state["neural_net_reset_counter"] += n_added_train
+                    # shared_steps is updated by the main thread after it adds cumul_number_frames_played
+
+            except Exception as e:
+                print(f"[IngestThread] Error: {e}")
+                import traceback
+                traceback.print_exc()
+
+    ingest_thread = threading.Thread(target=_ingest_thread_fn, daemon=True, name="IngestThread")
+    ingest_thread.start()
+    print("[OK] IngestThread started (Phase 3: async buffer fill)")
+
+    last_rollout_results = None  # Track last rollout for IQN spread calculation
+
+    # ================================================================
+    #   MAIN TRAINING LOOP
+    # ================================================================
+    while True:
+        # -------------------------------------------------------------
+        # 1. PROCESS RACE METRICS from IngestThread (non-blocking)
+        # -------------------------------------------------------------
+        processed_any_metrics = False
+        while metrics_deque:
+            try:
                 (
-                    rollout_results,
-                    end_race_stats,
-                    fill_buffer,
-                    is_explo,
-                    map_name,
-                    map_status,
-                    rollout_duration,
-                    loop_number,
-                ) = rollout_queues[idx].get()
-                queue_check_order.append(queue_check_order.pop(queue_check_order.index(idx)))
+                    rollout_results, end_race_stats, fill_buffer,
+                    is_explo, map_name, map_status, rollout_duration, loop_number,
+                ) = metrics_deque.popleft()
+                processed_any_metrics = True
+                last_rollout_results = rollout_results  # Save for IQN spread later
+            except IndexError:
                 break
 
-        new_tensorboard_suffix = utilities.from_staircase_schedule(
-            get_config().tensorboard_suffix_schedule,
-            accumulated_stats["cumul_number_frames_played"],
-        )
-        if new_tensorboard_suffix != tensorboard_suffix:
-            tensorboard_suffix = new_tensorboard_suffix
-            tensorboard_writer = SummaryWriter(log_dir=str(tensorboard_base_dir / (get_config().run_name + tensorboard_suffix)))
+            accumulated_stats["cumul_number_frames_played"] += len(rollout_results["frames"])
+            shared_steps.value = accumulated_stats["cumul_number_frames_played"]
 
-        (
-            new_memory_size,
-            new_memory_size_start_learn,
-        ) = utilities.from_staircase_schedule(
-            get_config().memory_size_schedule,
-            accumulated_stats["cumul_number_frames_played"],
-        )
-        if new_memory_size != memory_size:
-            buffer, buffer_test = resize_buffers(buffer, buffer_test, new_memory_size)
-            offset_cumul_number_single_memories_used += (
-                new_memory_size_start_learn - memory_size_start_learn
-            ) * get_config().number_times_single_memory_is_used_before_discard
-            memory_size_start_learn = new_memory_size_start_learn
-            memory_size = new_memory_size
-        # ===============================================
-        #   VERY BASIC TRAINING ANNEALING
-        # ===============================================
+            new_tensorboard_suffix = utilities.from_staircase_schedule(
+                get_config().tensorboard_suffix_schedule,
+                accumulated_stats["cumul_number_frames_played"],
+            )
+            if new_tensorboard_suffix != tensorboard_suffix:
+                tensorboard_suffix = new_tensorboard_suffix
+                tensorboard_writer = SummaryWriter(log_dir=str(tensorboard_base_dir / (get_config().run_name + tensorboard_suffix)))
 
-        # LR and weight_decay calculation
+            if get_config().plot_race_time_left_curves and not is_explo and (loop_number // 5) % 17 == 0:
+                race_time_left_curves(rollout_results, inferer, save_dir, map_name)
+                tau_curves(rollout_results, inferer, save_dir, map_name)
+                with buffer_lock:
+                    distribution_curves(ingest_state["buffer"], save_dir, online_network, target_network)
+                    loss_distribution(ingest_state["buffer"], save_dir, online_network, target_network)
+
+            # ===============================================
+            #   WRITE SINGLE RACE RESULTS TO TENSORBOARD
+            # ===============================================
+            race_stats_to_write = {
+                f"race_time_ratio_{map_name}": end_race_stats["race_time_for_ratio"] / (rollout_duration * 1000),
+                f"explo_race_time_{map_status}_{map_name}" if is_explo else f"eval_race_time_{map_status}_{map_name}": end_race_stats["race_time"] / 1000,
+                f"explo_race_finished_{map_status}_{map_name}" if is_explo else f"eval_race_finished_{map_status}_{map_name}": end_race_stats["race_finished"],
+                f"mean_action_gap_{map_name}": -(np.array(rollout_results["q_values"]) - np.array(rollout_results["q_values"]).max(axis=1, initial=None).reshape(-1, 1)).mean(),
+                f"single_zone_reached_{map_status}_{map_name}": rollout_results["furthest_zone_idx"],
+                "instrumentation__answer_normal_step": end_race_stats["instrumentation__answer_normal_step"],
+                "instrumentation__answer_action_step": end_race_stats["instrumentation__answer_action_step"],
+                "instrumentation__between_run_steps": end_race_stats["instrumentation__between_run_steps"],
+                "instrumentation__grab_frame": end_race_stats["instrumentation__grab_frame"],
+                "instrumentation__convert_frame": end_race_stats["instrumentation__convert_frame"],
+                "instrumentation__grab_floats": end_race_stats["instrumentation__grab_floats"],
+                "instrumentation__exploration_policy": end_race_stats["instrumentation__exploration_policy"],
+                "instrumentation__request_inputs_and_speed": end_race_stats["instrumentation__request_inputs_and_speed"],
+                "tmi_protection_cutoff": end_race_stats["tmi_protection_cutoff"],
+                "worker_time_in_rollout_percentage": rollout_results["worker_time_in_rollout_percentage"],
+            }
+
+            if not is_explo:
+                race_stats_to_write[f"avg_Q_{map_status}_{map_name}"] = np.mean(rollout_results["q_values"])
+
+            if end_race_stats["race_finished"]:
+                race_stats_to_write[f"{'explo' if is_explo else 'eval'}_race_time_finished_{map_status}_{map_name}"] = (
+                    end_race_stats["race_time"] / 1000
+                )
+                if not is_explo:
+                    accumulated_stats["rolling_mean_ms"][map_name] = (
+                        accumulated_stats["rolling_mean_ms"].get(map_name, get_config().cutoff_rollout_if_race_not_finished_within_duration_ms)
+                        * 0.9
+                        + end_race_stats["race_time"] * 0.1
+                    )
+            if (
+                (not is_explo)
+                and end_race_stats["race_finished"]
+                and end_race_stats["race_time"] < 1.02 * accumulated_stats["rolling_mean_ms"][map_name]
+            ):
+                race_stats_to_write[f"eval_race_time_robust_{map_status}_{map_name}"] = end_race_stats["race_time"] / 1000
+                if map_name in reference_times:
+                    for reference_time_name in ["author", "gold"]:
+                        if reference_time_name in reference_times[map_name]:
+                            reference_time = reference_times[map_name][reference_time_name]
+                            race_stats_to_write[f"eval_ratio_{map_status}_{reference_time_name}_{map_name}"] = (
+                                100 * (end_race_stats["race_time"] / 1000) / reference_time
+                            )
+                            race_stats_to_write[f"eval_agg_ratio_{map_status}_{reference_time_name}"] = (
+                                100 * (end_race_stats["race_time"] / 1000) / reference_time
+                            )
+
+            for i in [0]:
+                race_stats_to_write[f"q_value_{i}_starting_frame_{map_name}"] = end_race_stats[f"q_value_{i}_starting_frame"]
+            if not is_explo:
+                for i, split_time in enumerate(
+                    [(e - s) / 1000 for s, e in zip(end_race_stats["cp_time_ms"][:-1], end_race_stats["cp_time_ms"][1:])]
+                ):
+                    race_stats_to_write[f"split_{map_name}_{i}"] = split_time
+
+            walltime_tb = time.time()
+            for tag, value in race_stats_to_write.items():
+                if tag.startswith("eval_race_time") or tag.startswith("explo_race_time"):
+                    grouped_tag = f"Race/{tag}"
+                elif tag.startswith("eval_race_finished") or tag.startswith("explo_race_finished"):
+                    grouped_tag = f"Race/{tag}"
+                elif tag.startswith("race_time_ratio"):
+                    grouped_tag = f"Race/{tag}"
+                elif tag.startswith("avg_Q") or tag.startswith("single_zone_reached") or tag.startswith("mean_action_gap") or tag.startswith("q_value_"):
+                    grouped_tag = f"RL/{tag}"
+                elif tag.startswith("split_"):
+                    grouped_tag = f"Race/{tag}"
+                elif tag.startswith("instrumentation__") or tag.startswith("worker_time_") or tag.startswith("tmi_protection_"):
+                    grouped_tag = f"Performance/{tag}"
+                else:
+                    grouped_tag = tag
+                tensorboard_writer.add_scalar(
+                    tag=grouped_tag, scalar_value=value,
+                    global_step=accumulated_stats["cumul_number_frames_played"], walltime=walltime_tb,
+                )
+
+            # ===============================================
+            #   SAVE STUFF IF THIS WAS A GOOD RACE
+            # ===============================================
+            is_new_record = end_race_stats["race_time"] < accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
+            if is_new_record:
+                old_best = accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
+                accumulated_stats["alltime_min_ms"][map_name] = end_race_stats["race_time"]
+                improvement = (old_best - end_race_stats["race_time"]) / 1000
+                race_time_s = end_race_stats["race_time"] / 1000
+                race_finished_str = "FINISH" if end_race_stats["race_finished"] else "DNF"
+                explo_str = "EXPLO" if is_explo else "EVAL"
+                if old_best < 99999999:
+                    print(f"\n>>> NEW RECORD! [{explo_str}] [{race_finished_str}] {map_name:15} {race_time_s:6.2f}s (improved by {improvement:.3f}s) <<<\n")
+                else:
+                    print(f"\n>>> FIRST FINISH! [{explo_str}] {map_name:15} {race_time_s:6.2f}s <<<\n")
+                if accumulated_stats["cumul_number_frames_played"] > get_config().frames_before_save_best_runs:
+                    name = f"{map_name}_{end_race_stats['race_time']}"
+                    utilities.save_run(base_dir, save_dir / "best_runs" / name, rollout_results, f"{name}.inputs", inputs_only=False)
+                    utilities.save_checkpoint(save_dir / "best_runs", online_network, target_network, optimizer1, scaler)
+
+            if end_race_stats["race_time"] < get_config().threshold_to_save_all_runs_ms:
+                name = f"{map_name}_{end_race_stats['race_time']}_{datetime.now().strftime('%m%d_%H%M%S')}_{accumulated_stats['cumul_number_frames_played']}_{'explo' if is_explo else 'eval'}"
+                utilities.save_run(base_dir, save_dir / "good_runs", rollout_results, f"{name}.inputs", inputs_only=True)
+
+        # -------------------------------------------------------------
+        # 2. TRAINING ANNEALING (every iteration of main loop)
+        # -------------------------------------------------------------
         learning_rate = utilities.from_exponential_schedule(get_config().lr_schedule, accumulated_stats["cumul_number_frames_played"])
         weight_decay = get_config().weight_decay_lr_ratio * learning_rate
-        engineered_speedslide_reward = utilities.from_linear_schedule(
-            get_config().engineered_speedslide_reward_schedule,
-            accumulated_stats["cumul_number_frames_played"],
-        )
-        engineered_neoslide_reward = utilities.from_linear_schedule(
-            get_config().engineered_neoslide_reward_schedule,
-            accumulated_stats["cumul_number_frames_played"],
-        )
-        engineered_kamikaze_reward = utilities.from_linear_schedule(
-            get_config().engineered_kamikaze_reward_schedule, accumulated_stats["cumul_number_frames_played"]
-        )
-        engineered_close_to_vcp_reward = utilities.from_linear_schedule(
-            get_config().engineered_close_to_vcp_reward_schedule, accumulated_stats["cumul_number_frames_played"]
-        )
         gamma = utilities.from_linear_schedule(get_config().gamma_schedule, accumulated_stats["cumul_number_frames_played"])
-
-        # ===============================================
-        #   RELOAD
-        # ===============================================
 
         for param_group in optimizer1.param_groups:
             param_group["lr"] = learning_rate
             param_group["epsilon"] = get_config().adam_epsilon
             param_group["betas"] = (get_config().adam_beta1, get_config().adam_beta2)
 
-        if isinstance(buffer._sampler, PrioritizedSampler):
-            buffer._sampler._alpha = get_config().prio_alpha
-            buffer._sampler._beta = get_config().prio_beta
-            buffer._sampler._eps = get_config().prio_epsilon
+        with buffer_lock:
+            if isinstance(ingest_state["buffer"]._sampler, PrioritizedSampler):
+                ingest_state["buffer"]._sampler._alpha = get_config().prio_alpha
+                ingest_state["buffer"]._sampler._beta = get_config().prio_beta
+                ingest_state["buffer"]._sampler._eps = get_config().prio_epsilon
 
-        if get_config().plot_race_time_left_curves and not is_explo and (loop_number // 5) % 17 == 0:
-            race_time_left_curves(rollout_results, inferer, save_dir, map_name)
-            tau_curves(rollout_results, inferer, save_dir, map_name)
-            distribution_curves(buffer, save_dir, online_network, target_network)
-            loss_distribution(buffer, save_dir, online_network, target_network)
-            # patrick_curves(rollout_results, trainer, save_dir, map_name)
+        # Memory size tracking for main loop
+        memory_size = ingest_state["memory_size"]
+        memory_size_start_learn = ingest_state["memory_size_start_learn"]
 
-        accumulated_stats["cumul_number_frames_played"] += len(rollout_results["frames"])
+        # -------------------------------------------------------------
+        # 3. PERIODIC NETWORK RESET (check counter from ingest thread)
+        # -------------------------------------------------------------
+        with ingest_stats_lock:
+            neural_net_reset_counter = ingest_state["neural_net_reset_counter"]
 
-        # ===============================================
-        #   WRITE SINGLE RACE RESULTS TO TENSORBOARD
-        # ===============================================
-        race_stats_to_write = {
-            f"race_time_ratio_{map_name}": end_race_stats["race_time_for_ratio"] / (rollout_duration * 1000),
-            f"explo_race_time_{map_status}_{map_name}" if is_explo else f"eval_race_time_{map_status}_{map_name}": end_race_stats[
-                "race_time"
-            ]
-            / 1000,
-            f"explo_race_finished_{map_status}_{map_name}" if is_explo else f"eval_race_finished_{map_status}_{map_name}": end_race_stats[
-                "race_finished"
-            ],
-            f"mean_action_gap_{map_name}": -(
-                np.array(rollout_results["q_values"]) - np.array(rollout_results["q_values"]).max(axis=1, initial=None).reshape(-1, 1)
-            ).mean(),
-            f"single_zone_reached_{map_status}_{map_name}": rollout_results["furthest_zone_idx"],
-            "instrumentation__answer_normal_step": end_race_stats["instrumentation__answer_normal_step"],
-            "instrumentation__answer_action_step": end_race_stats["instrumentation__answer_action_step"],
-            "instrumentation__between_run_steps": end_race_stats["instrumentation__between_run_steps"],
-            "instrumentation__grab_frame": end_race_stats["instrumentation__grab_frame"],
-            "instrumentation__convert_frame": end_race_stats["instrumentation__convert_frame"],
-            "instrumentation__grab_floats": end_race_stats["instrumentation__grab_floats"],
-            "instrumentation__exploration_policy": end_race_stats["instrumentation__exploration_policy"],
-            "instrumentation__request_inputs_and_speed": end_race_stats["instrumentation__request_inputs_and_speed"],
-            "tmi_protection_cutoff": end_race_stats["tmi_protection_cutoff"],
-            "worker_time_in_rollout_percentage": rollout_results["worker_time_in_rollout_percentage"],
-        }
-        
-        # Don't print every race - only NEW RECORDS and periodic summaries (every 5 minutes)
+        if neural_net_reset_counter >= get_config().reset_every_n_frames_generated or single_reset_flag != get_config().single_reset_flag:
+            with ingest_stats_lock:
+                ingest_state["neural_net_reset_counter"] = 0
+            single_reset_flag = get_config().single_reset_flag
+            accumulated_stats["cumul_number_single_memories_should_have_been_used"] += get_config().additional_transition_after_reset
 
-        if not is_explo:
-            race_stats_to_write[f"avg_Q_{map_status}_{map_name}"] = np.mean(rollout_results["q_values"])
-
-        if end_race_stats["race_finished"]:
-            race_stats_to_write[f"{'explo' if is_explo else 'eval'}_race_time_finished_{map_status}_{map_name}"] = (
-                end_race_stats["race_time"] / 1000
+            _, untrained_iqn_network = make_untrained_iqn_network(get_config().use_jit, False)
+            frozen_prefixes = _get_frozen_param_prefixes()
+            utilities.soft_copy_param(
+                online_network, untrained_iqn_network, get_config().overall_reset_mul_factor,
+                skip_key_prefixes=frozen_prefixes,
             )
-            if not is_explo:
-                accumulated_stats["rolling_mean_ms"][map_name] = (
-                    accumulated_stats["rolling_mean_ms"].get(map_name, get_config().cutoff_rollout_if_race_not_finished_within_duration_ms)
-                    * 0.9
-                    + end_race_stats["race_time"] * 0.1
-                )
-        if (
-            (not is_explo)
-            and end_race_stats["race_finished"]
-            and end_race_stats["race_time"] < 1.02 * accumulated_stats["rolling_mean_ms"][map_name]
-        ):
-            race_stats_to_write[f"eval_race_time_robust_{map_status}_{map_name}"] = end_race_stats["race_time"] / 1000
-            if map_name in reference_times:
-                for reference_time_name in ["author", "gold"]:
-                    if reference_time_name in reference_times[map_name]:
-                        reference_time = reference_times[map_name][reference_time_name]
-                        race_stats_to_write[f"eval_ratio_{map_status}_{reference_time_name}_{map_name}"] = (
-                            100 * (end_race_stats["race_time"] / 1000) / reference_time
-                        )
-                        race_stats_to_write[f"eval_agg_ratio_{map_status}_{reference_time_name}"] = (
-                            100 * (end_race_stats["race_time"] / 1000) / reference_time
-                        )
 
-        for i in [0]:
-            race_stats_to_write[f"q_value_{i}_starting_frame_{map_name}"] = end_race_stats[f"q_value_{i}_starting_frame"]
-        if not is_explo:
-            for i, split_time in enumerate(
-                [
-                    (e - s) / 1000
-                    for s, e in zip(
-                        end_race_stats["cp_time_ms"][:-1],
-                        end_race_stats["cp_time_ms"][1:],
+            with torch.no_grad():
+                if not get_config().pretrain_actions_head_freeze:
+                    online_network.A_head[2].weight = utilities.linear_combination(
+                        online_network.A_head[2].weight, untrained_iqn_network.A_head[2].weight, get_config().last_layer_reset_factor,
                     )
-                ]
-            ):
-                race_stats_to_write[f"split_{map_name}_{i}"] = split_time
+                    online_network.A_head[2].bias = utilities.linear_combination(
+                        online_network.A_head[2].bias, untrained_iqn_network.A_head[2].bias, get_config().last_layer_reset_factor,
+                    )
+                if not get_config().pretrain_V_head_freeze:
+                    online_network.V_head[2].weight = utilities.linear_combination(
+                        online_network.V_head[2].weight, untrained_iqn_network.V_head[2].weight, get_config().last_layer_reset_factor,
+                    )
+                    online_network.V_head[2].bias = utilities.linear_combination(
+                        online_network.V_head[2].bias, untrained_iqn_network.V_head[2].bias, get_config().last_layer_reset_factor,
+                    )
 
-        walltime_tb = time.time()
-        for tag, value in race_stats_to_write.items():
-            # Group race metrics
-            if tag.startswith("eval_race_time") or tag.startswith("explo_race_time"):
-                grouped_tag = f"Race/{tag}"
-            elif tag.startswith("eval_race_finished") or tag.startswith("explo_race_finished"):
-                grouped_tag = f"Race/{tag}"
-            elif tag.startswith("race_time_ratio"):
-                grouped_tag = f"Race/{tag}"
-            elif tag.startswith("avg_Q"):
-                grouped_tag = f"RL/{tag}"
-            elif tag.startswith("single_zone_reached"):
-                grouped_tag = f"RL/{tag}"
-            elif tag.startswith("mean_action_gap"):
-                grouped_tag = f"RL/{tag}"
-            elif tag.startswith("q_value_"):
-                grouped_tag = f"RL/{tag}"
-            elif tag.startswith("split_"):
-                grouped_tag = f"Race/{tag}"
-            elif tag.startswith("instrumentation__") or tag.startswith("worker_time_") or tag.startswith("tmi_protection_"):
-                grouped_tag = f"Performance/{tag}"
-            else:
-                grouped_tag = tag  # Keep original tag for unknown metrics
-            
-            tensorboard_writer.add_scalar(
-                tag=grouped_tag,
-                scalar_value=value,
-                global_step=accumulated_stats["cumul_number_frames_played"],
-                walltime=walltime_tb,
-            )
+        # -------------------------------------------------------------
+        # 4. LEARN ON BATCH (fine-grained locking: lock only for sample + priority update)
+        # -------------------------------------------------------------
+        if not online_network.training:
+            online_network.train()
 
-        # ===============================================
-        #   SAVE STUFF IF THIS WAS A GOOD RACE
-        # ===============================================
+        with buffer_lock:
+            buf = ingest_state["buffer"]
+            buf_test = ingest_state["buffer_test"]
+            can_learn = len(buf) >= memory_size_start_learn
 
-        # Check for NEW RECORD!
-        is_new_record = end_race_stats["race_time"] < accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
-        if is_new_record:
-            # This is a new alltime_minimum
-            old_best = accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
-            accumulated_stats["alltime_min_ms"][map_name] = end_race_stats["race_time"]
-            improvement = (old_best - end_race_stats["race_time"]) / 1000
-            race_time_s = end_race_stats["race_time"] / 1000
-            race_finished_str = "FINISH" if end_race_stats["race_finished"] else "DNF"
-            explo_str = "EXPLO" if is_explo else "EVAL"
-            
-            if old_best < 99999999:
-                print(f"\n>>> NEW RECORD! [{explo_str}] [{race_finished_str}] {map_name:15} {race_time_s:6.2f}s (improved by {improvement:.3f}s) <<<\n")
-            else:
-                print(f"\n>>> FIRST FINISH! [{explo_str}] {map_name:15} {race_time_s:6.2f}s <<<\n")
-            
-            if accumulated_stats["cumul_number_frames_played"] > get_config().frames_before_save_best_runs:
-                name = f"{map_name}_{end_race_stats['race_time']}"
-                utilities.save_run(
-                    base_dir,
-                    save_dir / "best_runs" / name,
-                    rollout_results,
-                    f"{name}.inputs",
-                    inputs_only=False,
-                )
-                utilities.save_checkpoint(
-                    save_dir / "best_runs",
-                    online_network,
-                    target_network,
-                    optimizer1,
-                    scaler,
-                )
-
-        if end_race_stats["race_time"] < get_config().threshold_to_save_all_runs_ms:
-            name = f"{map_name}_{end_race_stats['race_time']}_{datetime.now().strftime('%m%d_%H%M%S')}_{accumulated_stats['cumul_number_frames_played']}_{'explo' if is_explo else 'eval'}"
-            utilities.save_run(
-                base_dir,
-                save_dir / "good_runs",
-                rollout_results,
-                f"{name}.inputs",
-                inputs_only=True,
-            )
-
-        # ===============================================
-        #   FILL BUFFER WITH (S, A, R, S') transitions
-        # ===============================================
-        if fill_buffer:
-            (
-                buffer,
-                buffer_test,
-                number_memories_added_train,
-                number_memories_added_test,
-            ) = buffer_management.fill_buffer_from_rollout_with_n_steps_rule(
-                buffer,
-                buffer_test,
-                rollout_results,
-                get_config().n_steps,
-                gamma,
-                get_config().discard_non_greedy_actions_in_nsteps,
-                engineered_speedslide_reward,
-                engineered_neoslide_reward,
-                engineered_kamikaze_reward,
-                engineered_close_to_vcp_reward,
-            )
-
-            accumulated_stats["cumul_number_memories_generated"] += number_memories_added_train + number_memories_added_test
-            shared_steps.value = accumulated_stats["cumul_number_frames_played"]
-            neural_net_reset_counter += number_memories_added_train
-            accumulated_stats["cumul_number_single_memories_should_have_been_used"] += (
-                get_config().number_times_single_memory_is_used_before_discard * number_memories_added_train
-            )
-            # Removed noisy memory generation log
-
-            # ===============================================
-            #   PERIODIC RESET ?
-            # ===============================================
-
-            if neural_net_reset_counter >= get_config().reset_every_n_frames_generated or single_reset_flag != get_config().single_reset_flag:
-                neural_net_reset_counter = 0
-                single_reset_flag = get_config().single_reset_flag
-                accumulated_stats["cumul_number_single_memories_should_have_been_used"] += get_config().additional_transition_after_reset
-
-                _, untrained_iqn_network = make_untrained_iqn_network(get_config().use_jit, False)
-                frozen_prefixes = _get_frozen_param_prefixes()
-                utilities.soft_copy_param(
-                    online_network, untrained_iqn_network, get_config().overall_reset_mul_factor,
-                    skip_key_prefixes=frozen_prefixes,
-                )
-
-                with torch.no_grad():
-                    if not get_config().pretrain_actions_head_freeze:
-                        online_network.A_head[2].weight = utilities.linear_combination(
-                            online_network.A_head[2].weight,
-                            untrained_iqn_network.A_head[2].weight,
-                            get_config().last_layer_reset_factor,
-                        )
-                        online_network.A_head[2].bias = utilities.linear_combination(
-                            online_network.A_head[2].bias,
-                            untrained_iqn_network.A_head[2].bias,
-                            get_config().last_layer_reset_factor,
-                        )
-                    if not get_config().pretrain_V_head_freeze:
-                        online_network.V_head[2].weight = utilities.linear_combination(
-                            online_network.V_head[2].weight,
-                            untrained_iqn_network.V_head[2].weight,
-                            get_config().last_layer_reset_factor,
-                        )
-                        online_network.V_head[2].bias = utilities.linear_combination(
-                            online_network.V_head[2].bias,
-                            untrained_iqn_network.V_head[2].bias,
-                            get_config().last_layer_reset_factor,
-                        )
-
-            # ===============================================
-            #   LEARN ON BATCH
-            # ===============================================
-
-            if not online_network.training:
-                online_network.train()
-
+        if can_learn:
             while (
-                len(buffer) >= memory_size_start_learn
-                and accumulated_stats["cumul_number_single_memories_used"] + offset_cumul_number_single_memories_used
+                accumulated_stats["cumul_number_single_memories_used"] + offset_cumul_number_single_memories_used
                 <= accumulated_stats["cumul_number_single_memories_should_have_been_used"]
             ):
-                if (random.random() < get_config().buffer_test_ratio and len(buffer_test) > 0) or len(buffer) == 0:
+                with buffer_lock:
+                    buf = ingest_state["buffer"]
+                    buf_test = ingest_state["buffer_test"]
+                    buf_len = len(buf)
+                    if buf_len < memory_size_start_learn:
+                        break
+
+                if (random.random() < get_config().buffer_test_ratio and len(buf_test) > 0) or buf_len == 0:
                     test_start_time = time.perf_counter()
-                    loss, _, _ = trainer.train_on_batch(buffer_test, do_learn=False)
+                    # Phase A: sample under lock (~1ms)
+                    with buffer_lock:
+                        batch, batch_info = trainer.sample_batch(ingest_state["buffer_test"])
+                    # Phase B: GPU compute — NO lock (~5-15ms)
+                    loss, _, _, _ = trainer.train_on_data(batch, batch_info, do_learn=False)
+                    # Phase C: no priority update for test batches
                     time_testing_since_last_tensorboard_write += time.perf_counter() - test_start_time
                     loss_test_history.append(loss)
-                    # Removed noisy test batch log
                 else:
                     train_start_time = time.perf_counter()
-                    loss, grad_norm, grad_norm_before_clip = trainer.train_on_batch(buffer, do_learn=True)
+                    # Phase A: sample under lock (~1ms)
+                    with buffer_lock:
+                        batch, batch_info = trainer.sample_batch(ingest_state["buffer"])
+                    # Phase B: GPU compute — NO lock (~5-15ms)
+                    loss, grad_norm, grad_norm_before_clip, priority_update = trainer.train_on_data(batch, batch_info, do_learn=True)
+                    # Phase C: priority update under lock (~0.5ms)
+                    with buffer_lock:
+                        trainer.apply_priority_update(ingest_state["buffer"], priority_update)
                     train_on_batch_duration_history.append(time.perf_counter() - train_start_time)
                     time_training_since_last_tensorboard_write += train_on_batch_duration_history[-1]
-                    accumulated_stats["cumul_number_single_memories_used"] += (
-                        4 * get_config().batch_size
-                        if (len(buffer) < buffer._storage.max_size and buffer._storage.max_size > 200_000)
-                        else get_config().batch_size
-                    )  # do fewer batches while memory is not full
+                    with buffer_lock:
+                        accumulated_stats["cumul_number_single_memories_used"] += (
+                            4 * get_config().batch_size
+                            if (len(ingest_state["buffer"]) < ingest_state["buffer"]._storage.max_size and ingest_state["buffer"]._storage.max_size > 200_000)
+                            else get_config().batch_size
+                        )  # do fewer batches while memory is not full
                     loss_history.append(loss)
                     if not math.isinf(grad_norm):
                         grad_norm_history.append(grad_norm)
                     if not math.isinf(grad_norm_before_clip):
                         grad_norm_before_clip_history.append(grad_norm_before_clip)
-                    # Log gradient norms per layer for monitoring
                     utilities.log_gradient_norms(online_network, layer_grad_norm_history)
 
                     accumulated_stats["cumul_number_batches_done"] += 1
-                    # Removed noisy training batch log - use TensorBoard for detailed metrics
 
                     utilities.custom_weight_decay(online_network, 1 - weight_decay, only_trainable=True)
                     if accumulated_stats["cumul_number_batches_done"] % get_config().send_shared_network_every_n_batches == 0:
                         with shared_network_lock:
                             uncompiled_shared_network.load_state_dict(uncompiled_online_network.state_dict())
 
-                    # ===============================================
-                    #   UPDATE TARGET NETWORK
-                    # ===============================================
+                    # UPDATE TARGET NETWORK
                     if (
                         accumulated_stats["cumul_number_single_memories_used"]
                         >= accumulated_stats["cumul_number_single_memories_used_next_target_network_update"]
@@ -625,9 +672,12 @@ def learner_process_fn(
                         accumulated_stats["cumul_number_single_memories_used_next_target_network_update"] += (
                             get_config().number_memories_trained_on_between_target_network_updates
                         )
-                        # print("UPDATE")
                         utilities.soft_copy_param(target_network, online_network, get_config().soft_update_tau)
-            sys.stdout.flush()
+        else:
+            # No data yet — wait a bit before spinning
+            time.sleep(0.1)
+
+        sys.stdout.flush()
 
         # ===============================================
         #   WRITE AGGREGATED STATISTICS TO TENSORBOARD EVERY 5 MINUTES
@@ -665,9 +715,9 @@ def learner_process_fn(
                 "RL/epsilon_boltzmann": utilities.from_exponential_schedule(get_config().epsilon_boltzmann_schedule, shared_steps.value),
                 "RL/tau_epsilon_boltzmann": get_config().tau_epsilon_boltzmann,
                 
-                # Buffer metrics
-                "Buffer/size": len(buffer),
-                "Buffer/max_size": buffer._storage.max_size,
+                # Buffer metrics (read under lock)
+                "Buffer/size": len(ingest_state["buffer"]),
+                "Buffer/max_size": ingest_state["buffer"]._storage.max_size,
                 "Buffer/number_times_single_memory_is_used_before_discard": get_config().number_times_single_memory_is_used_before_discard,
                 
                 # Performance metrics
@@ -724,20 +774,21 @@ def learner_process_fn(
                                 f"Gradients/by_layer/{layer_name}/Linf_max": np.max(val),
                             }
                         )
-            if isinstance(buffer._sampler, PrioritizedSampler):
-                all_priorities = np.array([buffer._sampler._sum_tree.at(i) for i in range(len(buffer))])
-                step_stats.update(
-                    {
-                        "Buffer/priorities_min": np.min(all_priorities),
-                        "Buffer/priorities_q1": np.quantile(all_priorities, 0.1),
-                        "Buffer/priorities_mean": np.mean(all_priorities),
-                        "Buffer/priorities_median": np.quantile(all_priorities, 0.5),
-                        "Buffer/priorities_q3": np.quantile(all_priorities, 0.75),
-                        "Buffer/priorities_d9": np.quantile(all_priorities, 0.9),
-                        "Buffer/priorities_c98": np.quantile(all_priorities, 0.98),
-                        "Buffer/priorities_max": np.max(all_priorities),
-                    }
-                )
+            with buffer_lock:
+                if isinstance(ingest_state["buffer"]._sampler, PrioritizedSampler):
+                    all_priorities = np.array([ingest_state["buffer"]._sampler._sum_tree.at(i) for i in range(len(ingest_state["buffer"]))])
+                    step_stats.update(
+                        {
+                            "Buffer/priorities_min": np.min(all_priorities),
+                            "Buffer/priorities_q1": np.quantile(all_priorities, 0.1),
+                            "Buffer/priorities_mean": np.mean(all_priorities),
+                            "Buffer/priorities_median": np.quantile(all_priorities, 0.5),
+                            "Buffer/priorities_q3": np.quantile(all_priorities, 0.75),
+                            "Buffer/priorities_d9": np.quantile(all_priorities, 0.9),
+                            "Buffer/priorities_c98": np.quantile(all_priorities, 0.98),
+                            "Buffer/priorities_max": np.max(all_priorities),
+                        }
+                    )
             for key, value in accumulated_stats.items():
                 if key not in ["alltime_min_ms", "rolling_mean_ms"]:
                     step_stats[key] = value
@@ -758,10 +809,11 @@ def learner_process_fn(
             if online_network.training:
                 online_network.eval()
             tau = torch.linspace(0.05, 0.95, get_config().iqn_k)[:, None].to("cuda")
-            per_quantile_output = inferer.infer_network(rollout_results["frames"][0], rollout_results["state_float"][0], tau)
+            if last_rollout_results is not None:
+                per_quantile_output = inferer.infer_network(last_rollout_results["frames"][0], last_rollout_results["state_float"][0], tau)
             # IQN-specific metrics: quantile spread per action
-            for i, std in enumerate(list(per_quantile_output.std(axis=0))):
-                step_stats[f"IQN/quantile_std_action_{i}"] = std
+                for i, std in enumerate(list(per_quantile_output.std(axis=0))):
+                    step_stats[f"IQN/quantile_std_action_{i}"] = std
 
             # ===============================================
             #   WRITE TO TENSORBOARD
@@ -836,9 +888,10 @@ def learner_process_fn(
             #   BUFFER STATS
             # ===============================================
 
-            state_floats = np.array([experience.state_float for experience in buffer._storage])
-            mean_in_buffer = state_floats.mean(axis=0)
-            std_in_buffer = state_floats.std(axis=0)
+            with buffer_lock:
+                state_floats = np.array([experience.state_float for experience in ingest_state["buffer"]._storage])
+                mean_in_buffer = state_floats.mean(axis=0)
+                std_in_buffer = state_floats.std(axis=0)
 
             # ===============================================
             #   BEAUTIFUL SUMMARY EVERY 5 MINUTES
@@ -848,7 +901,7 @@ def learner_process_fn(
             print("="*80)
             print(f"  Frames played: {accumulated_stats['cumul_number_frames_played']:,}")
             print(f"  Training hours: {accumulated_stats['cumul_training_hours']:.1f}h")
-            print(f"  Buffer size: {len(buffer):,} / {buffer._storage.max_size:,}")
+            print(f"  Buffer size: {len(ingest_state['buffer']):,} / {ingest_state['buffer']._storage.max_size:,}")
             if len(loss_history) > 0:
                 print(f"  Avg loss: {np.mean(loss_history):.3e}  |  Grad norm: {np.median(grad_norm_history):.3e}")
             print(f"  Learning rate: {learning_rate:.2e}")
@@ -864,8 +917,9 @@ def learner_process_fn(
             # ===============================================
             #   HIGH PRIORITY TRANSITIONS
             # ===============================================
-            if get_config().make_highest_prio_figures and isinstance(buffer._sampler, PrioritizedSampler):
-                highest_prio_transitions(buffer, save_dir)
+            with buffer_lock:
+                if get_config().make_highest_prio_figures and isinstance(ingest_state["buffer"]._sampler, PrioritizedSampler):
+                    highest_prio_transitions(ingest_state["buffer"], save_dir)
 
             # ===============================================
             #   SAVE

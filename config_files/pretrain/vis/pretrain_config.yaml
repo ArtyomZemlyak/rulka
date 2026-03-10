@@ -2,7 +2,11 @@
 # Level 0 visual pretraining configuration
 # config_files/pretrain/vis/pretrain_config.yaml
 #
-# All values here are defaults.  Override priority (highest first):
+# IMPORTANT: image_size (must match IQN w_downsized/h_downsized) is loaded
+# from rl_config_path. Change it in config_files/rl/config_default.yaml,
+# not here.
+#
+# Override priority (highest first):
 #   1. CLI arguments   (scripts/pretrain_visual_backbone.py)
 #   2. Env vars        PRETRAIN_<FIELD>  e.g.  PRETRAIN_TASK=simclr
 #                      Nested fields:   PRETRAIN_LIGHTNING__PATIENCE=5
@@ -10,7 +14,6 @@
 #
 # Schema and validation: config_files/pretrain_schema.py
 # Artifact contract   : trackmania_rl/pretrain/contract.py
-# Experiment roadmap  : docs/source/experiments/pretrain_replay_roadmap.rst
 # =============================================================================
 
 
@@ -89,10 +92,9 @@ framework: lightning
 # ---------------------------------------------------------------------------
 # Image / temporal stacking
 # ---------------------------------------------------------------------------
+# image_size loaded from rl_config_path (neural_network.w_downsized).
 
-# Square input resolution in pixels.
-# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_files/rl/config_default.yaml.
-image_size: 64
+rl_config_path: config_files/rl/config_default.yaml
 
 # Image normalization before feeding to the encoder:
 #   01  — keep [0, 1] (default)

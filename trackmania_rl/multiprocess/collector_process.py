@@ -49,7 +49,15 @@ def collector_process_fn(
 
     inference_network, uncompiled_inference_network = iqn.make_untrained_iqn_network(config.use_jit, is_inference=True)
     try:
-        inference_network.load_state_dict(torch.load(f=save_dir / "weights1.torch", weights_only=False))
+        w1_path = save_dir / "weights1.torch"
+        if w1_path.exists():
+            sd = torch.load(f=w1_path, weights_only=False)
+            model_keys = list(inference_network.state_dict().keys())
+            if model_keys and sd and not list(sd.keys())[0].startswith("_orig_mod.") and model_keys[0].startswith("_orig_mod."):
+                sd = {"_orig_mod." + k: v for k, v in sd.items()}
+            inference_network.load_state_dict(sd, strict=True)
+        else:
+            raise FileNotFoundError(f"{w1_path} not found")
     except Exception as e:
         print(f"[INFO] Worker {process_number} starting with fresh weights")
 
@@ -87,11 +95,15 @@ def collector_process_fn(
     # ========================================================
     # Warmup pytorch and numba
     # ========================================================
-    for _ in range(5):
-        inferer.infer_network(
-            np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
-            np.random.rand(config.float_input_dim).astype(np.float32),
-        )
+    # On Windows, we MUST use a lock here to ensure sequential compilation of torch.compile kernels
+    # to avoid PermissionError/race conditions in the shared Triton cache.
+    with game_spawning_lock:
+        print(f"[Collector {process_number}] Benchmarking/Warmup...")
+        for _ in range(5):
+            inferer.infer_network(
+                np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
+                np.random.rand(config.float_input_dim).astype(np.float32),
+            )
     # game_instance_manager.update_current_zone_idx(0, zone_centers, np.zeros(3))
 
     time_since_last_queue_push = time.perf_counter()

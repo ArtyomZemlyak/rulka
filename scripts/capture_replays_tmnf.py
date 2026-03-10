@@ -106,6 +106,22 @@ except ModuleNotFoundError:
 log = logging.getLogger(__name__)
 
 
+def _is_frame_valid_for_floats(t_ms: float, meta_list: list[dict] | None, floats_config: Any) -> bool:
+    """Return True if frame at t_ms has valid meta for BC float inputs (state_dict_from_meta)."""
+    if not meta_list:
+        return False
+    from trackmania_rl.pretrain.preprocess import _nearest_meta_by_time
+    from trackmania_rl.float_inputs import state_dict_from_meta
+    nearest = _nearest_meta_by_time(meta_list, float(t_ms))
+    if nearest is None:
+        return False
+    try:
+        state_dict_from_meta(nearest, floats_config)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
 # ---------- 1. Replay list: collect (track_id, path) ----------
 
 def collect_replay_tasks(
@@ -1228,6 +1244,8 @@ def rollout_with_tmi_script(
     ROLLOUT_MAX_WALL_S = 300.0
     map_load_wall_time = 0.0
     last_run_step_wall_time: float | None = None
+    # "Not in menus, will request map in run step" — ждём RUN_STEP чтобы загрузить карту. Если RUN_STEP не приходит (медали/Enter) — зависание.
+    waiting_for_map_request_time: float = 0.0
     need_enter = False
     import time as time_module
     rollout_start_wall_time = time_module.perf_counter()
@@ -1286,8 +1304,23 @@ def rollout_with_tmi_script(
                     except Exception:
                         pass
                     break
-            # Короткий таймаут: ждём старт — 3с; во время гонки — 20с (медали/зависание → unload); иначе default
+            # Уровень 3: "Not in menus" — ждём RUN_STEP чтобы запросить map. RUN_STEP не приходит (медали/Enter) → unload
+            if waiting_for_map_request_time > 0:
+                elapsed = time_module.perf_counter() - waiting_for_map_request_time
+                if elapsed > ENTER_TOTAL_TIMEOUT_S:
+                    log.warning(
+                        "  No RUN_STEP for %.0fs (waiting for map request, e.g. medals/Enter) — switching to next",
+                        elapsed,
+                    )
+                    try:
+                        gim.iface.execute_command("unload")
+                    except Exception:
+                        pass
+                    break
+            # Короткий таймаут: ждём старт — 3с; ждём RUN_STEP для map — 3с; во время гонки — 20с; иначе default
             if map_load_wall_time > 0 and not race_started:
+                gim.iface.set_socket_timeout(ENTER_SOCKET_TIMEOUT_S)
+            elif waiting_for_map_request_time > 0:
                 gim.iface.set_socket_timeout(ENTER_SOCKET_TIMEOUT_S)
             elif race_started:
                 gim.iface.set_socket_timeout(STALE_DURING_RACE_S)
@@ -1340,6 +1373,20 @@ def rollout_with_tmi_script(
                     except Exception:
                         pass
                     break
+                elif waiting_for_map_request_time > 0:
+                    elapsed = time_module.perf_counter() - waiting_for_map_request_time
+                    if elapsed > ENTER_TOTAL_TIMEOUT_S:
+                        log.warning(
+                            "  No RUN_STEP for %.0fs (waiting for map request) — switching to next",
+                            elapsed,
+                        )
+                        try:
+                            gim.iface.execute_command("unload")
+                        except Exception:
+                            pass
+                        break
+                    log.info("  No RUN_STEP for %.0fs (waiting for map request), retrying...", elapsed)
+                    continue
                 else:
                     raise
             
@@ -1387,6 +1434,7 @@ def rollout_with_tmi_script(
                         enter_spam_thread.start()
                 elif map_name != last_map_requested[0]:
                     log.info("  Not in menus, will request map in run step: %s", map_name)
+                    waiting_for_map_request_time = time_module.perf_counter()
                 gim.iface._respond_to_call(msgtype)
                 
             elif msgtype == int(MessageType.SC_RUN_STEP_SYNC):
@@ -1416,6 +1464,7 @@ def rollout_with_tmi_script(
                 # По документации: load скрипта — до map. Карту шлём из run step (не из callback финиша).
                 # Для второй карты: сначала load скрипта реплея этой карты, потом map.
                 if map_name != last_map_requested[0]:
+                    waiting_for_map_request_time = 0.0  # RUN_STEP пришёл, загружаем карту
                     log.info("  Map changed, loading script then map: %s", map_name)
                     time_from_current_map = False  # после смены карты ждём снова countdown/старт
                     race_start_requested = False  # give_up должен сработать для новой карты
@@ -1653,6 +1702,7 @@ def worker_process(
     vcp_suffix: str = "cl",
     vcp_auto_generate: bool = True,
     vcp_source: str = "first",
+    skip_bad_float_samples: bool = False,
 ) -> None:
     """Single worker: convert .replay.gbx → TMI script, load via TMInterface, capture frames.
     When multi_instance is True, keys (Enter, Tilde) are sent only via PostMessage to this
@@ -1660,6 +1710,13 @@ def worker_process(
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     set_config(load_config(config_path))
     cfg = get_config()
+
+    if skip_bad_float_samples and not getattr(cfg, "n_zone_centers_in_inputs", None):
+        log.warning(
+            "Worker %d: --skip-bad-float-samples requires RL config with n_zone_centers_in_inputs. "
+            "Use --config with RL config. All frames may be skipped.",
+            worker_id,
+        )
 
     log.info(
         "Worker %d: step_ms=%d, running_speed=%d, capture_fps=%.1f",
@@ -1871,13 +1928,15 @@ def worker_process(
                             gim.iface = None
                         continue
 
-                    runs_done_this_track += 1
                     # 4. Save frames
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    manifest_entries = []
-                    for i, (frame, t_ms) in enumerate(zip(rollout_results["frames"], rollout_results["frame_times_ms"])):
+                    frames = rollout_results["frames"]
+                    frame_times_ms = rollout_results["frame_times_ms"]
+                    meta_list = rollout_results.get("meta", [])
+
+                    # Build manifest entries in memory
+                    manifest_entries_raw: list[dict] = []
+                    for i, (frame, t_ms) in enumerate(zip(frames, frame_times_ms)):
                         fname = f"frame_{i:05d}_{t_ms}ms.jpeg"
-                        cv2.imwrite(str(out_dir / fname), frame[0], [cv2.IMWRITE_JPEG_QUALITY, 95])
                         entry = {
                             "file": fname,
                             "step": i,
@@ -1888,18 +1947,47 @@ def worker_process(
                             step_idx = min(max(0, int(round(t_ms / step_ms))), len(action_indices) - 1)
                             entry["action_idx"] = action_indices[step_idx]
                             entry["inputs"] = dict(inputs_per_step[step_idx])
-                        manifest_entries.append(entry)
+                        manifest_entries_raw.append(entry)
+
+                    if skip_bad_float_samples:
+                        valid_indices = [
+                            i for i, (_, t_ms) in enumerate(zip(frames, frame_times_ms))
+                            if _is_frame_valid_for_floats(t_ms, meta_list, cfg)
+                        ]
+                        if not valid_indices:
+                            log.info(
+                                "Skip (no valid float samples): %s / %s",
+                                track_id, replay_name,
+                            )
+                            continue
+                        # Keep only valid frames/entries, renumber steps
+                        frames = [frames[i] for i in valid_indices]
+                        frame_times_ms = [frame_times_ms[i] for i in valid_indices]
+                        manifest_entries = []
+                        for new_step, (i, orig_entry) in enumerate(zip(valid_indices, [manifest_entries_raw[j] for j in valid_indices])):
+                            t_ms = frame_times_ms[new_step]
+                            fname = f"frame_{new_step:05d}_{t_ms}ms.jpeg"
+                            entry = {**orig_entry, "file": fname, "step": new_step}
+                            manifest_entries.append(entry)
+                    else:
+                        manifest_entries = manifest_entries_raw
+
+                    runs_done_this_track += 1
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    for new_step, (frame, entry) in enumerate(zip(frames, manifest_entries)):
+                        cv2.imwrite(
+                            str(out_dir / entry["file"]), frame[0], [cv2.IMWRITE_JPEG_QUALITY, 95],
+                        )
                         if per_frame_json:
-                            (out_dir / f"frame_{i:05d}_{t_ms}ms.json").write_text(
+                            (out_dir / entry["file"].replace(".jpeg", ".json")).write_text(
                                 json.dumps(entry, indent=2), encoding="utf-8",
                             )
-                    
+
                     manifest_obj = {"entries": manifest_entries}
                     if action_indices is not None:
                         manifest_obj["actions"] = action_indices
-                    meta_entries_result = rollout_results.get("meta", [])
-                    if meta_entries_result:
-                        manifest_obj["meta"] = meta_entries_result
+                    if meta_list:
+                        manifest_obj["meta"] = meta_list
                     (out_dir / "manifest.json").write_text(
                         json.dumps(manifest_obj, indent=2), encoding="utf-8",
                     )
@@ -1919,7 +2007,7 @@ def worker_process(
                         "height": height,
                         "step_ms": step_ms,
                         "race_time_ms": race_time_ms,
-                        "total_frames": len(rollout_results["frames"]),
+                        "total_frames": len(frames),
                         "race_finished": rollout_results["race_finished"],
                         "tmi_script_used": script_path.name,
                     }
@@ -1932,7 +2020,7 @@ def worker_process(
                     
                     log.info(
                         "Captured %s / %s: %d frames, finished=%s",
-                        track_id, replay_name, len(rollout_results["frames"]), rollout_results["race_finished"],
+                        track_id, replay_name, len(frames), rollout_results["race_finished"],
                     )
                 task = next_task
                 if task is None:
@@ -2061,6 +2149,11 @@ def main() -> None:
         "--exclude-respawn-maps",
         action="store_true",
         help="Skip tracks that have at least one replay with respawn (checkpoint respawn) events.",
+    )
+    parser.add_argument(
+        "--skip-bad-float-samples",
+        action="store_true",
+        help="Before writing: validate each frame's meta for BC float inputs. Skip frames that fail. Skip replay if none valid. Skip track if no replays saved. Requires --vcp-dir for zone meta.",
     )
     parser.add_argument(
         "--exclude-enter-maps",
@@ -2228,6 +2321,7 @@ def main() -> None:
                 args.vcp_suffix,
                 args.vcp_auto_generate,
                 args.vcp_source,
+                getattr(args, "skip_bad_float_samples", False),
             ),
         )
         p.start()

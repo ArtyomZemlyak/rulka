@@ -41,10 +41,13 @@ EXPERIMENTS = [
     {"name": "network_size_big_long", "runs": ["A01_as20_big_long", "A01_as20_long", "uni_20", "uni_20_long"], "prefix": "exp_network_size_big_long"},
     {"name": "pretrain_visual_backbone", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained"], "prefix": "exp_pretrain_visual_backbone"},
     {"name": "pretrain_bc", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained", "A01_as20_long_vis_bc_pretrained", "A01_as20_long_vis_bc_ah_pretrained"], "prefix": "exp_pretrain_bc"},
+    {"name": "pretrain_bc_full_iqn", "runs": ["A01_as20_long", "A01_as20_long_vis_pretrained", "A01_as20_long_vis_bc_pretrained", "A01_as20_long_vis_bc_ah_pretrained", "A01_as20_long_full_iqn_bc"], "prefix": "exp_pretrain_bc_full_iqn"},
     {"name": "pretrain_bc_enc_freeze", "runs": ["A01_as20_long_vis_bc_ah_pretrained", "A01_as20_long_vis_bc_ah_pretrained_enc_freeze"], "prefix": "exp_pretrain_bc_enc_freeze"},
     {"name": "pretrain_bc_enc_ah_freeze", "runs": ["A01_as20_long_vis_bc_ah_pretrained", "A01_as20_long_vis_bc_ah_pretrained_enc_freeze", "A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze"], "prefix": "exp_pretrain_bc_enc_ah_freeze"},
     {"name": "pretrain_bc_enc_ah_freeze_resume", "runs": ["A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze", "A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze_resume"], "prefix": "exp_pretrain_bc_enc_ah_freeze_resume"},
     {"name": "reward_shaping", "runs": ["A01_as20_long", "A01_as20_long_engineer_rewards"], "prefix": "exp_reward_shaping"},
+    {"name": "reward_shaping_bc_resume_v2_v3", "runs": ["A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2", "A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3"], "prefix": "exp_reward_shaping_bc_resume_v2_v3"},
+    {"name": "iqn_no_image_head", "runs": ["A01_as20_long", "A01_as20_long_no_image"], "prefix": "exp_iqn_no_image_head"},
 ]
 
 

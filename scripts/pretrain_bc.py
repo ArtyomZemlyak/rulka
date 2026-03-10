@@ -17,7 +17,6 @@ import logging
 from pathlib import Path
 
 from config_files.pretrain_bc_schema import BCPretrainConfig, load_pretrain_bc_config
-from trackmania_rl.pretrain.train_bc import train_bc
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -36,9 +35,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="backbone | full_policy | auxiliary_head.")
     ap.add_argument("--encoder-init-path", type=Path, default=None, dest="encoder_init_path",
                     help="Path to Level 0 encoder.pt to init BC CNN.")
-    ap.add_argument("--image-size", type=int, default=None, dest="image_size")
+    ap.add_argument("--rl-config-path", type=Path, default=None, dest="rl_config_path",
+                    help="Path to RL config; image_size, n_actions, etc. loaded from it.")
     ap.add_argument("--n-stack", type=int, default=None, dest="n_stack")
-    ap.add_argument("--n-actions", type=int, default=None, dest="n_actions", help="Number of actions (match RL config.inputs).")
     ap.add_argument("--image-normalization", type=str, default=None, dest="image_normalization", choices=["01", "iqn"],
                     help="01 = [0,1]; iqn = (x-0.5)/0.5 for IQN transfer.")
     ap.add_argument("--epochs", type=int, default=None)
@@ -57,6 +56,10 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="BC cache directory (train.npy + train_actions.npy). null = on-the-fly from data_dir.")
     ap.add_argument("--cache-load-in-ram", action="store_true", dest="cache_load_in_ram")
     ap.add_argument("--cache-build-workers", type=int, default=None, dest="cache_build_workers")
+    ap.add_argument("--track-ids", type=str, nargs="+", default=None, dest="track_ids",
+                    help="Restrict to these track IDs only (e.g. --track-ids A01-Race). Uses on-the-fly loading.")
+    ap.add_argument("--bc-resume-run-dir", type=Path, default=None, dest="bc_resume_run_dir",
+                    help="Path to previous BC run dir (e.g. output/ptretrain/bc/v3_multi_offset) to load iqn_bc.pt for fine-tuning.")
     return ap
 
 
@@ -72,10 +75,10 @@ def main() -> None:
 
     overrides = {}
     for field in (
-        "data_dir", "output_dir", "run_name", "bc_mode", "encoder_init_path",
-        "image_size", "n_stack", "n_actions", "image_normalization", "epochs", "batch_size", "lr",
+        "data_dir", "output_dir", "run_name", "bc_mode", "encoder_init_path", "rl_config_path",
+        "n_stack", "image_normalization", "epochs", "batch_size", "lr",
         "workers", "val_fraction", "seed", "grad_clip", "prefetch_factor",
-        "preprocess_cache_dir", "cache_build_workers",
+        "preprocess_cache_dir", "cache_build_workers", "track_ids", "bc_resume_run_dir",
     ):
         val = getattr(args, field, None)
         if val is not None:
@@ -90,9 +93,18 @@ def main() -> None:
     if overrides:
         cfg = cfg.model_copy(update=overrides)
 
+    # Initialize RL config before importing train_bc (iqn.py calls get_config() at import time)
+    from config_files.config_loader import load_config, set_config
+    rl_path = Path(cfg.rl_config_path).resolve()
+    if not rl_path.exists():
+        raise FileNotFoundError(f"rl_config_path {rl_path} not found")
+    set_config(load_config(rl_path))
+
+    from trackmania_rl.pretrain.train_bc import train_bc
+
     log.info(
-        "BC config: bc_mode=%s  image_size=%d  n_stack=%d  n_actions=%d  epochs=%d  batch_size=%d",
-        cfg.bc_mode, cfg.image_size, cfg.n_stack, cfg.n_actions, cfg.epochs, cfg.batch_size,
+        "BC config: bc_mode=%s  n_stack=%d  epochs=%d  batch_size=%d  rl_config=%s",
+        cfg.bc_mode, cfg.n_stack, cfg.epochs, cfg.batch_size, cfg.rl_config_path,
     )
     log.info("data_dir=%s  output_dir=%s", cfg.data_dir, cfg.output_dir)
 

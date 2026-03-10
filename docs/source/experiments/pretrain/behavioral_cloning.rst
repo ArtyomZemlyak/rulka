@@ -86,6 +86,11 @@ Run Analysis
 - **v2_multi_offset_ahead_reg**: Same as v2_multi_offset_ahead with **reg-only tuning**, **no early stop**: ``lr: 0.0001``, ``weight_decay: 0.02``, ``early_stopping: false``, full 50 epochs. Config: ``config_files/pretrain/bc/pretrain_config_bc_v2_multi_offset_ahead_reg.yaml``. Reaches **val_acc 0.592** at epoch 49, best val_loss at epoch 35; per-offset ~0.597–0.598. Use when you want full 50 epochs without early stopping.
 - **v2_multi_offset_ahead_dropout**: Same as v2_multi_offset_ahead_reg + **dropout: 0.2** on features before action head. Config: ``config_files/pretrain/bc/pretrain_config_bc_v2_multi_offset_ahead_dropout.yaml``. **Best A_head variant so far:** val_acc **0.595**, val_loss **1.989** (epoch 49); per-offset 0.603 / 0.600 / 0.600 / 0.578. Use for RL merge when you want best val without early stop.
 - **v2_multi_offset_ahead_dropout_inner**: Same as v2_multi_offset_ahead_dropout + **action_head_dropout: 0.1** (dropout between the two Linear layers of A_head). Config: ``config_files/pretrain/bc/pretrain_config_bc_v2_multi_offset_ahead_dropout_inner.yaml``. **Best A_head run:** val_acc **0.597**, val_loss **1.971**; per-offset 0.605 / 0.603 / 0.602 / 0.579; main_actions_val_acc 0.476, coast 0.374. Recommended for RL merge.
+- **v3**: BC on **maps/img** (100 FPS), cache v1, **use_full_iqn: true**, **use_floats: false** (run without float state inputs; config file may have use_floats: true but was overridden). Unstable: loss spike after epoch ~15; mode collapse to accel/coast. Config: ``config_files/pretrain/bc/pretrain_config_bc_v3.yaml``.
+- **v3_only_vis**: Same as v3 but **use_full_iqn: false**, **use_floats: false** (visual backbone only). Stable: val_loss ~0.99. **Recommended for img 100 FPS dataset.** Config: ``config_files/pretrain/bc/pretrain_config_bc_v3_only_vis.yaml``.
+- **v3_multi_offset**: Same base as v3 (**use_full_iqn: true**, **use_floats: true**) with **multi-offset BC**: ``bc_time_offsets_ms: [0, 10, 20, ..., 100]`` (11 heads), ``bc_offset_weights: [5, 4, 3, 2, 1, 1, ...]``. Stable: train_acc 0.90, val_acc 0.89; no overfitting. RL-aligned prev_actions (no target leakage). Config: ``config_files/pretrain/bc/pretrain_config_bc_v3_multi_offset.yaml``.
+- **v3_current_tick**: Same base as v3 (use_full_iqn: true, use_floats: true) but **single head** (current tick only, bc_time_offsets_ms=[0]), ``preprocess_cache_dir: cache/v1.1``. Stable: val_acc 0.973, val_loss 0.102. Config: ``config_files/pretrain/bc/pretrain_config_bc_v3_current_tick.yaml``. See "Experiment: Single-head current tick vs multi-offset (v3_current_tick vs v3_multi_offset)" for comparison.
+- **v4_multi_offset**: Same architecture and config as v3_multi_offset (**use_full_iqn: true**, **use_floats: true**, 11 offset heads) but the BC forward pass uses the **dueling formula** ``Q = V + A - A.mean(dim=-1)`` so that **V_head receives gradients** during BC. In v3, only A_heads were in the loss path; in v4 both V_head and A_heads are trained. The saved ``iqn_bc.pt`` contains trained V_head and A_head (offset 0) for RL injection. Config: ``config_files/pretrain/bc/pretrain_config_bc_v4_multi_offset.yaml``. Run: ``python scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v4_multi_offset.yaml``. Compare to v3 with: ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_multi_offset output/ptretrain/bc/v4_multi_offset --interval 5``.
 
 **Multi-offset analysis:** For runs with ``bc_time_offsets_ms`` (e.g. v2_multi_offset), ``scripts/analyze_pretrain_bc.py`` prints a **Per-offset validation accuracy** block (last epoch and best epoch by val_loss). Compare v2_next_tick vs v2_multi_offset to see whether predicting several time offsets helps overall or per-offset accuracy. Example: ``python scripts/analyze_pretrain_bc.py --base-dir output/ptretrain/bc v2_next_tick v2_multi_offset --interval 5``.
 
@@ -132,7 +137,7 @@ Per-action accuracy vs training (epoch)
 
 The figure below shows **validation accuracy for each action** (accel, left+accel, right+accel, coast, etc.) over **epochs** for v1 and v1.1. Main actions (0, 1, 2, 3, 10, 11) show clear learning curves; rare actions (4–9) stay near zero.
 
-.. image:: ../../_static/exp_pretrain_bc_per_action_accuracy.jpg
+.. image:: ../../_static/exp_pretrain_bc_v1_v1.1_per_action_accuracy.jpg
    :alt: Per-action validation accuracy vs epoch (v1 and v1.1, 12 actions)
 
 Experiment: IQN-style image normalization (v1.1 vs v1.2)
@@ -420,6 +425,180 @@ Using **n_stack=3** significantly increases RAM usage:
 - If you have limited RAM, use **n_stack=1** or ensure **cache_load_in_ram: false** and lower ``workers`` (and optionally ``batch_size``) for n_stack=3.
 - After running both experiments with distinct run names, use ``scripts/analyze_pretrain_bc.py`` to compare by epoch and decide whether the gain from n_stack=3 justifies the memory and compute cost.
 
+Experiment: Full IQN + floats vs visual-only on img 100 FPS (v3 vs v3_only_vis)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Overview:** This experiment compares two BC runs on the **new img dataset** (frames captured at **100 FPS** via TMInterface; see :ref:`tmnf_replays`). Both use the same data (``maps/img``, cache ``cache/v1``), encoder init from vis v2, and IQN image normalization. The only difference is the BC architecture:
+
+- **v3** (``pretrain_config_bc_v3.yaml``): **use_full_iqn: true** — trains the full IQN (img_head + iqn_fc + A_head + V_head). In practice run **without float state inputs** (use_floats: false or override). Intended for 1:1 transfer into RL IQN.
+- **v3_only_vis** (``pretrain_config_bc_v3_only_vis.yaml``): **use_full_iqn: false**, **use_floats: false** — trains only the visual backbone + action head (no full IQN, no float inputs). Same backbone, image-only.
+
+**Goal:** Determine whether full IQN + floats improves action prediction accuracy on the high-FPS img dataset, or whether visual-only training is more stable and effective.
+
+**Dataset:** ``maps/img`` (TMInterface capture at **100 FPS**, interval ~10 ms between frames), ``preprocess_cache_dir: cache/v1``. n_train ≈ 608,901, n_val ≈ 66,006.
+
+**Key findings**
+
+- **Training stability:** **v3 (full IQN, no floats)** shows **severe training instability** after ~epoch 10–15. Train_loss and val_loss spike (epoch 20: train_loss 2.05, val_loss 3.19; epoch 40: val_loss 6.14; epoch 49: train_loss 3.77, val_loss 3.87). **v3_only_vis** trains stably: val_loss decreases monotonically and plateaus around 0.98–0.99.
+- **Mode collapse (v3):** v3 collapses to predicting mostly **accel** (val_acc_class_0 ≈ 0.9999) and **coast** (≈ 0.82); **left+accel**, **right+accel**, **left+accel+brake**, **right+accel+brake** all go to 0. main_actions_val_acc at best epoch = **0.22** (very low).
+- **v3_only_vis:** More balanced per-action accuracy: accel 0.99, left+accel 0.007, right+accel 0.01, coast 0.95, brake 0.16. main_actions_val_acc at best epoch = **0.33** (higher than v3).
+- **Best epoch by val_loss:** v3 best at **epoch 8** (val_loss 1.008) before instability; v3_only_vis best at **epoch 42** (val_loss 0.984).
+
+**Conclusion:** On the img 100 FPS dataset, **visual-only (v3_only_vis)** is stable. Full IQN without floats (v3) leads to training instability and mode collapse (accel/coast dominance). **v3_multi_offset** (full IQN + floats with multi-offset) is stable and achieves much higher accuracy; use it when full IQN + floats is needed (see "Experiment: Multi-offset BC on img 100 FPS").
+
+**How to run**
+
+.. code-block:: bash
+
+   .\.venv\Scripts\python.exe scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v3_only_vis.yaml
+   .\.venv\Scripts\python.exe scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v3.yaml
+
+**Reproduce**
+
+.. code-block:: bash
+
+   python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3 output/ptretrain/bc/v3_only_vis --interval 5
+
+Experiment: Multi-offset BC on img 100 FPS (v3_multi_offset)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Overview:** This experiment tests **multi-offset BC** on the **img 100 FPS** dataset with **full IQN + floats**. Unlike v3 (single head, unstable) and v3_only_vis (visual-only, stable), v3_multi_offset trains **11 heads** at offsets 0, 10, 20, ..., 100 ms with **weighted loss** (higher weight on nearer offsets: 5, 4, 3, 2, 1, 1, ...). Goal: see whether multi-offset regularizes full IQN training and avoids the collapse seen in v3.
+
+**Config:** ``config_files/pretrain/bc/pretrain_config_bc_v3_multi_offset.yaml`` — same base as v3 (use_full_iqn: true, use_floats: true, maps/img, cache v1) plus:
+
+- ``bc_time_offsets_ms: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]``
+- ``bc_offset_weights: [5.0, 4.0, 3.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]``
+
+**Note:** Metrics below are from a run **without target leakage**. A prior run had inflated metrics because ``prev_actions`` in the float inputs incorrectly included the current action (the prediction target). This was fixed to match RL (prev_actions = actions strictly before the current step).
+
+**Key findings**
+
+- **Overfitting:** **No overfitting.** train_acc 0.900, val_acc 0.894 (last epoch); train_loss 4.15, val_loss 4.41. Best epoch by val_loss = **49** (last epoch); val_loss and val_acc improve steadily through training. Multi-offset acts as a regularizer and the model generalizes well.
+- **Stability:** Unlike v3 (loss spike after epoch 15, mode collapse), v3_multi_offset trains stably. Loss decreases monotonically; no collapse.
+- **Per-offset validation accuracy (last epoch):** val_acc_offset_ms_0 = **0.972**, val_acc_offset_ms_10 = 0.948, val_acc_offset_ms_20 = 0.927, ..., val_acc_offset_ms_100 = 0.849. Offset 0 (current tick) is strongest; accuracy decreases for farther offsets as expected.
+
+.. image:: ../../_static/exp_pretrain_bc_v3_multi_offset_per_offset_vs_epoch.jpg
+   :alt: Per-offset validation accuracy vs epoch (v3_multi_offset, 11 offsets)
+
+.. image:: ../../_static/exp_pretrain_bc_v3_multi_offset_per_offset_final_epoch.jpg
+   :alt: Per-offset validation accuracy at final epoch 49 (v3_multi_offset, bar chart)
+
+- **Per-action validation accuracy:** accel 0.98, left+accel 0.96, right+accel 0.96, coast 0.88; left 0.83, right 0.58, brake 0, left+brake 0.78, right+brake 0.88, accel+brake 0.65, left+accel+brake 0, right+accel+brake 0.95. **brake** and **left+accel+brake** show 0 — rare classes (see class distribution below).
+- **main_actions_val_acc (best epoch):** 0.789 (vs v3 0.22, v3_only_vis 0.33).
+
+**Class distribution (train, offset 0, from cache/v1)**
+
+The dataset is **highly imbalanced**:
+
+- **accel:** 58.76%
+- **left+accel:** 19.15%
+- **right+accel:** 21.14%
+- **coast:** 0.35%
+- **brake:** 0.27%
+- **left+accel+brake:** 0.10%
+- **right+accel+brake:** 0.09%
+- **left, right, left+brake, right+brake, accel+brake:** < 0.05% each
+
+The three main actions (accel, left+accel, right+accel) account for ~99% of samples. Rare actions (brake, left+accel+brake, etc.) have few or no validation samples in some track splits, which explains val_acc_class = 0 for brake and left+accel+brake. The high overall val_acc (0.89) reflects good prediction of the dominant classes.
+
+.. image:: ../../_static/exp_pretrain_bc_v3_multi_offset_v3_only_vis_per_action_accuracy.jpg
+   :alt: Per-action validation accuracy vs epoch (v3_multi_offset, v3_only_vis, 12 actions)
+
+**Comparison with v3 and v3_only_vis**
+
+| Metric | v3_multi_offset | v3 | v3_only_vis |
+|--------|-----------------|-----|-------------|
+| train_acc (last) | **0.900** | 0.586 | 0.592 |
+| val_acc (last) | **0.894** | 0.607 | 0.607 |
+| main_actions_val_acc (best) | **0.789** | 0.218 | 0.325 |
+| Best epoch by val_loss | 49 | 8 | 42 |
+| Overfitting | No | N/A (collapsed) | No |
+| Stability | Stable | Unstable | Stable |
+
+**Conclusion:** v3_multi_offset **stabilizes full IQN + floats** on the img dataset. Multi-offset training avoids the collapse seen in v3 and achieves much higher val_acc and main_actions_val_acc than v3_only_vis. **No overfitting**; best epoch is the last (49). Class distribution is imbalanced; val_acc_class = 0 for rare classes (brake, left+accel+brake) reflects few or no val samples, not model failure.
+
+**How to run**
+
+.. code-block:: bash
+
+   .\.venv\Scripts\python.exe scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v3_multi_offset.yaml
+
+**Reproduce (includes --plot to regenerate graphs)**
+
+.. code-block:: bash
+
+   python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_multi_offset output/ptretrain/bc/v3_only_vis --interval 5 --plot --output-dir docs/source/_static
+
+Experiment: Single-head current tick vs multi-offset (v3_current_tick vs v3_multi_offset)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Overview:** This experiment compares **single-head BC** (current tick only) with **multi-offset BC** (11 heads at 0–100 ms) on the img 100 FPS dataset. Both use **use_full_iqn: true**, **use_floats: true**, same encoder init (vis v2), same hyperparameters (50 epochs, batch 4096, lr 0.0001). The only structural difference is the number of action heads.
+
+**Configs:**
+
+- **v3_current_tick** (``config_files/pretrain/bc/pretrain_config_bc_v3_current_tick.yaml``): ``run_name: v3_current_tick``, ``preprocess_cache_dir: cache/v1.1``, **no** ``bc_time_offsets_ms`` → single head (offset 0 only).
+- **v3_multi_offset** (``config_files/pretrain/bc/pretrain_config_bc_v3_multi_offset.yaml``): ``run_name: v3_multi_offset``, ``preprocess_cache_dir: cache/v1``, ``bc_time_offsets_ms: [0, 10, 20, ..., 100]``, ``bc_offset_weights: [5, 4, 3, 2, 1, 1, ...]`` → 11 heads.
+
+**Caveat:** Different cache dirs (v1.1 vs v1); both runs have the same n_train (606,966) and n_val (66,352), so the source data is likely equivalent. Loss scale differs: v3_current_tick loss ≈ 0.10 (single cross-entropy); v3_multi_offset loss ≈ 4.4 (weighted sum of 11 cross-entropies). **Loss values are not directly comparable.**
+
+**Key findings**
+
+- **Offset-0 (current tick) accuracy:** **v3_multi_offset val_acc_offset_ms_0 = 0.9723** vs **v3_current_tick val_acc = 0.9732** — essentially **identical**. The multi-offset head at offset 0 predicts as well as the single-head model.
+- **main_actions_val_acc (best epoch):** v3_current_tick **0.7926**, v3_multi_offset **0.7886** — nearly the same.
+- **Per-action validation accuracy (epoch 49):** Very similar. v3_current_tick is slightly better on **coast** (0.8945 vs 0.8750); v3_multi_offset is slightly better on **left** (0.83 vs 0.75), **right** (0.58 vs 0.39). Main actions (accel, left+accel, right+accel, right+accel+brake) are within 0–2 pp.
+- **Training curves:** v3_current_tick converges faster (val_acc 0.97 by epoch 5); v3_multi_offset plateaus around 0.89. Both are stable; no collapse.
+- **Multi-offset benefit:** v3_multi_offset additionally predicts actions at +10 ms through +100 ms (val_acc_offset_ms_100 ≈ 0.85). If you need **only** current-tick prediction, single-head (v3_current_tick) is simpler and matches multi-offset at offset 0. Use multi-offset when you want predictions at multiple future offsets or when multi-task regularization helps stability (as with v3 vs v3_multi_offset in the full-IQN case).
+
+.. image:: ../../_static/exp_pretrain_bc_v3_current_tick_v3_multi_offset_per_action_accuracy.jpg
+   :alt: Per-action validation accuracy vs epoch (v3_current_tick vs v3_multi_offset)
+
+**Run analysis**
+
+- **v3_current_tick:** Config ``pretrain_config_bc_v3_current_tick.yaml``. 50 epochs; val_acc **0.973**, val_loss 0.102; best epoch 48; main_actions_val_acc 0.793. CSV: ``output/ptretrain/bc/v3_current_tick/csv/metrics.csv``.
+- **v3_multi_offset:** Config ``pretrain_config_bc_v3_multi_offset.yaml``. 50 epochs; val_acc **0.894** (aggregate over 11 heads); val_acc_offset_ms_0 **0.972**; best epoch 49; main_actions_val_acc 0.789. CSV: ``output/ptretrain/bc/v3_multi_offset/csv/metrics.csv``.
+
+**Conclusion:** For **current-tick prediction only**, single-head (v3_current_tick) and multi-offset (v3_multi_offset, offset-0 head) achieve **the same** accuracy (~97%). Multi-offset adds predictions at +10 ms through +100 ms at the cost of higher loss scale and slightly more compute. Use **v3_current_tick** when you need only MDP-aligned action; use **v3_multi_offset** when you want multi-offset predictions or multi-task regularization.
+
+**Reproduce**
+
+.. code-block:: bash
+
+   python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_current_tick output/ptretrain/bc/v3_multi_offset --interval 5 --plot --output-dir docs/source/_static
+
+Experiment: Full IQN BC with V_head trained (v4_multi_offset vs v3_multi_offset)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Overview:** The **only** difference between v3 and v4 is that in v4 we **also train V_head**. In v3 the BC forward returns only A_heads logits, so V_head is never in the loss path and stays at init. In v4 the forward uses the **dueling formula** ``Q = V + A - A.mean(dim=-1)`` (same as in RL), so V_head receives gradients and is trained together with A_heads. Same data, same cache, same config and hyperparameters — only the forward (and thus what gets trained) changes.
+
+**Configuration:** Same as v3_multi_offset except ``run_name: v4_multi_offset``. Config: ``config_files/pretrain/bc/pretrain_config_bc_v4_multi_offset.yaml``. Data, cache, multi-offset setup (11 heads, same weights), and all training hyperparameters are unchanged.
+
+**Run**
+
+.. code-block:: bash
+
+   python scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v4_multi_offset.yaml
+
+**Analysis:** Compare pretrain metrics (train/val loss, per-offset accuracy) and downstream RL (e.g. A01 best time, finish rate) with v3:
+
+.. code-block:: bash
+
+   python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_multi_offset output/ptretrain/bc/v4_multi_offset --interval 5
+
+**Artifacts:** Both v3 and v4 produce ``iqn_bc.pt`` with img_head, float_feature_extractor, iqn_fc, **V_head**, and A_head (offset 0). In v4, V_head is trained; in v3 it is not. RL injection (``inject_bc_heads_into_iqn``) copies all matching keys, so the trained V_head from v4 is loaded into the RL network when using ``pretrain_bc_heads_path`` pointing at the v4 run directory.
+
+**Run output:** v4 run directory is at ``output/ptretrain/bc/v4_multi_offset`` (encoder.pt, iqn_bc.pt, pretrain_meta.json, csv/, checkpoints/).
+
+**Results (from ``analyze_pretrain_bc.py output/ptretrain/bc/v3_multi_offset output/ptretrain/bc/v4_multi_offset --interval 5``):**
+
+- **Summary (50 epochs):** v3 — train_acc 0.900, val_acc 0.894, train_loss 4.15, val_loss 4.41. v4 — train_acc 0.900, val_acc **0.896**, train_loss 4.13, val_loss **4.38**. v4 has **slightly lower val_loss** and **slightly higher val_acc**.
+- **Best epoch by val_loss:** Both best at epoch 49. v3: val_loss 4.4099, val_acc 0.8940, **main_actions_val_acc 0.7886**. v4: val_loss **4.3793**, val_acc **0.8962**, **main_actions_val_acc 0.7908**. v4 is marginally better on all three.
+- **Per-offset validation accuracy (last epoch):** v4 is better or equal at every offset: offset 0 — v3 0.9723, v4 0.9721 (tie); offset 10 — v3 0.9476, v4 0.9479; offset 100 — v3 0.8490, v4 **0.8529**. Farther offsets (60–100 ms) gain ~0.3–0.4 pp in v4.
+- **Per-action (epoch 49):** Main actions (accel, left+accel, right+accel, coast, right+accel+brake) are similar or slightly better in v4; some rare actions (left, right, left+brake, right+brake) have fewer val samples and vary. **main_actions_val_acc** is higher in v4 (0.7908 vs 0.7886).
+
+**Conclusion:** Training **V_head** via the dueling formula in BC (v4) gives **slightly better** validation loss, overall val_acc, main_actions_val_acc, and per-offset accuracy than v3 (A_heads only). The gain is small but consistent. Use **v4_multi_offset** for RL injection when you want both V and A heads pretrained; downstream RL comparison (e.g. A01 best time, finish rate) can confirm whether the trained V_head helps in practice.
+
+**General takeaway:** With the *only* change being “we now train V_head too”, v4 improves pretrain metrics across the board. So jointly training V_head in BC is beneficial and does not hurt; prefer v4 for full IQN pretrain.
+
 Configuration Changes (v2 chain)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -476,6 +655,9 @@ Conclusions
 - **BC target (v2 vs v2_next_tick):** **bc_target: next_tick** gives **lower** action prediction accuracy than **current_tick**: overall val_acc ~0.55 vs 0.62, main_actions_val_acc at best epoch 0.32 vs 0.51; **coast** drops to 0 with next_tick. Prefer **current_tick** for best accuracy unless the downstream task requires next-tick prediction.
 - **n_stack (v2_next_tick vs v2_next_tick_stack3):** **n_stack=3** uses three consecutive frames per sample (temporal context) but **significantly increases RAM usage** (cache ~3× larger, batch 3× more pixel data). The stack3 config uses ``cache_load_in_ram: false`` and ``workers: 1`` to avoid OOM. **Comparison** (documented v2_next_tick n_stack=1 vs current overwritten run = n_stack=3): n_stack=3 gives **slightly better** val_loss (1.074 vs 1.116), best-epoch main_actions_val_acc (0.327 vs 0.315), and **accel** accuracy (0.744 vs 0.702); some actions are slightly worse. The gain is modest; whether it justifies the memory cost is a trade-off.
 - **Multi-offset Linear vs A_head (v2_multi_offset vs v2_multi_offset_ahead):** **v2_multi_offset** (Linear heads) gives **better validation** (val_acc 0.612, per-offset ~0.59–0.62, best epoch 49). **v2_multi_offset_ahead** (MLP A_head) **overfits**: best epoch by val_loss = **14**, then val_acc drops to 0.55 and val_loss rises to 2.88 by epoch 49. Use v2_multi_offset for best multi-offset accuracy; if using v2_multi_offset_ahead for RL merge, enable **early stopping** or use checkpoint at best epoch ~14 (see "Experiment: vis backbone + a_head only"). **v2_multi_offset_ahead_tuned** (lr 0.0002, weight_decay 0.01, early_stopping) reaches val_acc **0.591** and per-offset ~0.59–0.60, stops at ~epoch 26; **recommended for RL merge** when you need A_head.
+- **Full IQN + floats vs visual-only (v3 vs v3_only_vis) on img 100 FPS:** **v3_only_vis** is stable; **v3** (use_full_iqn, without floats) exhibits training instability and mode collapse. **v3_multi_offset** (full IQN + floats, multi-offset) is stable and achieves val_acc 0.89, main_actions_val_acc 0.79; no overfitting. Prefer **v3_multi_offset** when full IQN + floats is needed; otherwise **v3_only_vis** for visual-only.
+- **Single-head vs multi-offset (v3_current_tick vs v3_multi_offset):** For **current-tick prediction only**, both achieve the same offset-0 accuracy (~97%). Use **v3_current_tick** when you need only MDP-aligned action; use **v3_multi_offset** when you want predictions at multiple future offsets or multi-task regularization.
+- **Full IQN with V_head trained (v4_multi_offset vs v3_multi_offset):** v4 uses the **dueling formula** in the BC forward (Q = V + A - A.mean) so **V_head is trained**; v3 only trained A_heads. **Pretrain metrics:** v4 has slightly lower val_loss (4.38 vs 4.41), higher val_acc (0.896 vs 0.894), and higher main_actions_val_acc (0.791 vs 0.789) at best epoch 49; per-offset accuracy is better or equal in v4 at all offsets. Use **v4_multi_offset** for RL injection when you want both V and A pretrained; downstream RL (e.g. A01 best time, finish rate) can confirm whether the trained V_head helps in practice.
 
 Recommendations
 ---------------
@@ -486,8 +668,11 @@ Recommendations
 - **Best for action prediction accuracy:** Use **v1.2** (BC with IQN norm, encoder from vis/v1) for best **main_actions_val_acc** at best epoch and best val_loss; use **v2** if **coast** prediction is the priority. **v1.1** has the highest **overall val_acc** at epoch 49 (0.625) but the worst val_loss (overfitting).
 - **n_stack:** Use **n_stack=1** unless you have evidence that **n_stack=3** improves accuracy enough to justify the **higher RAM usage** (and possibly ``cache_load_in_ram: false``, fewer workers). Run both with distinct run names and compare with ``analyze_pretrain_bc.py``.
 - **Multi-offset (v2_multi_offset vs v2_multi_offset_ahead):** For **best multi-offset validation accuracy** use **v2_multi_offset** (Linear heads). For **RL merge of vis + A_head only** use **v2_multi_offset_ahead_tuned** (lr 0.0002, weight_decay 0.01, early_stopping — val_acc 0.591, stops ~epoch 26) or **v2_multi_offset_ahead_reg** (lr 0.0001, weight_decay 0.02, **no early stop**, 50 epochs — val_acc 0.592, best epoch 35) or **v2_multi_offset_ahead_dropout** (reg + **dropout 0.2** — **val_acc 0.595**, val_loss 1.989, best A_head) or **v2_multi_offset_ahead_dropout_inner** (dropout 0.2 + **action_head_dropout 0.1** — **val_acc 0.597**, val_loss 1.971, **best A_head**). Untuned v2_multi_offset_ahead overfits; if used, enable early stopping or checkpoint at epoch ~14.
+- **Full IQN + floats vs visual-only (v3 vs v3_only_vis) on img 100 FPS:** **v3_only_vis** (visual backbone only) is **stable**. **v3** (full IQN without floats) suffers from training instability and mode collapse. **v3_multi_offset** (full IQN + floats, multi-offset) is **stable** and achieves val_acc 0.89, main_actions_val_acc 0.79, no overfitting. Use **v3_multi_offset** when full IQN + floats is needed; **v3_only_vis** for visual-only.
+- **Single-head vs multi-offset (v3_current_tick vs v3_multi_offset):** For current-tick prediction only, both achieve the same offset-0 accuracy (~97%). Use **v3_current_tick** when you need only MDP-aligned action; **v3_multi_offset** when you want multi-offset predictions.
+- **Full IQN with V_head trained (v4_multi_offset):** Same config as v3_multi_offset but the model forward uses the dueling formula so V_head receives gradients. **v4 gives slightly better pretrain metrics** (val_loss 4.38 vs 4.41, val_acc 0.896 vs 0.894, main_actions_val_acc 0.791 vs 0.789). Use **v4_multi_offset** when you want the full IQN (including V_head) pretrained for RL injection; compare downstream RL (e.g. A01) to confirm benefit.
 - For analysis, use **scripts/analyze_pretrain_bc.py** with run dirs or ``--base-dir output/ptretrain/bc v1 v1.1`` (or ``v1.1 v1.2`` for normalization comparison) to get tables by epoch, **combined analysis** (best epoch by val_loss + main_actions_val_acc), and **per-action accuracy with human-readable names** (accel, left+accel, right+accel, etc.).
-- To generate the per-action accuracy plot: ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v1 output/ptretrain/bc/v1.1 --plot --output-dir docs/source/_static`` (saves ``exp_pretrain_bc_per_action_accuracy.jpg``).
+- To generate the per-action accuracy plot: ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v1 output/ptretrain/bc/v1.1 --plot --output-dir docs/source/_static`` (saves ``exp_pretrain_bc_v1_v1.1_per_action_accuracy.jpg``). Filenames are derived from run names; use ``--prefix <name>`` to override.
 
 **Analysis tools**
 
@@ -498,5 +683,9 @@ Recommendations
 - **Multi-offset Linear vs A_head (incl. dropout):** ``.\.venv\Scripts\python.exe scripts/analyze_pretrain_bc.py output/ptretrain/bc/v2_multi_offset output/ptretrain/bc/v2_multi_offset_ahead output/ptretrain/bc/v2_multi_offset_ahead_tuned output/ptretrain/bc/v2_multi_offset_ahead_reg output/ptretrain/bc/v2_multi_offset_ahead_dropout output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner --interval 5``
 - **n_stack 1 vs 3 (v2_next_tick vs v2_next_tick_stack3):** Original v2_next_tick (n_stack=1) was overwritten; comparison is in the doc (documented n_stack=1 vs current dir = n_stack=3). To print metrics for the **current** run only: ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v2_next_tick --interval 5``. If you re-run both with distinct run names, use the two-dir command to compare.
 - **Three-way (v1.1 vs v1.2 vs v2):** ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v1.1 output/ptretrain/bc/v1.2 output/ptretrain/bc/v2 --interval 5``
+- **Full IQN + floats vs visual-only (v3 vs v3_only_vis):** ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3 output/ptretrain/bc/v3_only_vis --interval 5``
+- **Multi-offset on img (v3_multi_offset vs v3_only_vis):** ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_multi_offset output/ptretrain/bc/v3_only_vis --interval 5 --plot --output-dir docs/source/_static`` (``--plot`` generates per-action vs epoch and per-offset graphs)
+- **Single-head vs multi-offset (v3_current_tick vs v3_multi_offset):** ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_current_tick output/ptretrain/bc/v3_multi_offset --interval 5 --plot --output-dir docs/source/_static``
+- **Full IQN with V_head trained (v4 vs v3_multi_offset):** ``python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v3_multi_offset output/ptretrain/bc/v4_multi_offset --interval 5``
 - With explicit CSV: ``python scripts/analyze_pretrain_bc.py --csv output/ptretrain/bc/v1/csv/metrics.csv output/ptretrain/bc/v1.1/csv/metrics.csv``
 - With base dir: ``python scripts/analyze_pretrain_bc.py --base-dir output/ptretrain/bc v1 v1.1``

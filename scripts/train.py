@@ -11,7 +11,11 @@ import shutil
 import signal
 import sys
 import time
+import warnings
 from pathlib import Path
+
+# Suppress PyTorch TypedStorage deprecation warning (from inductor; fixed in future PyTorch)
+warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*", category=UserWarning)
 
 # Parse args and load config first
 parser = argparse.ArgumentParser(description="Train TrackMania RL agent")
@@ -41,6 +45,10 @@ from trackmania_rl.agents.iqn import make_untrained_iqn_network
 from trackmania_rl.multiprocess.collector_process import collector_process_fn
 from trackmania_rl.multiprocess.learner_process import learner_process_fn
 from trackmania_rl.utilities import set_random_seed
+
+# Reduce Triton/inductor console spam (AUTOTUNE logs appear when new kernels compile mid-training)
+if "TORCH_LOGS" not in os.environ:
+    os.environ["TORCH_LOGS"] = "-inductor"
 
 # noinspection PyUnresolvedReferences
 torch.backends.cudnn.benchmark = True
@@ -173,7 +181,32 @@ if __name__ == "__main__":
     _, uncompiled_shared_network = make_untrained_iqn_network(
         jit=config.use_jit, is_inference=False
     )
-    uncompiled_shared_network.share_memory()
+    with shared_network_lock:
+        uncompiled_shared_network.share_memory()
+
+    # --- Compilation Warmup (Windows Stability) ---
+    # Populate the torch.compile cache in the main process before spawning workers.
+    # This avoids PermissionError in collectors during simultaneous cache writes.
+    if config.use_jit:
+        print("\n[INFO] Warming up torch.compile (Populating Triton cache)...")
+        # Dummy inputs for warmup
+        dummy_img = torch.zeros((1, 1, config.H_downsized, config.W_downsized), device="cuda", dtype=torch.uint8)
+        dummy_float = torch.zeros((1, config.float_input_dim), device="cuda", dtype=torch.float32)
+        
+        # 1. Warm up Inference (Collectors use mode="max-autotune")
+        inf_net, _ = make_untrained_iqn_network(jit=True, is_inference=True)
+        inf_net.eval()
+        with torch.no_grad():
+            for _ in range(2):
+                inf_net(dummy_img, dummy_float, config.iqn_k)
+        
+        # 2. Warm up Training (Learner uses mode="max-autotune-no-cudagraphs")
+        train_net, _ = make_untrained_iqn_network(jit=True, is_inference=False)
+        train_net.train()
+        for _ in range(2):
+            train_net(dummy_img, dummy_float, config.iqn_k)
+        
+        print("[OK] Warmup complete. Triton cache is now populated.\n")
 
     # Start worker processes (each loads config from config_path)
     collector_processes = [

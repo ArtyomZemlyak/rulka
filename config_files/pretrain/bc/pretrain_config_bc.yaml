@@ -2,6 +2,11 @@
 # Level 1 BC (behavioral cloning) pretraining configuration
 # config_files/pretrain/bc/pretrain_config_bc.yaml
 #
+# IMPORTANT: Many parameters that must match RL (image_size, n_actions,
+# dense_hidden_dimension, iqn_embedding_dimension, float params) are loaded
+# from rl_config_path. Change them in config_files/rl/config_default.yaml
+# (or your RL config), not here.
+#
 # Override priority (highest first):
 #   1. CLI arguments   (scripts/pretrain_bc.py)
 #   2. Env vars         PRETRAIN_BC_<FIELD>  e.g.  PRETRAIN_BC_EPOCHS=20
@@ -43,9 +48,7 @@ cache_build_workers: 4
 # ---------------------------------------------------------------------------
 # Image
 # ---------------------------------------------------------------------------
-
-# Square input resolution (must match RL config, e.g. 64).
-image_size: 64
+# image_size loaded from rl_config_path (neural_network.w_downsized).
 
 # Number of consecutive frames per sample (1 = single frame).
 n_stack: 1
@@ -80,41 +83,28 @@ bc_target: current_tick
 # Path to Level 0 encoder.pt to initialize BC CNN. null = train from scratch.
 encoder_init_path: "output/ptretrain/vis/v1/encoder.pt"
 
-# Use float (scalar) state features in BC; requires float data in cache and float_input_dim set.
+# ---------------------------------------------------------------------------
+# Float state features (use_floats / use_full_iqn)
+# ---------------------------------------------------------------------------
+# All RL-matching params (image_size, n_actions, dense_hidden_dimension,
+# iqn_embedding_dimension, float vector build, float_input_dim, mean/std) come
+# from rl_config_path.
+#
 use_floats: false
-
-# When use_floats is true: length of float state vector (must match RL float_input_dim).
-# Copy from config_files/rl/config_default.yaml state_normalization or from env-derived config.
-# float_input_dim: null
-
-# Output dimension of BC float head; must match RL neural_network.float_hidden_dim for IQN transfer.
-float_hidden_dim: 256
-
-# Normalization of float inputs (same as RL state_normalization). Length must equal float_input_dim.
-# float_inputs_mean: []   # e.g. from state_normalization in RL config
-# float_inputs_std: []    # e.g. from state_normalization in RL config
-
-# When use_floats is true: save float head weights for future injection into IQN float_feature_extractor.
 save_float_head: true
+rl_config_path: config_files/rl/config_default.yaml
 
 # Actions head: same layout as IQN A_head (two-layer MLP) for transfer into RL.
 # use_actions_head: true → action head = Linear(concat_dim, dense_hidden_dimension//2) -> LeakyReLU -> Linear(..., n_actions).
 use_actions_head: false
 # When use_actions_head true: save action head as actions_head.pt for RL A_head injection.
 save_actions_head: true
-# dense_hidden_dimension used when use_actions_head or use_full_iqn; must match RL neural_network.dense_hidden_dimension.
-dense_hidden_dimension: 1024
 
-# Full IQN in BC (both off by default).
-# use_full_iqn: true → train full IQN (img_head + float_feature_extractor + iqn_fc + A_head + V_head) for 1:1 RL transfer; requires use_floats and float_input_dim.
+# Full IQN in BC (both off by default). Uses same float_inputs as use_floats.
+# use_full_iqn: true → train full IQN (img_head + float_feature_extractor + iqn_fc + A_head + V_head) for 1:1 RL transfer.
 use_full_iqn: false
 # When use_full_iqn true: true = sample tau ~ U(0,1) per batch; false = fixed tau=0.5.
 full_iqn_random_tau: false
-# When use_full_iqn true: must match RL config (neural_network).
-# iqn_embedding_dimension: 128
-
-# Must match len(config.inputs) in RL config (e.g. 12).
-n_actions: 12
 
 
 # ---------------------------------------------------------------------------

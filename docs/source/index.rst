@@ -27,7 +27,9 @@ The project uses distributional reinforcement learning (IQN - Implicit Quantile 
    first_training
    second_training
    configuration_guide
+   game_inputs_and_float_vector
    tmnf_replays
+   hf_dataset
    tensorboard_metrics
    user_faq
    troubleshooting

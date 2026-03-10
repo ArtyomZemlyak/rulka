@@ -36,7 +36,7 @@ neural_network:
   use_ddqn: true
   clip_grad_value: 1000
   clip_grad_norm: 30
-  number_memories_trained_on_between_target_network_updates: 2048
+  number_memories_trained_on_between_target_network_updates: 128
   soft_update_tau: 0.02
   target_self_loss_clamp_ratio: 4
   single_reset_flag: 0
@@ -45,21 +45,26 @@ neural_network:
   last_layer_reset_factor: 0.8
   overall_reset_mul_factor: 0.01
   use_jit: true
+  # Set to false to train IQN without image head (float features only).
+  use_iqn_image_head: false
 
 training:
-  run_name: "A01_as20_long_engineer_rewards"
-  batch_size: 512
+  run_name: "A01_as20_long_no_image_test_speed"
+  batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
   adam_beta2: 0.999
   weight_decay_lr_ratio: 0.1
   global_schedule_speed: 1
   lr_schedule:
-    # - [0, 0.00005]  # no
-    - [0, 0.001]  # - [0, 0.001] 
+    - [0, 0.001]
     - [3000000, 0.00005]
     - [12000000, 0.00005]
     - [15000000, 0.00001]
+    # - [0, 0.001]
+    # - [10000000, 0.00005]
+    # - [20000000, 0.00005]
+    # - [30000000, 0.00001]
   gamma_schedule:
     - [0, 0.999]
     - [1500000, 0.999]
@@ -93,8 +98,8 @@ training:
   # BC full IQN state from BC run with use_full_iqn (iqn_bc.pt).
   # Path: BC run directory containing iqn_bc.pt, or path to iqn_bc.pt.
   # Loads img_head, float_feature_extractor, iqn_fc, A_head, V_head. Applied after encoder injection on fresh run.
-  #   pretrain_bc_heads_path: "output/ptretrain/bc/v2_full_iqn"
   pretrain_bc_heads_path: null
+  # pretrain_bc_heads_path: "output/ptretrain/bc/v4_multi_offset_A01_Race"
 
   # Piecewise: load only float_feature_extractor or A_head from BC run (use_floats+save_float_head / use_actions_head+save_actions_head).
   # Path: BC run directory (with float_head.pt / actions_head.pt) or path to the .pt file. Requires existing checkpoints (e.g. after encoder injection).
@@ -127,9 +132,15 @@ exploration:
     - [50000, 1]
     - [300000, 0.1]
     - [3000000, 0.03]
+    # - [0, 1]
+    # - [300000, 1]
+    # - [3000000, 0.1]
+    # - [10000000, 0.03]
   epsilon_boltzmann_schedule:
     - [0, 0.15]
-    - [3000000, 0.03]
+    - [10000000, 0.03]
+    # - [0, 0.03]
+    # - [3000000, 0.03]
   tau_epsilon_boltzmann: 0.01
 
 rewards:
@@ -142,11 +153,11 @@ rewards:
   engineered_reward_max_dist_to_cur_vcp: 25
   shaped_reward_point_to_vcp_ahead: 0
   # Small bonuses/penalties throughout training ([[frames, value]] — constant from start)
-  engineered_speedslide_reward_schedule: [[0, 0.01]]
-  engineered_neoslide_reward_schedule: [[0, 0.01]]
+  engineered_speedslide_reward_schedule: [[0, 0.0]]
+  engineered_neoslide_reward_schedule: [[0, 0.0]]
   engineered_kamikaze_reward_schedule: [[0, 0.0]]
   engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
-  final_speed_reward_as_if_duration_s: 0
+  final_speed_reward_as_if_duration_s: 2
 
 map_cycle:
   entries:
@@ -155,10 +166,10 @@ map_cycle:
     - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 
 performance:
-  gpu_collectors_count: 4
-  max_rollout_queue_size: 1
-  send_shared_network_every_n_batches: 8
-  update_inference_network_every_n_actions: 8
+  gpu_collectors_count: 8
+  max_rollout_queue_size: 4
+  send_shared_network_every_n_batches: 128
+  update_inference_network_every_n_actions: 128
   plot_race_time_left_curves: false
   n_transitions_to_plot_in_distribution_curves: 1000
   make_highest_prio_figures: false
@@ -166,7 +177,7 @@ performance:
   n_pixels_to_crop_on_each_side: 2
   frames_before_save_best_runs: 1500000
   threshold_to_save_all_runs_ms: -1
-  running_speed: 512
+  running_speed: 32
   force_window_focus_on_input: false
 
 inputs:

@@ -85,6 +85,7 @@ def _resolve_run_dir(base_dir: Path, run_name: str | None) -> Path:
 
 def _make_encoder_and_loader(
     cfg: PretrainConfig,
+    image_size: int,
     device: torch.device,
     cache_dir: Optional[Path] = None,
 ) -> tuple[nn.Module, DataLoader, int, int, bool, bool]:
@@ -108,22 +109,22 @@ def _make_encoder_and_loader(
     )
     from trackmania_rl.pretrain.preprocess import CACHE_TRAIN_FILE
 
-    single_enc_dim = get_enc_dim(1, cfg.image_size)
+    single_enc_dim = get_enc_dim(1, image_size)
 
     if cfg.n_stack > 1:
         if cfg.stack_mode == "channel":
             in_channels = cfg.n_stack
             stacked_concat = False
-            encoder = build_iqn_encoder(in_channels, cfg.image_size).to(device)
+            encoder = build_iqn_encoder(in_channels, image_size).to(device)
         else:  # concat
             in_channels = 1
             stacked_concat = True
-            enc1 = build_iqn_encoder(1, cfg.image_size)
+            enc1 = build_iqn_encoder(1, image_size)
             encoder = StackedEncoderConcat(enc1, cfg.n_stack, single_enc_dim).to(device)
     else:
         in_channels = 1
         stacked_concat = False
-        encoder = build_iqn_encoder(1, cfg.image_size).to(device)
+        encoder = build_iqn_encoder(1, image_size).to(device)
 
     # --- Dataset selection ---
     if cache_dir is not None:
@@ -132,7 +133,7 @@ def _make_encoder_and_loader(
         ds = CachedPretrainDataset(
             cache_dir / CACHE_TRAIN_FILE,
             load_in_ram=cfg.cache_load_in_ram,
-            expected_image_size=cfg.image_size,
+            expected_image_size=image_size,
             expected_n_stack=cfg.n_stack,
             image_normalization=cfg.image_normalization,
         )
@@ -147,9 +148,9 @@ def _make_encoder_and_loader(
         # Raw image tree path (original behaviour).
         if cfg.val_fraction > 0:
             train_ids, _ = split_track_ids(cfg.data_dir, cfg.val_fraction, cfg.seed)
-            ds = ReplayFrameDataset(cfg.data_dir, track_ids=train_ids, size=cfg.image_size, n_stack=cfg.n_stack, image_normalization=cfg.image_normalization)
+            ds = ReplayFrameDataset(cfg.data_dir, track_ids=train_ids, size=image_size, n_stack=cfg.n_stack, image_normalization=cfg.image_normalization)
         else:
-            ds = FlatFrameDataset(cfg.data_dir, size=cfg.image_size, n_stack=cfg.n_stack)
+            ds = FlatFrameDataset(cfg.data_dir, size=image_size, n_stack=cfg.n_stack)
 
         if len(ds) == 0:
             raise RuntimeError(f"No images found in {cfg.data_dir}")
@@ -167,7 +168,7 @@ def _make_encoder_and_loader(
             from lightly.transforms.simclr_transform import SimCLRTransform
             from torch.utils.data import Dataset as TorchDS
 
-            transform = SimCLRTransform(input_size=cfg.image_size, gaussian_blur=0.0)
+            transform = SimCLRTransform(input_size=image_size, gaussian_blur=0.0)
 
             class _LightlyDS(TorchDS):
                 def __init__(self, root: Path, transform_: object) -> None:
@@ -498,6 +499,7 @@ def create_lightning_trainer(
 
 def _train_lightning(
     cfg: PretrainConfig,
+    image_size: int,
     encoder: nn.Module,
     in_channels: int,
     stacked_concat: bool,
@@ -526,15 +528,15 @@ def _train_lightning(
 
     lc = cfg.lightning  # shorthand
 
-    enc_dim = get_enc_dim(1, cfg.image_size)
+    enc_dim = get_enc_dim(1, image_size)
 
     # --- Task module ---
     if cfg.task == "ae":
-        decoder = build_ae_decoder(enc_dim, out_channels=cfg.n_stack if cfg.n_stack > 1 else 1, image_size=cfg.image_size)
+        decoder = build_ae_decoder(enc_dim, out_channels=cfg.n_stack if cfg.n_stack > 1 else 1, image_size=image_size)
         module = AELightningModule(encoder, decoder, cfg.lr, stacked_concat)
     elif cfg.task == "vae":
         vae_head = build_vae_head(enc_dim, cfg.vae_latent)
-        decoder = build_vae_decoder(cfg.vae_latent, out_channels=cfg.n_stack if cfg.n_stack > 1 else 1, image_size=cfg.image_size)
+        decoder = build_vae_decoder(cfg.vae_latent, out_channels=cfg.n_stack if cfg.n_stack > 1 else 1, image_size=image_size)
         module = VAELightningModule(encoder, vae_head, decoder, cfg.lr, cfg.kl_weight, stacked_concat)
     elif cfg.task == "simclr":
         proj = build_simclr_projection(enc_dim, cfg.proj_dim)
@@ -553,14 +555,14 @@ def _train_lightning(
             prefetch_factor=cfg.prefetch_factor,
             task=cfg.task,
             load_in_ram=cfg.cache_load_in_ram,
-            expected_image_size=cfg.image_size,
+            expected_image_size=image_size,
             expected_n_stack=cfg.n_stack,
             image_normalization=cfg.image_normalization,
         )
     else:
         data_module = ReplayFrameDataModule(
             data_dir=cfg.data_dir,
-            image_size=cfg.image_size,
+            image_size=image_size,
             n_stack=cfg.n_stack,
             batch_size=cfg.batch_size,
             workers=cfg.workers,
@@ -600,6 +602,16 @@ def _train_lightning(
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
+def _get_image_size_from_rl(cfg: PretrainConfig) -> int:
+    """Load RL config and return w_downsized (image_size)."""
+    from config_files.config_loader import load_config, set_config, get_config
+    rl_path = Path(cfg.rl_config_path).resolve()
+    if not rl_path.exists():
+        raise FileNotFoundError(f"rl_config_path {rl_path} not found")
+    set_config(load_config(rl_path))
+    return get_config().w_downsized
+
+
 def train_pretrain(cfg: PretrainConfig) -> Path:
     """Run a full Level 0 pretraining run and save the encoder artifact.
 
@@ -629,6 +641,8 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     log.info("Run directory: %s", run_dir)
 
+    image_size = _get_image_size_from_rl(cfg)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Training on device: %s", device)
 
@@ -652,7 +666,7 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
         if is_cache_valid(
             cache_dir,
             cfg.data_dir,
-            cfg.image_size,
+            image_size,
             cfg.n_stack,
             cfg.val_fraction,
             cfg.seed,
@@ -666,7 +680,7 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
             build_cache(
                 data_dir=cfg.data_dir,
                 cache_dir=cache_dir,
-                image_size=cfg.image_size,
+                image_size=image_size,
                 n_stack=cfg.n_stack,
                 val_fraction=cfg.val_fraction,
                 seed=cfg.seed,
@@ -674,46 +688,46 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
             )
             log.info("Cache build complete.  Starting training from cache...")
 
-    enc_dim = get_enc_dim(1, cfg.image_size)
+    enc_dim = get_enc_dim(1, image_size)
 
     # --- Lightning path ---
     if cfg.framework == "lightning":
         if cfg.n_stack > 1 and cfg.stack_mode == "channel":
             in_channels = cfg.n_stack
             stacked_concat = False
-            encoder = build_iqn_encoder(in_channels, cfg.image_size)
+            encoder = build_iqn_encoder(in_channels, image_size)
         elif cfg.n_stack > 1 and cfg.stack_mode == "concat":
             in_channels = 1
             stacked_concat = True
-            enc1 = build_iqn_encoder(1, cfg.image_size)
+            enc1 = build_iqn_encoder(1, image_size)
             encoder = StackedEncoderConcat(enc1, cfg.n_stack, enc_dim)
         else:
             in_channels = 1
             stacked_concat = False
-            encoder = build_iqn_encoder(1, cfg.image_size)
+            encoder = build_iqn_encoder(1, image_size)
 
         metrics_rows, n_train, n_val = _train_lightning(
-            cfg, encoder, in_channels, stacked_concat, run_dir, cache_dir=cache_dir,
+            cfg, image_size, encoder, in_channels, stacked_concat, run_dir, cache_dir=cache_dir,
         )
         backbone = encoder.encoder_1ch if stacked_concat else encoder
-        meta = _build_meta(cfg, in_channels, enc_dim, metrics_rows, n_train, n_val)
+        meta = _build_meta(cfg, image_size, in_channels, enc_dim, metrics_rows, n_train, n_val)
         save_encoder_artifact(backbone, meta, run_dir, metrics_rows)
         log.info("Level 0 pretrain complete.  Artifact: %s", run_dir)
         return run_dir
 
     # --- Native path ---
     encoder, loader, enc_dim, in_channels, stacked_concat, lightly_ok = _make_encoder_and_loader(
-        cfg, device, cache_dir=cache_dir,
+        cfg, image_size, device, cache_dir=cache_dir,
     )
 
     if cfg.task == "ae":
         out_channels = cfg.n_stack if (cfg.n_stack > 1 and not stacked_concat) else 1
-        decoder = build_ae_decoder(enc_dim, out_channels, cfg.image_size).to(device)
+        decoder = build_ae_decoder(enc_dim, out_channels, image_size).to(device)
         rows = _train_ae_native(encoder, decoder, loader, device, cfg.epochs, cfg.lr, stacked_concat, cfg.use_tqdm)
     elif cfg.task == "vae":
         out_channels = cfg.n_stack if (cfg.n_stack > 1 and not stacked_concat) else 1
         vae_head = build_vae_head(enc_dim, cfg.vae_latent).to(device)
-        decoder = build_vae_decoder(cfg.vae_latent, out_channels, cfg.image_size).to(device)
+        decoder = build_vae_decoder(cfg.vae_latent, out_channels, image_size).to(device)
         rows = _train_vae_native(encoder, vae_head, decoder, loader, device, cfg.epochs, cfg.lr, cfg.kl_weight, stacked_concat, cfg.use_tqdm)
     elif cfg.task == "simclr":
         proj = build_simclr_projection(enc_dim, cfg.proj_dim).to(device)
@@ -723,7 +737,7 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
 
     backbone = encoder.encoder_1ch if stacked_concat else encoder
     n_train = len(loader.dataset)
-    meta = _build_meta(cfg, in_channels, enc_dim, rows, n_train, 0)
+    meta = _build_meta(cfg, image_size, in_channels, enc_dim, rows, n_train, 0)
     save_encoder_artifact(backbone, meta, run_dir, rows)
     log.info("Level 0 pretrain complete.  Artifact: %s", run_dir)
     return run_dir
@@ -735,6 +749,7 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
 
 def _build_meta(
     cfg: PretrainConfig,
+    image_size: int,
     in_channels: int,
     enc_dim: int,
     rows: list[dict],
@@ -746,7 +761,7 @@ def _build_meta(
     return {
         "task": cfg.task,
         "framework": cfg.framework,
-        "image_size": cfg.image_size,
+        "image_size": image_size,
         "image_normalization": cfg.image_normalization,
         "n_stack": cfg.n_stack,
         "stack_mode": cfg.stack_mode,

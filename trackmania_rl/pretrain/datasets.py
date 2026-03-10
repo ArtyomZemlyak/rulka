@@ -26,9 +26,12 @@ cases where the directory structure is not the standard <track_id>/<replay_name>
 
 from __future__ import annotations
 
+import logging
 import random
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 import numpy as np
 import torch
@@ -88,8 +91,23 @@ def split_track_ids(
     """
     root = Path(root)
     track_ids = sorted(d.name for d in root.iterdir() if d.is_dir())
+    return split_track_ids_from_list(track_ids, val_fraction, seed)
+
+
+def split_track_ids_from_list(
+    track_ids: list[str],
+    val_fraction: float = 0.1,
+    seed: int = 42,
+) -> tuple[list[str], list[str]]:
+    """Split a list of track IDs into deterministic train / val lists.
+
+    When len(track_ids) == 1 and val_fraction > 0, returns (track_ids, [])
+    so that the single track is used for training (avoids empty train set).
+    """
     if not track_ids:
         return [], []
+    if len(track_ids) == 1 and val_fraction > 0:
+        return list(track_ids), []
 
     rng = random.Random(seed)
     shuffled = track_ids.copy()
@@ -783,6 +801,10 @@ if _LIGHTNING_AVAILABLE:
 
         def setup(self, stage: Optional[str] = None) -> None:
             import json
+            from trackmania_rl.pretrain.contract import (
+                CACHE_TRAIN_FLOATS_FILE,
+                CACHE_VAL_FLOATS_FILE,
+            )
             meta_path = self.cache_dir / "cache_meta.json"
             if meta_path.exists():
                 try:
@@ -798,6 +820,13 @@ if _LIGHTNING_AVAILABLE:
                             self._floats_path_train = tp
                         if vp.exists():
                             self._floats_path_val = vp
+                        if self._floats_path_train is not None:
+                            fd = meta.get("float_input_dim", "?")
+                            log.info("BC DataModule: training with float inputs (float_input_dim=%s)", fd)
+                        else:
+                            log.warning("BC DataModule: cache has has_floats=True but train_floats.npy missing")
+                    else:
+                        log.info("BC DataModule: training without float inputs (has_floats=False)")
                 except (OSError, json.JSONDecodeError):
                     pass
             train_ds = CachedBCDataset(
@@ -835,12 +864,14 @@ if _LIGHTNING_AVAILABLE:
                 expected_n_stack=self.expected_n_stack,
                 image_normalization=self.image_normalization,
             )
+            # Avoid zero batches when dataset is smaller than batch_size (e.g. single-track fine-tuning).
+            drop_last = len(ds) > self.batch_size
             return DataLoader(
                 ds,
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.workers,
-                drop_last=True,
+                drop_last=drop_last,
                 pin_memory=self.pin_memory,
                 persistent_workers=(self.workers > 0),
                 prefetch_factor=self.prefetch_factor if self.workers > 0 else None,
@@ -891,6 +922,7 @@ if _LIGHTNING_AVAILABLE:
             bc_time_offsets_ms: Optional[list[int]] = None,
             bc_offset_weights: Optional[list[float]] = None,
             image_normalization: str = "01",
+            track_ids: Optional[list[str]] = None,
         ) -> None:
             super().__init__()
             self.data_dir = Path(data_dir)
@@ -905,15 +937,22 @@ if _LIGHTNING_AVAILABLE:
             self.bc_target = bc_target
             self.bc_time_offsets_ms = bc_time_offsets_ms if bc_time_offsets_ms is not None else [0]
             self.bc_offset_weights = bc_offset_weights
-            self.n_offsets = len(self.bc_time_offsets_ms)
             self.image_normalization = image_normalization
+            self.track_ids = track_ids
+            self.n_offsets = len(self.bc_time_offsets_ms)
             self._train_ids: Optional[list[str]] = None
             self._val_ids: Optional[list[str]] = None
             self.n_train_samples: int = 0
             self.n_val_samples: int = 0
 
         def setup(self, stage: Optional[str] = None) -> None:
-            if self.val_fraction > 0:
+            if self.track_ids is not None:
+                # Restrict to given track IDs that exist under data_dir
+                available = [t for t in self.track_ids if (self.data_dir / t).is_dir()]
+                self._train_ids, self._val_ids = split_track_ids_from_list(
+                    available, self.val_fraction, self.seed
+                )
+            elif self.val_fraction > 0:
                 self._train_ids, self._val_ids = split_track_ids(
                     self.data_dir, self.val_fraction, self.seed
                 )

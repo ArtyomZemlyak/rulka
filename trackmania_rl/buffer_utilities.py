@@ -43,19 +43,23 @@ def fast_collate_cpu(batch, attr_name):
 
 
 def send_to_gpu(batch, attr_name):
-    return torch.as_tensor(batch).to(
+    # Ensure tensor is in pinned memory (fast_collate_cpu already creates pinned memory,
+    # but applying .pin_memory() here guarantees it for complex nested slicing cases).
+    tensor = torch.as_tensor(batch)
+    if not tensor.is_pinned():
+        tensor = tensor.pin_memory()
+    return tensor.to(
         non_blocking=True, device="cuda", memory_format=torch.channels_last if "img" in attr_name else torch.preserve_format
     )
 
 
 def buffer_collate_function(batch):
+    _use_image_head = get_config().use_iqn_image_head
     (
-        state_img,
         state_float,
         state_potential,
         action,
         rewards,
-        next_state_img,
         next_state_float,
         next_state_potential,
         gammas,
@@ -65,12 +69,10 @@ def buffer_collate_function(batch):
         map(
             lambda attr_name: fast_collate_cpu(batch, attr_name),
             [
-                "state_img",
                 "state_float",
                 "state_potential",
                 "action",
                 "rewards",
-                "next_state_img",
                 "next_state_float",
                 "next_state_potential",
                 "gammas",
@@ -80,12 +82,20 @@ def buffer_collate_function(batch):
         )
     )
 
+    if _use_image_head:
+        state_img = fast_collate_cpu(batch, "state_img")
+        next_state_img = fast_collate_cpu(batch, "next_state_img")
+    else:
+        state_img = None
+        next_state_img = None
+
+
     temporal_mini_race_current_time_actions = (
         np.abs(
             np.random.randint(
                 low=-get_config().oversample_long_term_steps + get_config().oversample_maximum_term_steps,
                 high=get_config().temporal_mini_race_duration_actions + get_config().oversample_maximum_term_steps,
-                size=(len(state_img),),
+                size=(len(batch),),
                 dtype=int,
             )
         )
@@ -113,52 +123,58 @@ def buffer_collate_function(batch):
     rewards += np.where(terminal, 0, gammas * next_state_potential)
     rewards -= state_potential
 
-    state_img, state_float, action, rewards, next_state_img, next_state_float, gammas = tuple(
+    # Upload non-image tensors to GPU
+    state_float, action, rewards, next_state_float, gammas = tuple(
         map(
             lambda batch, attr_name: send_to_gpu(batch, attr_name),
             [
-                state_img,
                 state_float,
                 action,
                 rewards,
-                next_state_img,
                 next_state_float,
                 gammas,
             ],
             [
-                "state_img",
                 "state_float",
                 "action",
                 "rewards",
-                "next_state_img",
                 "next_state_float",
                 "gammas",
             ],
         )
     )
 
-    state_img = (state_img.to(torch.float16) - 128) / 128
-    next_state_img = (next_state_img.to(torch.float16) - 128) / 128
+    if _use_image_head:
+        state_img = send_to_gpu(state_img, "state_img")
+        next_state_img = send_to_gpu(next_state_img, "next_state_img")
 
-    if get_config().apply_randomcrop_augmentation:
-        # Same transformation is applied for state and next_state.
-        # Different transformation is applied to each element in a batch.
-        i = random.randint(0, 2 * get_config().n_pixels_to_crop_on_each_side)
-        j = random.randint(0, 2 * get_config().n_pixels_to_crop_on_each_side)
-        state_img = transforms.functional.crop(
-            transforms.functional.pad(state_img, padding=get_config().n_pixels_to_crop_on_each_side, padding_mode="edge"),
-            i,
-            j,
-            get_config().H_downsized,
-            get_config().W_downsized,
-        )
-        next_state_img = transforms.functional.crop(
-            transforms.functional.pad(next_state_img, padding=get_config().n_pixels_to_crop_on_each_side, padding_mode="edge"),
-            i,
-            j,
-            get_config().H_downsized,
-            get_config().W_downsized,
-        )
+        state_img = (state_img.to(torch.float16) - 128) / 128
+        next_state_img = (next_state_img.to(torch.float16) - 128) / 128
+
+        if get_config().apply_randomcrop_augmentation:
+            # Same transformation is applied for state and next_state.
+            # Different transformation is applied to each element in a batch.
+            i = random.randint(0, 2 * get_config().n_pixels_to_crop_on_each_side)
+            j = random.randint(0, 2 * get_config().n_pixels_to_crop_on_each_side)
+            state_img = transforms.functional.crop(
+                transforms.functional.pad(state_img, padding=get_config().n_pixels_to_crop_on_each_side, padding_mode="edge"),
+                i,
+                j,
+                get_config().H_downsized,
+                get_config().W_downsized,
+            )
+            next_state_img = transforms.functional.crop(
+                transforms.functional.pad(next_state_img, padding=get_config().n_pixels_to_crop_on_each_side, padding_mode="edge"),
+                i,
+                j,
+                get_config().H_downsized,
+                get_config().W_downsized,
+            )
+    else:
+        # No image head: skip image collation and GPU upload entirely.
+        # Use a tiny placeholder zero tensor so downstream code still gets a valid tensor.
+        state_img = torch.zeros((len(batch), 1, 1, 1), dtype=torch.float16, device="cuda")
+        next_state_img = state_img
 
     return (
         state_img,

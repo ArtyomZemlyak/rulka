@@ -6,12 +6,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+(No changes yet.)
+
+## [1.5.0] - 2026-03-10
+
+### Training
+- **Pretrain BC** — behavioral cloning pretraining (`trackmania_rl.pretrain`, `scripts/pretrain_bc.py`, configs in `config_files/pretrain/bc/`): single-frame and multi-offset action prediction, optional encoder + action head injection into IQN; `pretrain_visual` renamed to `pretrain`
+- **Full IQN from BC** — option to load full IQN (encoder + float head + A_head + V_head) from BC checkpoint (`pretrain_bc_heads_path`) for RL warm start
+- Config and schema updates for pretrain (BC, vis), RL defaults, and experiment variants (v3, v4 multi-offset, only_vis, etc.)
+
+### Performance
+- **Throughput** — training pipeline accelerated from **~23K to ~58K samples/second** (collector + learner optimizations, buffer and batch handling)
+
+### Experiments (summary)
+- **BC pretrain:** BC + A_head (bc_ah) matches vis-only on final A01 best time (24.47s); encoder-only BC gives fastest early first finish; freezing encoder+A_head hurts, unfreezing with lower lr/epsilon recovers
+- **Reward shaping:** Engineered rewards (speedslide, neoslide) did not improve best time; baseline without them reached better A01 time (24.53s vs 24.94s)
+- **IQN without image head:** Float-only IQN is viable but consistently ~0.2–0.3s slower than full IQN on A01; image head improves sample efficiency and final times
+- **Full IQN from BC:** Documented runs (full_iqn_bc, best_ref, 4explo) and analysis in experiment docs
+
 ### Added
 - **IQN architecture documentation** — `docs/source/experiments/models/iqn_architecture.rst` with high-level and per-block Graphviz diagrams (inputs/outputs, image head, float head, IQN quantile mixing, dueling heads); link from main_objects; `sphinx.ext.graphviz` enabled
-- **Pretrain BC** — behavioral cloning pretraining (`trackmania_rl.pretrain`, `scripts/pretrain_bc.py`, `config_files/pretrain/bc/pretrain_config_bc.yaml`), experiment docs and plots; `pretrain_visual` renamed to `pretrain`
+- **Experiment docs and plots** — pretrain BC (behavioral_cloning, per-action accuracy, multi-offset), reward shaping, IQN no image head, full IQN from BC; scripts for analysis and plot generation
+- **Misc** — `data/` added to `.gitignore`; float inputs verification, dataset and HF tooling, cleanup scripts
 
 ### Changed
 - **Doc build** — optional dependency group `doc` comment: Graphviz (system) required for architecture diagrams; all architecture page text in English
+- **Config/docs** — configuration guide, troubleshooting, tmnf_replays, experiment index and cross-links updated
 
 ## [1.4.0] - 2026-02-18
 

@@ -1,16 +1,10 @@
 # =============================================================================
-# Level 0 visual pretraining configuration
-# config_files/pretrain/vis/pretrain_config.yaml
+# Level 0 visual pretraining — SimCLR
+# config_files/pretrain/vis/pretrain_config_simclr.yaml
 #
-# All values here are defaults.  Override priority (highest first):
-#   1. CLI arguments   (scripts/pretrain_visual_backbone.py)
-#   2. Env vars        PRETRAIN_<FIELD>  e.g.  PRETRAIN_TASK=simclr
-#                      Nested fields:   PRETRAIN_LIGHTNING__PATIENCE=5
-#   3. This file       (config_files/pretrain/vis/pretrain_config_simclr.yaml)
+# IMPORTANT: image_size is loaded from rl_config_path. Change it in RL config.
 #
-# Schema and validation: config_files/pretrain_schema.py
-# Artifact contract   : trackmania_rl/pretrain/contract.py
-# Experiment roadmap  : docs/source/experiments/pretrain_replay_roadmap.rst
+# Override priority (highest first): CLI → PRETRAIN_* env → this file
 # =============================================================================
 
 
@@ -89,10 +83,8 @@ framework: lightning
 # ---------------------------------------------------------------------------
 # Image / temporal stacking
 # ---------------------------------------------------------------------------
-
-# Square input resolution in pixels.
-# IMPORTANT: must match IQN neural_network.w_downsized / h_downsized in config_files/rl/config_default.yaml.
-image_size: 64
+# image_size loaded from rl_config_path.
+rl_config_path: config_files/rl/config_default.yaml
 
 # Number of consecutive frames per sample.  1 = single frame (recommended default).
 n_stack: 1
