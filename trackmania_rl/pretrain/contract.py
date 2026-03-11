@@ -112,8 +112,9 @@ CACHE_VALIDATION_FIELDS = (
 # train_actions.npy: shape (N_train,) when single offset, else (N_train, n_offsets). Same for val_actions.npy.
 #
 # train_floats.npy / val_floats.npy: optional. When manifest has "meta" (race state snapshots),
-# build_bc_cache produces (N, float_input_dim) float32 arrays. cache_meta.json gets
-# has_floats: true and float_input_dim. Row order matches train.npy / train_actions.npy.
+# build_bc_cache produces (N, float_input_dim) float32 arrays (extended layout: temporal, prev_actions,
+# gear, vel, waypoints, margin, freewheel, turning_rate, mobil_is_sliding, car_track_extra). cache_meta.json
+# gets has_floats: true and float_input_dim. Row order matches train.npy / train_actions.npy.
 #
 # Validation: is_bc_cache_valid() checks source_data_dir, image_size, n_stack,
 # val_fraction, seed, source_signature, n_actions, and bc_target.

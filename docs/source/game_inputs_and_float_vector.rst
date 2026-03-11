@@ -3,14 +3,23 @@
 Game inputs and float observation vector
 =========================================
 
-This document describes what data we take from the game (TMInterface / SimStateData), how it maps to our float observation vector, and **what the game provides but we do not use**. It is the single reference for "are we using everything?" and for extending the observation space.
+This document describes what data we take from the game (TMInterface / SimStateData), how it maps to our **extended** float observation vector, and how actions are represented as a **multi-label** vector. It is the single reference for "are we using everything?" and for extending the observation/action space.
 
 Sources
 -------
 
 - **TMInterface 2** (socket API): we use ``get_simulation_state()`` → returns ``SimStateData`` (from package ``tminterface``).
-- **Float vector** is built in ``trackmania_rl.float_inputs``: ``build_float_vector()`` and ``state_dict_from_sim_state()``.
+- **Float vector** is built in ``trackmania_rl.float_inputs``: ``build_float_vector()``, ``state_dict_from_sim_state()`` (RL), and ``state_dict_from_meta()`` (BC from manifest).
 - **RL rollout**: ``game_env_backend.py`` / ``game_instance_manager.py`` call ``get_simulation_state()``, then ``state_dict_from_sim_state()``, then ``build_float_vector()``.
+
+Action space (multi-label)
+--------------------------
+
+The agent does **not** choose one of 12 discrete actions. The action space is **multi-label**: a vector of independent binary dimensions.
+
+- **``n_steer_parts``** (config, default 1): number of binary "parts" for left and for right steering. With ``n_steer_parts=1`` we have 4 dimensions: accelerate, brake, left, right. With ``n_steer_parts=2`` we have 6: accelerate, brake, left_1, left_2, right_1, right_2.
+- **``n_action_dims``** = ``2 + 2 * n_steer_parts`` (computed). The network outputs one logit per dimension; greedy action is "logit > 0" per dimension, so the agent can press **several keys at once** (e.g. accelerate + left + brake).
+- **Conversion**: ``trackmania_rl.action_vector`` provides ``ActionSpace(n_steer_parts)``, ``action_vector_to_game_input()``, ``game_input_to_action_vector()``. Commands sent to the game are still binary (left/right/accelerate/brake) via ``TMInterface.set_input_state()``; the multi-label vector is converted to game booleans by combining left_1..left_N and right_1..right_N.
 
 Float vector layout (dimension and indices)
 -------------------------------------------
@@ -19,12 +28,19 @@ Float vector layout (dimension and indices)
 
 .. code-block:: text
 
-   float_input_dim = 27 + 3 * n_zone_centers_in_inputs
-                    + 4 * n_prev_actions_in_inputs
-                    + 4 * n_contact_material_physics_behavior_types
-                    + 1
+   n_action_dims = 2 + 2 * n_steer_parts
+   float_input_dim = 1
+                    + n_prev_actions_in_inputs * n_action_dims
+                    + (4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * n_contact_material_physics_behavior_types)
+                    + 3 + 3 + 3
+                    + n_zone_centers_in_inputs * 3
+                    + 1 + 1
+                    + 1 + 1
+                    + 29
 
-With defaults (n_zone=40, n_prev=5, n_contact=4): **184**.
+   (last two lines: margin, freewheel, turning_rate, mobil_is_sliding, car_track_extra)
+
+With defaults (n_zone=40, n_prev=5, n_steer_parts=1 → n_action_dims=4, n_contact=4): **215**.
 
 **Order** (same as in ``float_inputs.build_float_vector()``):
 
@@ -42,7 +58,7 @@ With defaults (n_zone=40, n_prev=5, n_contact=4): **184**.
      - Config / rollout
    * - 1–20
      - 20
-     - Previous actions: [accel, brake, left, right] × 5 steps
+     - Previous actions: [accel, brake, left, right] × 5 steps (n_steer_parts=1)
      - Our action buffer (not from SimStateData)
    * - 21–52
      - 32
@@ -72,75 +88,58 @@ With defaults (n_zone=40, n_prev=5, n_contact=4): **184**.
      - 1
      - is_freewheeling
      - scene_mobil.is_freewheeling
+   * - 184
+     - 1
+     - turning_rate
+     - scene_mobil.turning_rate
+   * - 185
+     - 1
+     - mobil_is_sliding (car-level)
+     - scene_mobil.is_sliding
+   * - 186–214
+     - 29
+     - **car_track_extra**: add_linear_speed(3), force(3), torque(3), input_gas/brake/steer(3), speed_forward/sideward(2), max_linear_speed(1), current_local_speed(3), turbo(2), has_any_lateral_contact, burnout_state, engine(3), track(4)
+     - dyna, scene_mobil, sync_vehicle_state, engine, zone math
 
-**Indices used elsewhere:** ``buffer_management.py`` and reward shaping use e.g. 25:29 (ground contact), 56:59 (velocity), 62:65 and 65:68 (first two zone centers). If you add/remove/reorder features, update those indices and ``float_input_dim``.
+**Indices used elsewhere:** ``buffer_management._float_layout_indices()`` computes waypoint/vel/wheel positions from the start of the layout; the trailing blocks (turning_rate, mobil_is_sliding, car_track_extra) do not change those indices. If you add/remove/reorder features, update ``float_inputs.py``, ``config_loader.py`` (float_input_dim and mean/std), and any code that slices by position.
 
 What we use from SimStateData
 -----------------------------
 
-- **dyna.current_state**: position, rotation (orientation), linear_speed, angular_speed.
-- **scene_mobil**: engine.gear, engine.actual_rpm, gearbox_state, is_freewheeling.
-- **simulation_wheels** (×4): real_time_state.is_sliding, has_ground_contact, damper_absorb, contact_material_id (mapped via ``contact_materials.py`` to physics behavior categories).
+- **dyna.current_state**: position, rotation (orientation), linear_speed, angular_speed, **add_linear_speed, force, torque** (in car_track_extra).
+- **scene_mobil**: engine.gear, engine.actual_rpm, gearbox_state, is_freewheeling, **turning_rate, is_sliding**, input_gas/brake/steer, max_linear_speed, current_local_speed, turbo_boost_factor, is_turbo, has_any_lateral_contact, burnout_state; **engine**: slide_factor, braking_factor, clamped_rpm.
+- **sync_vehicle_state**: speed_forward, speed_sideward (in car_track_extra).
+- **simulation_wheels** (×4): real_time_state.is_sliding, has_ground_contact, damper_absorb, contact_material_id (mapped via ``contact_materials.py``).
 - **sim_state.race_time**: used for progress and finish detection (not in the float vector).
+- **Zone/track**: distance_since_track_begin, meters_in_current_zone, segment_length_meters, current_zone_idx (in car_track_extra).
 
 We do **not** read previous_state / temp_state from dyna; we only use current_state.
 
 What the game provides but we do NOT use
 ----------------------------------------
 
-Below is what is available on SimStateData (and related structs) but is **not** fed into the float vector or used in rollout logic. Adding any of these would require extending ``FloatStateDict``, ``state_dict_from_sim_state()``, ``build_float_vector()``, config (e.g. ``float_input_dim``, normalization), and any code that indexes by position (e.g. buffer_management reward logic).
+- **dyna**: previous_state, temp_state, inverse_inertia_tensor, quat (we use rotation matrix), unknown, not_tweaked_linear_speed, owner.
+- **scene_mobil**: quality, block_flags, prev_sync_vehicle_state, async_vehicle_state, water_forces_applied, last_has_any_lateral_contact_time, turbo_type, roulette_value, wheel_contact_absorb_counter, etc.
+- **simulation_wheels**: everything except real_time_state (is_sliding, has_ground_contact, damper_absorb, contact_material_id).
+- **SimStateData top-level**: version, context_mode, flags, timers, cp_data (we use our own zone/VCP math).
+- **TMInterface**: ``get_inputs()`` returns replay script string; we do not use it for the RL observation.
 
-**dyna (HmsDynaStruct)**
+Outputs: commands we send to the car
+-------------------------------------
 
-- previous_state, temp_state (full previous/temp physics state).
-- add_linear_speed, force, torque, inverse_inertia_tensor.
-- quat (we use rotation matrix only).
-- unknown, not_tweaked_linear_speed, owner.
+We send commands via ``TMInterface.set_input_state(left, right, accelerate, brake)`` — all four arguments are **booleans**. The agent outputs a **multi-label action vector** (length ``n_action_dims``); we convert it to game booleans with ``action_vector_to_game_input()`` (in ``trackmania_rl.action_vector``): left = any of left_1..left_N, right = any of right_1..right_N, accelerate/brake from the first two dimensions. So we still drive the car with binary inputs; the multi-label space allows the network to express "gas + slight left" or "brake + right" as separate dimensions for learning.
 
-**scene_mobil (SceneVehicleCar)**
+**Legacy:** Old replays or manifests may store a single integer ``action_idx`` (0..11). For backward compatibility we use ``STANDARD_12_ACTIONS`` and ``game_input_to_action_vector()`` to convert that index to an action vector when building BC cache or replaying.
 
-- input_gas, input_brake, input_steer (current inputs; we use our own prev_actions from the action buffer).
-- max_linear_speed, quality, block_flags.
-- prev_sync_vehicle_state, sync_vehicle_state, async_vehicle_state, prev_async_vehicle_state (speed_forward, speed_sideward, rpm, input_steer, input_gas, input_brake, is_turbo, gearbox_state — game-internal view; we use dyna velocity and engine instead).
-- has_any_lateral_contact, last_has_any_lateral_contact_time.
-- water_forces_applied, turning_rate, turbo_boost_factor, last_turbo_type_change_time, last_turbo_time, turbo_type, roulette_value.
-- is_sliding (car-level; we use per-wheel is_sliding), wheel_contact_absorb_counter, burnout_state.
-- current_local_speed, total_central_force_added, is_rubber_ball, saved_state.
+Meta capture (full state in manifest)
+-------------------------------------
 
-**simulation_wheels (per wheel)**
-
-- Everything except real_time_state: steerable, surface_handler (position, rotation, etc.), offset_from_vehicle, prev_sync_wheel_state, sync_wheel_state, async_wheel_state, contact_relative_local_distance, etc.
-- real_time_state: we use is_sliding, has_ground_contact, damper_absorb, contact_material_id only; we do not use field_4, field_8, field_12, field_48, field_84, field_108, relative_rotz_axis, nb_ground_contacts, field_144, rest.
-
-**SimStateData top-level**
-
-- version, context_mode, flags, timers.
-- cp_data (checkpoint data): we use our own zone/VCP math and do not feed raw checkpoint state into the float vector.
-
-**TMInterface API**
-
-- ``get_inputs()``: returns replay input script as a string (used in validation/capture scripts), not the current simulation state. We do not use it for the RL observation.
-
-Outputs: commands we send to the car (binary vs analog)
-------------------------------------------------------
-
-**What we use today: binary only.**
-
-We send commands via ``TMInterface.set_input_state(left, right, accelerate, brake)`` in ``tminterface2.py``. All four arguments are **booleans** (packed as ``uint8``). So in RL we only send one of the 12 discrete actions from ``config.inputs.actions`` (e.g. left+accel, right+brake, coast) — **no analog steering or throttle**.
-
-**What TMInterface supports in script format:**
-
-- **steer** — **analog**. Integer in ``[-65536, 65536]`` (negative = left, positive = right, 0 = no steer). Extended range with ``extended_steer``. Used in replay/script files (e.g. ``"8.43 steer 13292"``).
-- **gas** — analog in script, but **TMNF does not use the value**: "TMNF/TMUF do not support analog acceleration." So gas is effectively binary in TMNF.
-- **press** / **rel** — binary (up, down, left, right).
-
-When we convert replays to TMInterface scripts we **convert analog steer to binary** left/right (deadzone); we do not preserve analog in our RL action space.
-
-**Socket API we have:** Our client only implements ``C_SET_INPUT_STATE`` with 4 bytes (left, right, accelerate, brake). There is **no** ``set_steer_value(int)`` in ``tminterface2.py``. So for real-time control we are **limited to binary**. To use analog steer we would need a new socket message type (if the game plugin supports it) or per-step ``execute_command("steer ...")`` (brittle).
+When capturing replays with ``capture_replays_tmnf.py`` and ``--fps-meta``, we save **all** car-state-related fields into each meta snapshot (``sim_state_utils.sim_state_to_dict``): dyna (current/previous/temp), full scene_mobil (inputs, turbo, burnout, engine, sync/async states), and simulation_wheels. The float vector is built from this meta in BC via ``state_dict_from_meta()`` and includes **turning_rate**, **mobil_is_sliding**, and **car_track_extra** (29 values); missing keys default to 0. The dimension of the float vector is always the **extended** one (config ``float_input_dim``).
 
 Summary
 -------
 
-- **Dimension**: 184 with default config; layout is fixed in ``float_inputs.build_float_vector()`` and must match ``float_input_dim`` and state normalization.
-- **Used from game**: current dyna state (position, orientation, linear/angular speed), mobil engine/gearbox/freewheeling, and per-wheel sliding/contact/damper/contact_material.
-- **Not used**: previous/temp dyna state, forces/torques, car-level lateral contact/turbo/burnout, game’s internal vehicle states (sync/async), wheel geometry/sync state, replay input string, and raw checkpoint data. Adding any of these would require extending the float vector and all dependent code (config, normalization, reward indices).
+- **Dimension**: 215 with default config (n_zone=40, n_prev=5, n_steer_parts=1, n_contact=4). Layout is fixed in ``float_inputs.build_float_vector()`` and must match ``float_input_dim`` and state normalization in config.
+- **Actions**: Multi-label vector of length ``n_action_dims = 2 + 2*n_steer_parts``; converted to game (left, right, accelerate, brake) for control.
+- **Used from game**: dyna (position, orientation, speeds, add_linear_speed, force, torque), mobil (engine, gearbox, freewheeling, turning_rate, is_sliding, inputs, turbo, burnout, engine stats, sync speeds), per-wheel state, and track/zone metrics in car_track_extra.
+- **Not used**: previous/temp dyna state, some mobil flags/timers, wheel geometry/sync state, replay input string, raw checkpoint data. Adding more would require extending ``FloatStateDict``, ``build_float_vector()``, config, and reward/buffer indices.

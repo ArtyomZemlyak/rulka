@@ -14,7 +14,7 @@ Episode / run / map logic:
 
 API:
 - start_episode(map_path, zone_centers) -> (obs, info): run until first observation is ready.
-- send_action(action_idx): queue the action to send to the game.
+- send_action(action_vector): queue the action vector (n_action_dims,) to send to the game.
 - run_until_next_decision_point() -> (obs, reward, terminated, truncated, info): block until next tick.
 """
 
@@ -31,7 +31,7 @@ from config_files.config_loader import get_config
 from trackmania_rl import map_loader
 from trackmania_rl.float_inputs import (
     build_float_vector,
-    prev_actions_flat_from_indices,
+    prev_actions_flat_from_rollout_actions,
     state_dict_from_sim_state,
 )
 from trackmania_rl.tmi_interaction.game_instance_manager import (
@@ -66,7 +66,7 @@ class GameEnvBackend:
 
     def __init__(self, gim: GameInstanceManager):
         self.gim = gim
-        self._pending_action: int | None = None
+        self._pending_action: npt.NDArray | None = None
         self._last_obs: Tuple[npt.NDArray, npt.NDArray] | None = None
         self._last_info: Dict[str, Any] | None = None
         self._episode_started = False
@@ -78,9 +78,9 @@ class GameEnvBackend:
         self._pending_target: int | None = None
         self._pending_frame_data: bytes | None = None
 
-    def send_action(self, action_idx: int) -> None:
-        """Queue the action to be sent when the loop next advances. Called by env.step(action)."""
-        self._pending_action = action_idx
+    def send_action(self, action_vector: npt.NDArray) -> None:
+        """Queue the action vector to be sent when the loop next advances. Called by env.step(action)."""
+        self._pending_action = np.asarray(action_vector, dtype=np.float32)
 
     def start_episode(self, map_path: str, zone_centers: npt.NDArray) -> Tuple[Tuple[npt.NDArray, npt.NDArray], Dict[str, Any]]:
         """
@@ -251,15 +251,8 @@ class GameEnvBackend:
                         rollout_results["car_gear_and_wheels"].append(
                             sim_state_car_gear_and_wheels
                         )
-                        prev_indices = [
-                            rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
-                            for k in range(
-                                len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
-                                len(rollout_results["actions"]),
-                            )
-                        ]
-                        prev_flat = prev_actions_flat_from_indices(
-                            prev_indices, cfg.inputs, cfg.action_forward_idx
+                        prev_flat = prev_actions_flat_from_rollout_actions(
+                            rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
                         )
                         floats = build_float_vector(state_dict, prev_flat, 0, cfg)
                         pc5 = time.perf_counter_ns()
@@ -473,7 +466,7 @@ class GameEnvBackend:
                                 )
                                 rollout_results["frames"].append(np.nan)
                                 rollout_results["input_w"].append(np.nan)
-                                rollout_results["actions"].append(np.nan)
+                                rollout_results["actions"].append(np.full(cfg.n_action_dims, np.nan, dtype=np.float32))
                                 rollout_results["action_was_greedy"].append(np.nan)
                                 rollout_results["car_gear_and_wheels"].append(np.nan)
                                 rollout_results["meters_advanced_along_centerline"].append(
@@ -562,7 +555,7 @@ class GameEnvBackend:
                             )
                             # CRITICAL: set input and speed BEFORE responding to the frame (same as legacy rollout).
                             # Otherwise the game stays at speed=0 and the car never moves.
-                            gim.request_inputs(cfg.action_forward_idx, rollout_results)
+                            gim.request_inputs(action_vector, rollout_results)
                             gim.request_speed(gim.running_speed)
                             gim.iface._respond_to_call(msgtype)
                             return obs, info
@@ -715,9 +708,9 @@ class GameEnvBackend:
             raise RuntimeError("call start_episode then send_action before run_until_next_decision_point")
         gim = self.gim
         cfg = get_config()
-        action_idx = self._pending_action
+        action_vector = self._pending_action
         self._pending_action = None
-        gim.request_inputs(action_idx, self._rollout_results)
+        gim.request_inputs(action_vector, self._rollout_results)
         gim.request_speed(gim.running_speed)
         rollout_results = self._rollout_results
         end_race_stats = self._end_race_stats
@@ -753,8 +746,8 @@ class GameEnvBackend:
         sim_state_car_gear_and_wheels = self._sim_state_car_gear_and_wheels
         from trackmania_rl.tmi_interaction.tminterface2 import MessageType
 
-        rollout_results["actions"].append(action_idx)
-        rollout_results["input_w"].append(get_config().inputs[action_idx]["accelerate"])
+        rollout_results["actions"].append(action_vector)
+        rollout_results["input_w"].append(float(action_vector[0]))
         rollout_results["action_was_greedy"].append(np.nan)
         rollout_results["q_values"].append(np.nan)
 
@@ -818,15 +811,8 @@ class GameEnvBackend:
                             rollout_results["furthest_zone_idx"] = current_zone_idx
                         rollout_results["current_zone_idx"].append(current_zone_idx)
                         sim_state_car_gear_and_wheels = state_dict["gear_and_wheels"]
-                        prev_indices = [
-                            rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
-                            for k in range(
-                                len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
-                                len(rollout_results["actions"]),
-                            )
-                        ]
-                        prev_flat = prev_actions_flat_from_indices(
-                            prev_indices, cfg.inputs, cfg.action_forward_idx
+                        prev_flat = prev_actions_flat_from_rollout_actions(
+                            rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
                         )
                         floats = build_float_vector(state_dict, prev_flat, 0, cfg)
                         pc5 = time.perf_counter_ns()
@@ -995,7 +981,7 @@ class GameEnvBackend:
                                 )
                                 rollout_results["frames"].append(np.nan)
                                 rollout_results["input_w"].append(np.nan)
-                                rollout_results["actions"].append(np.nan)
+                                rollout_results["actions"].append(np.full(cfg.n_action_dims, np.nan, dtype=np.float32))
                                 rollout_results["action_was_greedy"].append(np.nan)
                                 rollout_results["car_gear_and_wheels"].append(np.nan)
                                 rollout_results["meters_advanced_along_centerline"].append(
@@ -1021,7 +1007,7 @@ class GameEnvBackend:
                                     ],
                                     floats,
                                     sim_state_car_gear_and_wheels,
-                                    get_config().inputs[action_idx]["accelerate"],
+                                    float(action_vector[0]),
                                 )
                                 info["end_race_stats"] = end_race_stats
                                 info["race_finished"] = True
@@ -1071,7 +1057,7 @@ class GameEnvBackend:
                                 distance_since_track_begin,
                                 floats,
                                 sim_state_car_gear_and_wheels,
-                                get_config().inputs[action_idx]["accelerate"],
+                                float(action_vector[0]),
                             )
                             info["end_race_stats"] = end_race_stats
                             self._last_obs = obs
@@ -1094,7 +1080,7 @@ class GameEnvBackend:
                                 "request_inputs_and_speed": instrumentation__request_inputs_and_speed,
                             }
                             # Same as legacy: send input and speed BEFORE responding to the frame, so the game runs with them.
-                            gim.request_inputs(action_idx, rollout_results)
+                            gim.request_inputs(action_vector, rollout_results)
                             gim.request_speed(gim.running_speed)
                             gim.iface._respond_to_call(msgtype)
                             return obs, 0.0, False, False, info

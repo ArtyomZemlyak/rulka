@@ -180,22 +180,7 @@ performance:
   running_speed: 32
   force_window_focus_on_input: false
 
-inputs:
-  actions:
-    - {left: false, right: false, accelerate: true, brake: false}
-    - {left: true, right: false, accelerate: true, brake: false}
-    - {left: false, right: true, accelerate: true, brake: false}
-    - {left: false, right: false, accelerate: false, brake: false}
-    - {left: true, right: false, accelerate: false, brake: false}
-    - {left: false, right: true, accelerate: false, brake: false}
-    - {left: false, right: false, accelerate: false, brake: true}
-    - {left: true, right: false, accelerate: false, brake: true}
-    - {left: false, right: true, accelerate: false, brake: true}
-    - {left: false, right: false, accelerate: true, brake: true}
-    - {left: true, right: false, accelerate: true, brake: true}
-    - {left: false, right: true, accelerate: true, brake: true}
-  action_forward_idx: 0
-  action_backward_idx: 6
+# Action space: environment.n_steer_parts only (see trackmania_rl.action_vector).
 
 state_normalization:
   waypoint_mean_40cp:

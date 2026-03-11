@@ -1235,7 +1235,9 @@ def _build_bc_floats_and_update_meta(
             prev_indices = [floats_config.action_forward_idx] * n_prev
         from trackmania_rl.float_inputs import build_float_vector, prev_actions_flat_from_indices, state_dict_from_meta
         state_dict = state_dict_from_meta(nearest, floats_config)
-        prev_flat = prev_actions_flat_from_indices(prev_indices, floats_config.inputs, floats_config.action_forward_idx)
+        prev_flat = prev_actions_flat_from_indices(
+            prev_indices, floats_config.inputs, floats_config.action_forward_idx, floats_config.n_steer_parts
+        )
         return build_float_vector(state_dict, prev_flat, 0.0, floats_config)
 
     train_skip_indices: list[int] = []
@@ -1298,14 +1300,23 @@ def _verify_bc_cache_consistency(actions_path: Path, meta: dict, bc_time_offsets
     train_actions_arr = np.load(str(actions_path), mmap_mode="r")
     n_train_final = meta["n_train"]
     n_offsets = len(bc_time_offsets_ms)
+    n_actions = meta.get("n_actions", 4)  # 4 = n_action_dims (n_steer_parts=1); legacy caches used 12
     if train_actions_arr.shape[0] != n_train_final:
         raise RuntimeError(f"BC cache inconsistent: train_actions.npy shape[0]={train_actions_arr.shape[0]} != n_train={n_train_final}")
     if n_offsets == 1:
-        if train_actions_arr.ndim != 1:
-            raise RuntimeError(f"BC cache inconsistent: single offset but train_actions.npy ndim={train_actions_arr.ndim}")
+        if train_actions_arr.ndim == 1:
+            pass
+        elif train_actions_arr.ndim == 2 and train_actions_arr.shape[1] == n_actions:
+            pass  # multi-label (N, n_action_dims)
+        else:
+            raise RuntimeError(f"BC cache inconsistent: single offset expected ndim 1 or (N, n_actions={n_actions}), got {train_actions_arr.shape}")
     else:
-        if train_actions_arr.ndim != 2 or train_actions_arr.shape[1] != n_offsets:
-            raise RuntimeError(f"BC cache inconsistent: multi-offset expected shape (N, {n_offsets}), got {train_actions_arr.shape}")
+        if train_actions_arr.ndim == 2 and train_actions_arr.shape[1] == n_offsets:
+            pass
+        elif train_actions_arr.ndim == 3 and train_actions_arr.shape[1] == n_offsets and train_actions_arr.shape[2] == n_actions:
+            pass  # multi-label (N, n_offsets, n_action_dims)
+        else:
+            raise RuntimeError(f"BC cache inconsistent: multi-offset expected (N, {n_offsets}) or (N, {n_offsets}, {n_actions}), got {train_actions_arr.shape}")
     log.info("BC cache verification passed: train_actions shape %s, n_offsets=%d", train_actions_arr.shape, n_offsets)
 
 
@@ -1316,7 +1327,7 @@ def build_bc_cache(
     n_stack: int = 1,
     val_fraction: float = 0.1,
     seed: int = 42,
-    n_actions: int = 12,
+    n_actions: int = 4,  # n_action_dims (n_steer_parts=1); legacy: 12 discrete classes
     workers: int = 0,
     bc_target: str = "current_tick",
     bc_time_offsets_ms: list[int] | None = None,
@@ -1396,12 +1407,27 @@ def build_bc_cache(
         arr.flush()
         del arr
 
-    # Write train_actions.npy
+    # Write train_actions.npy (multi-label: n_action_dims per sample)
     actions_path = cache_dir / CACHE_TRAIN_ACTIONS_FILE
+    from trackmania_rl.action_vector import game_input_to_action_vector
+    n_steer = getattr(floats_config, "n_steer_parts", 1) if floats_config else 1
+    inputs = getattr(floats_config, "inputs", []) if floats_config else []
     if len(bc_time_offsets_ms) == 1:
-        actions_arr = np.array([acts[0] for _, acts in train_items], dtype=np.int64)
+        if inputs:
+            actions_arr = np.array([
+                game_input_to_action_vector(inputs[acts[0] if isinstance(acts, (list, tuple)) else acts], n_steer)
+                for _, acts in train_items
+            ], dtype=np.float32)
+        else:
+            actions_arr = np.array([acts[0] for _, acts in train_items], dtype=np.int64)
     else:
-        actions_arr = np.array([acts for _, acts in train_items], dtype=np.int64)
+        if inputs:
+            actions_arr = np.array([
+                [game_input_to_action_vector(inputs[a], n_steer) for a in acts]
+                for _, acts in train_items
+            ], dtype=np.float32)  # (N, n_offsets, n_action_dims)
+        else:
+            actions_arr = np.array([acts for _, acts in train_items], dtype=np.int64)
     np.save(actions_path, actions_arr)
 
     if val_items:
@@ -1418,7 +1444,16 @@ def build_bc_cache(
         finally:
             arr.flush()
             del arr
-        np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, np.array([acts[0] for _, acts in val_items], dtype=np.int64) if len(bc_time_offsets_ms) == 1 else np.array([acts for _, acts in val_items], dtype=np.int64))
+        if inputs:
+            val_actions_arr = np.array([
+                game_input_to_action_vector(inputs[acts[0] if isinstance(acts, (list, tuple)) else acts], n_steer)
+                for _, acts in val_items
+            ], dtype=np.float32) if len(bc_time_offsets_ms) == 1 else np.array([
+                [game_input_to_action_vector(inputs[a], n_steer) for a in acts] for _, acts in val_items
+            ], dtype=np.float32)
+        else:
+            val_actions_arr = np.array([acts[0] for _, acts in val_items], dtype=np.int64) if len(bc_time_offsets_ms) == 1 else np.array([acts for _, acts in val_items], dtype=np.int64)
+        np.save(cache_dir / CACHE_VAL_ACTIONS_FILE, val_actions_arr)
     elif (cache_dir / CACHE_VAL_FILE).exists():
         (cache_dir / CACHE_VAL_FILE).unlink(missing_ok=True)
         (cache_dir / CACHE_VAL_ACTIONS_FILE).unlink(missing_ok=True)

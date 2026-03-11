@@ -37,6 +37,8 @@ class EnvironmentConfig(BaseModel):
     margin_to_announce_finish_meters: float = 700
     n_contact_material_physics_behavior_types: int = 4
     n_prev_actions_in_inputs: int = 5
+    # Steer resolution: left and right each split into N parts (multi-label). N=1 → 4 dims (accel, brake, left, right), N=2 → 6 dims.
+    n_steer_parts: int = 1
     cutoff_rollout_if_race_not_finished_within_duration_ms: int = 300_000
     cutoff_rollout_if_no_vcp_passed_within_duration_ms: int = 2_000
     timeout_during_run_ms: int = 10_100
@@ -99,6 +101,7 @@ class NeuralNetworkConfig(BaseModel):
 
     # Computed by loader (depends on environment)
     float_input_dim: int = 0
+    n_action_dims: int = 4  # 2 + 2*n_steer_parts (accelerate, brake, left_1..left_N, right_1..right_N)
 
 
 # --- Training ---
@@ -263,21 +266,6 @@ class PerformanceConfig(BaseModel):
     force_window_focus_on_input: bool = False
 
 
-# --- Input Action ---
-class InputAction(BaseModel):
-    left: bool = False
-    right: bool = False
-    accelerate: bool = False
-    brake: bool = False
-
-
-# --- Inputs ---
-class InputsConfig(BaseModel):
-    actions: list[InputAction] = Field(default_factory=list)
-    action_forward_idx: int = 0
-    action_backward_idx: int = 6
-
-
 # --- State Normalization ---
 class StateNormalizationConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
@@ -330,7 +318,6 @@ class RulkaConfig(BaseModel):
     rewards: RewardsConfig = Field(default_factory=RewardsConfig)
     map_cycle: MapCycleConfig = Field(default_factory=MapCycleConfig)
     performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
-    inputs: InputsConfig = Field(default_factory=InputsConfig)
     state_normalization: StateNormalizationConfig = Field(
         default_factory=StateNormalizationConfig
     )

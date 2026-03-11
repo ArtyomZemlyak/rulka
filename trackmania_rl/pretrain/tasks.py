@@ -324,7 +324,10 @@ class SimCLRLightningModule(_Base):  # type: ignore[misc]
 
 if _LIGHTNING_AVAILABLE:
     class BCLightningModule(_Base):  # type: ignore[misc]
-        """Behavioral cloning: (image, action_idx) → CrossEntropy loss.
+        """Behavioral cloning: (image[, float_inputs], action) → loss.
+
+        Action can be multi-label vector (n_action_dims,) → BCE loss, or legacy
+        single-class index → CrossEntropy. Batch element is (img, float_inputs?, action).
 
         Wraps a full BC model (encoder + action head) or full IQN when use_full_iqn.
         Exposes ``self.encoder`` for saving the backbone artifact after training.
@@ -332,7 +335,7 @@ if _LIGHTNING_AVAILABLE:
         When use_full_iqn is True, forward uses num_quantiles=1 and tau either
         random (full_iqn_random_tau=True) or fixed 0.5 (full_iqn_random_tau=False).
 
-        Logs train/val loss, overall train/val accuracy, and per-class validation
+        Logs train/val loss, overall train/val accuracy, and per-dimension validation
         accuracy (val_acc_class_0, ...) for interpretation.
         """
 
@@ -376,7 +379,8 @@ if _LIGHTNING_AVAILABLE:
                     )
                 elif isinstance(ah, nn.Sequential):
                     n_actions = getattr(ah[-1], "out_features", None)
-            self._n_actions = n_actions if n_actions is not None else 12
+            # Default 4 = n_action_dims for n_steer_parts=1 (multi-label); legacy BC used 12 discrete classes
+            self._n_actions = n_actions if n_actions is not None else 4
             self.register_buffer("_train_correct", torch.zeros(self._n_actions, dtype=torch.float))
             self.register_buffer("_train_total", torch.zeros(self._n_actions, dtype=torch.float))
             self.register_buffer("_val_correct", torch.zeros(self._n_actions, dtype=torch.float))
@@ -404,19 +408,36 @@ if _LIGHTNING_AVAILABLE:
                     tau = torch.full(
                         (img.shape[0], 1), 0.5, device=img.device, dtype=torch.float32
                     )
-                Q, _ = self.model(img, float_inputs, num_quantiles, tau=tau)
-                logits = Q
+                V, A, _ = self.model(img, float_inputs, num_quantiles, tau=tau)
+                logits = A  # (B, n_action_dims)
             else:
                 logits = self.model(img, float_inputs)
+            # Multi-label: action is float vector (B, n_action_dims)
+            is_multilabel = (
+                action_idx.dtype in (torch.float32, torch.float16)
+                and action_idx.dim() >= 2
+                and action_idx.shape[-1] == logits.shape[-1]
+            )
+            if is_multilabel:
+                target = action_idx if action_idx.dim() == 2 else action_idx[:, 0]
+                if logits.dim() == 3:
+                    w = self._offset_weights.to(logits.device)
+                    total = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+                    for i in range(self._n_offsets):
+                        total = total + w[i] * F.binary_cross_entropy_with_logits(
+                            logits[:, i], target.clamp(0.0, 1.0), reduction="mean"
+                        )
+                    return total, logits, action_idx
+                loss = F.binary_cross_entropy_with_logits(logits, target.clamp(0.0, 1.0), reduction="mean")
+                return loss, logits, action_idx
             single_head = action_idx.dim() == 1
             if single_head:
-                loss = F.cross_entropy(logits, action_idx)
+                loss = F.cross_entropy(logits, action_idx.long())
                 return loss, logits, action_idx
-            # Multi-offset: logits (B, n_offsets, n_actions), action_idx (B, n_offsets)
             w = self._offset_weights.to(logits.device)
             total = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
             for i in range(self._n_offsets):
-                total = total + w[i] * F.cross_entropy(logits[:, i], action_idx[:, i])
+                total = total + w[i] * F.cross_entropy(logits[:, i], action_idx[:, i].long())
             return total, logits, action_idx
 
         def _update_acc_buffers(
@@ -434,32 +455,50 @@ if _LIGHTNING_AVAILABLE:
 
         def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
             loss, logits, action_idx = self._forward(batch)
-            pred = logits.argmax(dim=-1)
-            acc = (pred == action_idx).float().mean()
+            is_ml = action_idx.dtype in (torch.float32, torch.float16) and action_idx.dim() >= 2 and action_idx.shape[-1] == logits.shape[-1]
+            if is_ml:
+                pred = (logits > 0).float()
+                t = action_idx if action_idx.dim() == 2 else action_idx[:, 0]
+                if pred.dim() == 3:
+                    pred = pred[:, 0]
+                acc = ((pred - t).abs() < 0.5).float().mean()
+            else:
+                pred = logits.argmax(dim=-1)
+                acc = (pred == action_idx).float().mean()
             self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("train_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
-            if action_idx.dim() == 2:
+            if action_idx.dim() == 2 and not is_ml:
                 for i in range(self._n_offsets):
                     acc_i = (pred[:, i] == action_idx[:, i]).float().mean()
                     name = f"train_acc_offset_ms_{self._bc_time_offsets_ms[i]}" if self._bc_time_offsets_ms is not None else f"train_acc_offset_{i}"
                     self.log(name, acc_i, on_step=False, on_epoch=True)
-            target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
-            self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._train_correct, self._train_total)
+            if not is_ml:
+                target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
+                self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._train_correct, self._train_total)
             return loss
 
         def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
             loss, logits, action_idx = self._forward(batch)
-            pred = logits.argmax(dim=-1)
-            acc = (pred == action_idx).float().mean()
+            is_ml = action_idx.dtype in (torch.float32, torch.float16) and action_idx.dim() >= 2 and action_idx.shape[-1] == logits.shape[-1]
+            if is_ml:
+                pred = (logits > 0).float()
+                t = action_idx if action_idx.dim() == 2 else action_idx[:, 0]
+                if pred.dim() == 3:
+                    pred = pred[:, 0]
+                acc = ((pred - t).abs() < 0.5).float().mean()
+            else:
+                pred = logits.argmax(dim=-1)
+                acc = (pred == action_idx).float().mean()
             self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("val_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
-            if action_idx.dim() == 2:
+            if action_idx.dim() == 2 and not is_ml:
                 for i in range(self._n_offsets):
                     acc_i = (pred[:, i] == action_idx[:, i]).float().mean()
                     name = f"val_acc_offset_ms_{self._bc_time_offsets_ms[i]}" if self._bc_time_offsets_ms is not None else f"val_acc_offset_{i}"
                     self.log(name, acc_i, on_step=False, on_epoch=True)
-            target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
-            self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._val_correct, self._val_total)
+            if not is_ml:
+                target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
+                self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._val_correct, self._val_total)
 
         def on_train_epoch_end(self) -> None:
             self._log_per_class_acc("train", self._train_correct, self._train_total)

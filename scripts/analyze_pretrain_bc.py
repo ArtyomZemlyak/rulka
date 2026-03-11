@@ -6,7 +6,7 @@ val_acc, train_acc_class_0..N, val_acc_class_0..N). This script reads CSV from r
 directories (e.g. output/ptretrain/bc/v1/csv/metrics.csv or output/ptretrain/bc/v1/csv/
 with version_0/metrics.csv) and prints comparison with action names (not just 0,1,2).
 
-Action names match config_files/rl/config_default.yaml inputs (12 actions):
+Action names for legacy 12 discrete classes (STANDARD_12_ACTIONS order; RL now uses multi-label n_action_dims):
   0=accel, 1=left+accel, 2=right+accel, 3=coast, 4=left, 5=right,
   6=brake, 7=left+brake, 8=right+brake, 9=accel+brake, 10=left+accel+brake, 11=right+accel+brake
 

@@ -90,11 +90,11 @@ def parse_inputs_file_tmi(path: Path, dt_s: float | None = None) -> list[dict]:
 
 
 def action_dict_to_index(state: dict) -> int:
-    """Map {accelerate, brake, left, right} to config.inputs index.
+    """Map {accelerate, brake, left, right} to legacy 12-action index (config.inputs = STANDARD_12_ACTIONS).
 
-    Falls back to ``action_forward_idx`` if the combination is not found in
-    ``cfg.inputs`` (e.g. left+right pressed simultaneously).  A warning is
-    logged so silent mismatches are visible in diagnostics.
+    Used only for manifest/parsed .inputs → integer index (e.g. saving action_idx).
+    RL rollout uses action_vector; this is for capture/backfill scripts only.
+    Falls back to ``action_forward_idx`` if the combination is not found.
     """
     cfg = get_config()
     for idx, inp in enumerate(cfg.inputs):

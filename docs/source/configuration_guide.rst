@@ -328,20 +328,29 @@ Contact and Physics
    
    **Do not change** unless you also change the grouping logic in ``contact_materials.py`` and the corresponding input dimension in the config.
 
+.. py:data:: n_steer_parts
+   :type: int
+   :value: 1
+
+   **Number of binary "parts" for left and right steering** (action space resolution)
+   
+   The action space is **multi-label**: the agent outputs a vector of ``n_action_dims = 2 + 2 * n_steer_parts`` independent binary dimensions (accelerate, brake, left_1..left_N, right_1..right_N). With ``n_steer_parts=1`` there are 4 dimensions (accelerate, brake, left, right); with ``n_steer_parts=2`` there are 6 (accelerate, brake, left_1, left_2, right_1, right_2). The network can activate several at once (e.g. gas + left + brake). Game commands are still binary (left/right/accelerate/brake); left = any of left_1..left_N, right = any of right_1..right_N. See :doc:`game_inputs_and_float_vector` and ``trackmania_rl.action_vector``.
+   
+   **Current:** 1 → 4 action dimensions. Increasing adds more steering granularity and more floats in the state (previous actions block).
+
 .. py:data:: n_prev_actions_in_inputs
    :type: int
    :value: 5
 
    **Number of previous actions** included in the state (action history)
    
-   The state includes the last N actions taken by the agent, each encoded as 4 binary flags: accelerate, brake, left, right (see ``config_files/inputs_list.py``). This gives the network a short history of what the car was doing.
+   The state includes the last N actions taken by the agent, each encoded as **n_action_dims** floats (from ``n_steer_parts``: accelerate, brake, left_1..left_N, right_1..right_N; 1.0 if that dimension was active, 0.0 otherwise). This gives the network a short history of what the car was doing.
    
    **How it works:**
    
-   - At each step, the last ``n_prev_actions_in_inputs`` actions are taken from ``rollout_results["actions"]``
-   - Each action is expanded to 4 floats: one per input name in ``["accelerate", "brake", "left", "right"]`` (1.0 if that input is pressed, 0.0 otherwise)
+   - At each step, the last ``n_prev_actions_in_inputs`` actions are taken from ``rollout_results["actions"]`` (each action is an array of length ``n_action_dims``)
    - They are concatenated in order (oldest to newest)
-   - Total floats from action history: **4 × n_prev_actions_in_inputs** = 4 × 5 = 20
+   - Total floats from action history: **n_action_dims × n_prev_actions_in_inputs** (e.g. 4 × 5 = 20 with default n_steer_parts=1)
    
    **Why needed:**
    
@@ -356,7 +365,7 @@ Contact and Physics
    
    **Current:** 5 actions. With 50 ms per action, this is 250 ms of action history (~0.25 s).
    
-   Changing this value changes ``float_input_dim`` (add or subtract 4 per action); it is computed from config at load time.
+   Changing this value changes ``float_input_dim`` (add or subtract ``n_action_dims`` per action); it is computed from config at load time.
 
 Timeouts
 --------
@@ -481,29 +490,26 @@ Input Dimensions
 
 .. py:data:: float_input_dim
    :type: int
-   :value: 191
+   :value: 215
 
    **Total dimension of scalar (non-image) inputs** (computed)
    
-   Size of feature vector fed to network alongside images.
+   Size of the **extended** feature vector fed to network alongside images.
    
-   **Breakdown of 27 base features:**
+   **Layout (see :doc:`game_inputs_and_float_vector`):**
    
    - 1: Time remaining in mini-race
-   - 20: Previous action encodings (5 actions × 4 binary flags)
-   - 4: Car gear information
-   - 2: Speed-related features
+   - ``n_prev_actions_in_inputs × n_action_dims`` (e.g. 5 × 4 = 20): Previous action encodings
+   - 32: gear_and_wheels (gear, wheels, contact materials)
+   - 3 + 3 + 3: Angular velocity, velocity, y_map (car frame)
+   - ``n_zone_centers_in_inputs × 3`` (e.g. 120): Waypoint coordinates in car frame
+   - 1 + 1: Margin to finish, is_freewheeling
+   - 1 + 1: turning_rate, mobil_is_sliding
+   - 29: car_track_extra (dyna forces/torques, mobil inputs/speeds/turbo/burnout, engine, track metrics)
    
-   **Dynamic features:**
-   
-   - 3 × ``n_zone_centers_in_inputs`` (40): Waypoint X,Y,Z coordinates
-   - 4 × ``n_prev_actions_in_inputs`` (5): Recent action history
-   - 4 × ``n_contact_material_physics_behavior_types`` (4): Wheel contact materials
-   - 1: Additional feature (freewheeling flag)
-   
-   **Current**: 27 + 120 + 20 + 16 + 1 = 184 features
+   **Current** (defaults: n_zone=40, n_prev=5, n_steer_parts=1, n_contact=4): **215** features.
 
-   For a detailed mapping of each segment to game data (SimStateData) and a list of **game fields we do not use**, see :doc:`game_inputs_and_float_vector`.
+   For a detailed mapping of each segment to game data (SimStateData) and the multi-label action space, see :doc:`game_inputs_and_float_vector`.
 
 State Normalization (float_inputs_mean / float_inputs_std)
 ---------------------------------------------------------
@@ -526,7 +532,7 @@ The repo does **not** include a script that computes them from data. The current
 
 **How to recompute from your own data:**
 
-1. Collect many ``state_float`` vectors (same order as in ``game_instance_manager.py``: placeholder, previous_actions, gear/wheels, angular velocity, velocity, y_map, zone_centers, distance_to_finish, freewheeling). During training, the first element is overwritten with mini-race time in ``buffer_collate_function``, so for normalization you can either use the "raw" state from the game or the post-collate state from the buffer.
+1. Collect many ``state_float`` vectors (same order as in ``game_instance_manager.py``: temporal, previous_actions, gear/wheels, angular velocity, velocity, y_map, zone_centers, margin, freewheeling, turning_rate, mobil_is_sliding, car_track_extra). During training, the first element is overwritten with mini-race time in ``buffer_collate_function``, so for normalization you can either use the "raw" state from the game or the post-collate state from the buffer.
 2. Stack into a matrix of shape ``(N, float_input_dim)``.
 3. Compute ``mean = np.nanmean(data, axis=0)`` and ``std = np.nanstd(data, axis=0)`` (or replace zeros in std with a small constant to avoid division by zero).
 4. Update ``float_inputs_mean`` and ``float_inputs_std`` in ``state_normalization.py``.
@@ -640,7 +646,7 @@ Q-learning variant
    
    **When True (Double DQN):**
    
-   - The **online** network selects the action: ``a* = argmax_a Q_online(next_state, a)``
+   - The **online** network selects the action vector: ``a* = (A_online(next_state) > 0)`` (multi-label greedy)
      (after averaging over quantiles).
    - The **target** network evaluates that action: target = ``reward + gamma * Q_target(next_state, a*)``.
    - Selecting and evaluating are decoupled, which reduces overestimation and often
@@ -1175,19 +1181,19 @@ Epsilon-Boltzmann
    
    Probability of Boltzmann sampling (when not taking random action).
    
-   **How the action is chosen** (one action per step):
+   **How the action is chosen** (one action **vector** per step; see ``n_steer_parts`` and multi-label action space):
    
-   - **Random** (with probability epsilon): action is chosen uniformly among all actions (ignores Q-values).
-   - **Boltzmann** (with probability (1−epsilon)×epsilon_boltzmann): to each Q(s,a) we add Gaussian noise, then take the action with the **maximum** of these noised values. So we still pick one action (argmax), but which one can differ from greedy because of the noise.
-   - **Greedy** (with probability (1−epsilon)×(1−epsilon_boltzmann)): action with the **maximum** Q(s,a) is taken (no noise).
+   - **Random** (with probability epsilon): action vector is random binary (each dimension 0 or 1 with probability 0.5), ignoring Q-values.
+   - **Boltzmann** (with probability (1−epsilon)×epsilon_boltzmann): Gaussian noise is added to the **logits** (A-head outputs), then each dimension is thresholded at 0; the resulting multi-label vector can differ from greedy because of the noise.
+   - **Greedy** (with probability (1−epsilon)×(1−epsilon_boltzmann)): action vector = (A > 0) per dimension (no noise), where A is the network’s action-head output.
    
-   So the difference: **greedy** = always the best Q; **Boltzmann** = best Q after adding random noise (often the same action when tau is small, sometimes another).
+   So the difference: **greedy** = per-dimension threshold on A; **Boltzmann** = per-dimension threshold on A + noise (can flip individual dimensions).
    
    **Combined behavior** (epsilon=0.1, epsilon_boltzmann=0.15):
    
-   - 10% purely random
-   - 90% × 15% = 13.5% Boltzmann (argmax of Q + noise)
-   - 90% × 85% = 76.5% greedy (argmax of Q)
+   - 10% purely random (random binary vector)
+   - 90% × 15% = 13.5% Boltzmann (noisy logits then threshold)
+   - 90% × 85% = 76.5% greedy (A > 0 per dimension)
 
 .. py:data:: tau_epsilon_boltzmann
    :type: float
@@ -1195,7 +1201,7 @@ Epsilon-Boltzmann
 
    **Boltzmann temperature**
    
-   In the implementation, Gaussian noise is added to Q-values before taking argmax: ``argmax(Q + tau * randn)``. So tau controls noise scale:
+   In the implementation, Gaussian noise is added to the **action-head logits** before thresholding: each dimension is 1 if ``(A + tau * randn) > 0`` else 0. So tau controls noise scale:
    
    - **tau → 0**: Almost no noise → almost always greedy (max Q)
    - **tau large**: Large noise → sometimes a suboptimal action wins

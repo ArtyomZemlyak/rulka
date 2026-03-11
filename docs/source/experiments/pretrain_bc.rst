@@ -3,6 +3,8 @@
 BC pretraining
 ==============
 
+BC uses **multi-label** action vectors (``n_action_dims`` from ``n_steer_parts``) and **extended float inputs** (float_input_dim ≈ 215 by default; see :doc:`game_inputs_and_float_vector`). Cache built with ``build_bc_cache`` stores floats of this dimension; old caches with shorter floats must be rebuilt.
+
 Experiment Overview
 -------------------
 

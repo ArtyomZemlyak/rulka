@@ -11,13 +11,13 @@ What we use
 -----------
 
 - **IQN** — value-based RL with a *distributional* head: we predict **quantiles** of the return (sum of future rewards), not just its expectation. For each (state, action) we get K values (one per quantile τ ∈ (0,1)); their mean is the usual Q(s,a). This often improves sample efficiency and stability (see *Why distributional* below).
-- **Discrete actions** — e.g. 12 classes (steer × accel × brake binned), defined in ``config_files/inputs_list.py`` and ``config.inputs``.
-- **Inputs** — (1) **image**: one grayscale frame per step, downscaled (e.g. 64×64); (2) **float state**: scalar features (position along track, zone indices, previous actions, etc.), see ``state_normalization`` and ``float_input_dim`` in config.
+- **Multi-label actions** — The agent outputs a vector of ``n_action_dims = 2 + 2*n_steer_parts`` independent binary dimensions (e.g. accelerate, brake, left, right for n_steer_parts=1). Multiple dimensions can be active at once. Defined in ``trackmania_rl.action_vector``; config: ``n_steer_parts``.
+- **Inputs** — (1) **image**: one grayscale frame per step, downscaled (e.g. 64×64); (2) **float state**: extended scalar features (temporal, previous actions, gear/wheels, velocity, waypoints, margin, freewheel, turning_rate, mobil_is_sliding, car_track_extra), see ``state_normalization`` and ``float_input_dim`` in config (default 215).
 
 Training loop (data flow)
 -------------------------
 
-1. **Collectors** — Several game instances run in parallel. Each has an **inference_network** (copy of the policy). The agent observes (frame, float_state), chooses an action (ε-greedy or Boltzmann over mean Q), and sends it to the game. Transitions (state, action, reward, next_state, …) are sent to the learner via a queue.
+1. **Collectors** — Several game instances run in parallel. Each has an **inference_network** (copy of the policy). The agent observes (frame, float_state), chooses an **action vector** (ε-greedy: random binary vector, or Boltzmann: noise on logits then threshold, or greedy: (A > 0) per dimension), and sends it to the game (converted to left/right/accelerate/brake). Transitions (state, action_vector, reward, next_state, …) are sent to the learner via a queue.
 2. **Learner** — One process. It holds the **online_network** (updated by gradients) and the **target_network** (periodically synced with the online network, e.g. soft update with τ=0.02 or hard update every N steps). It also maintains an **uncompiled_shared_network**: the learner copies online → shared; collectors copy shared → their inference_network. So collectors always use a slightly stale but consistent policy.
 3. **Replay buffer** — Transitions are stored in a **ReplayBuffer** (e.g. prioritized). Sampling is done in **mini-batches**; each batch is then passed through **buffer_collate_function**, which implements the **mini-race** logic (see *Why mini-races* below).
 4. **train_on_batch** — For each batch we compute TD targets using the **target** network and current rewards/gammas; we compute Q(s,a) for the sampled (s,a) using the **online** network; we minimize the quantile Huber loss between targets and outputs, then backprop and update the online network.
@@ -31,12 +31,12 @@ In standard DQN we learn one number Q(s,a) = E[return]. In **IQN** we learn the 
 
 **Why this helps:** (1) **Richer signal** — the full distribution captures risk and uncertainty. (2) **Better gradient flow** — multiple quantiles provide more learning signal per transition than a single scalar. (3) **Stability** — distributional methods (IQN, QR-DQN, C51) often reduce overestimation and improve convergence.
 
-We use **implicit** quantiles: τ is sampled (or fixed) per forward pass and embedded via cos(π·i·τ); the state representation is repeated K times and mixed with this embedding. Config: ``iqn_n`` (e.g. 8) quantiles during training; ``iqn_k`` (e.g. 32) during inference for action selection (we average over quantiles then choose argmax).
+We use **implicit** quantiles: τ is sampled (or fixed) per forward pass and embedded via cos(π·i·τ); the state representation is repeated K times and mixed with this embedding. Config: ``iqn_n`` (e.g. 8) quantiles during training; ``iqn_k`` (e.g. 32) during inference for action selection (we average A over quantiles then take greedy action = (A_mean > 0) per dimension).
 
 Why dueling (V + A)
 -------------------
 
-We decompose **Q(s,a) = V(s) + (A(s,a) − mean_a A(s,a))**. The **value** V(s) is shared across all actions; the **advantage** A(s,a) is per action.
+We decompose **Q(s,a) = V(s) + Σᵢ aᵢ·Aᵢ(s) − Σᵢ max(0, Aᵢ(s))** (multi-label dueling). The **value** V(s) is shared; the **advantage** A(s) is a vector of length ``n_action_dims`` (one logit per dimension). Greedy action is (A > 0) per dimension; multiple dimensions can be 1.
 
 **Why:** In many states the value is similar for all actions (e.g. straight road); learning V(s) once is more sample-efficient than learning each Q(s,a) separately. See Dueling DQN (Wang et al., 2016). The subtraction of mean(A) keeps the decomposition unique (otherwise V and A are underdetermined).
 
@@ -45,12 +45,12 @@ Why Double DQN (optional)
 
 Config: ``use_ddqn: true`` (default). In plain DQN the TD target uses the **target** network both to *choose* the best next action and to *evaluate* it → tends to **overestimate** Q. In **Double DQN** we use the **online** network to *choose* the best next action and the **target** network only to *evaluate* that action → usually reduces overestimation.
 
-**In our code:** In ``train_on_batch``, when ``use_ddqn`` is True we take ``a* = argmax_a Q_online(s', a)`` then form the target as ``r + γ Q_target(s', a*)``; when False we use ``r + γ max_a Q_target(s', a)``.
+**In our code:** In ``train_on_batch``, when ``use_ddqn`` is True we take ``a* = (A_online(s') > 0)`` (greedy multi-label vector) then form the target as ``r + γ Q_target(s', a*)``; when False we use the target network’s greedy action for the bootstrap.
 
 Why mini-races (clipped horizon)
 --------------------------------
 
-When we sample a batch, **buffer_collate_function** does the following: (1) For each transition it draws a **random horizon** (in number of actions) up to ``temporal_mini_race_duration_actions`` (e.g. 7 seconds). This horizon is stored in ``state_float[:, 0]`` so the network sees “time left in this mini-race.” (2) **Rewards** and **gammas** are reindexed so that we only sum rewards *up to that horizon*; beyond the horizon we treat the transition as terminal (gamma=0). (3) **Potential-based shaping** is applied: we add (γ φ(s') − φ(s)) to the reward so that the value of progress is preserved without changing optimal policies (Ng et al.).
+When we sample a batch, **buffer_collate_function** does the following: (1) For each transition it draws a **random horizon** (in number of actions) up to ``temporal_mini_race_duration_action_dims`` (e.g. 7 seconds). This horizon is stored in ``state_float[:, 0]`` so the network sees “time left in this mini-race.” (2) **Rewards** and **gammas** are reindexed so that we only sum rewards *up to that horizon*; beyond the horizon we treat the transition as terminal (gamma=0). (3) **Potential-based shaping** is applied: we add (γ φ(s') − φ(s)) to the reward so that the value of progress is preserved without changing optimal policies (Ng et al.).
 
 **Why:** **Credit assignment** — we only ask “how much reward in this short window?”, which simplifies learning. **Gamma = 1 over the window** — we can use γ=1 within the 7s window because the horizon is fixed and short. **Same buffer, different views** — the same transition can be interpreted as different “mini-races” on different samples, which increases diversity. See ``trackmania_rl.buffer_utilities.buffer_collate_function`` and config ``temporal_mini_race_duration_ms``, ``n_steps``, ``gamma_schedule``.
 
@@ -72,21 +72,20 @@ This network does **distributional** RL: it models the *distribution* of the ret
 
 **Quantiles τ** — In IQN, for each τ ∈ (0,1) we predict the τ-quantile of the return distribution (e.g. τ=0.1 = “pessimistic” scenario, τ=0.5 = median, τ=0.9 = “optimistic”). The network is trained to match these quantiles via the quantile Huber loss. So we get K values Q(s,a,τ₁), …, Q(s,a,τₖ) per state and action instead of one; averaging them gives the usual Q(s,a), but the full set captures uncertainty.
 
-**Replication (“repeating” state K times)** — We have one state representation after concat, shape (B, D). For each state we need Q for K different τ. So we *repeat* that representation K times → (B×K, D), and for each of the B×K rows we compute a τ-dependent embedding and mix it (Hadamard) with the repeated state. The result is (B×K, D): one row per (state, quantile). The A and V heads then output Q of shape (B×K, n_actions). So “replication” is: one state → K rows (one per τ) so we get K quantile estimates per state in one forward pass.
+**Replication (“repeating” state K times)** — We have one state representation after concat, shape (B, D). For each state we need Q for K different τ. So we *repeat* that representation K times → (B×K, D), and for each of the B×K rows we compute a τ-dependent embedding and mix it (Hadamard) with the repeated state. The result is (B×K, D): one row per (state, quantile). The V head outputs a scalar per row; the A head outputs ``n_action_dims`` logits per row. Q(s,a) is computed from V and A and the action vector a. So “replication” is: one state → K rows (one per τ) so we get K quantile estimates per state in one forward pass.
 
-**Dueling** — We decompose Q(s,a) = V(s) + A(s,a), where V(s) is the state value and A(s,a) is the advantage of action a (we use Q = V + A - mean(A) so the decomposition is unique). In many states the value is similar across actions; learning V(s) once and small advantages per action is more sample-efficient than learning each Q(s,a) from scratch. See Dueling DQN (Wang et al., 2016).
+**Dueling (multi-label)** — We decompose Q(s,a) = V(s) + Σᵢ aᵢ·Aᵢ(s) − Σᵢ max(0, Aᵢ(s)), where V(s) is the state value and A(s) is a vector of ``n_action_dims`` advantage logits (one per action dimension). Greedy action is (A > 0) per dimension. In many states the value is similar across action choices; learning V(s) once and per-dimension advantages is sample-efficient. See Dueling DQN (Wang et al., 2016).
 
 **Inputs:**
 
 - **img** — Screen image tensor: shape ``(batch_size, 1, H, W)``, dtype float32/float16. Values are normalized in ``forward()`` as ``(img - 128) / 128`` (if given as uint8, normalization is done in ``Inferer``).
-- **float_inputs** — Vector of scalar state features (position, zones, previous actions, etc.): shape ``(batch_size, float_input_dim)``. Normalized in ``forward()`` as ``(float_inputs - mean) / std`` from config.
+- **float_inputs** — Extended vector of scalar state features (temporal, previous actions, gear/wheels, velocity, waypoints, margin, freewheel, turning_rate, mobil_is_sliding, car_track_extra): shape ``(batch_size, float_input_dim)`` (default 215). Normalized in ``forward()`` as ``(float_inputs - mean) / std`` from config.
 - **num_quantiles** — Number of quantiles (N or N' in the IQN paper), e.g. 8 during training.
 - **tau** (optional) — Tensor of quantiles with shape ``(batch_size * num_quantiles, 1)``. If not provided, quantiles are sampled inside the network (symmetrically around 0.5).
 
 **Outputs:**
 
-- **Q** — Q-values for each (state, quantile): shape ``(batch_size * num_quantiles, n_actions)``.
-- **tau** — The quantiles used: shape ``(batch_size * num_quantiles, 1)``.
+- **V, A, tau** — V: scalar per (state, quantile); A: ``n_action_dims`` logits per (state, quantile). Q(s,a) is computed from V and A given the action vector a. tau: quantiles used, shape ``(batch_size * num_quantiles, 1)``.
 
 The network uses a **dueling** layout: from a single shared representation it computes value V and advantages A, then Q = V + A - mean(A).
 
@@ -120,7 +119,7 @@ Below is a block diagram of the main components only: what enters the network an
 
       subgraph outputs {
         node [fillcolor=lightgreen, style="filled"];
-        Q_out [label="Q, τ\n(B×K, n_actions)"];
+        Q_out [label="V, A, τ\n(A: n_action_dims)"];
       }
 
       img -> img_head;
@@ -212,10 +211,10 @@ Dueling: A_head and V_head
 
 From the shared representation ``(B×K, dense_input_dimension)`` two heads are computed:
 
-- **A_head**: Linear(D → dense_hidden_dimension//2) → LeakyReLU → Linear → ``(B×K, n_actions)``.
+- **A_head**: Linear(D → dense_hidden_dimension//2) → LeakyReLU → Linear → ``(B×K, n_action_dims)``.
 - **V_head**: Linear(D → dense_hidden_dimension//2) → LeakyReLU → Linear → ``(B×K, 1)``.
 
-Then: ``Q = V + A - mean(A, dim=actions)``. This yields Q-values for all actions and all quantiles.
+Then Q(s,a) is computed from V and A and the given action vector a (multi-label dueling formula). This yields Q-values for the chosen action and all quantiles.
 
 .. graphviz::
 
@@ -224,10 +223,10 @@ Then: ``Q = V + A - mean(A, dim=actions)``. This yields Q-values for all actions
       node [shape=box, fontname="Helvetica", fontsize=10];
       in [label="(B×K, D)\nstate × quantile", fillcolor=lightyellow, style="filled"];
       a1 [label="Linear D→512"];
-      a2 [label="Linear 512→n_actions"];
+      a2 [label="Linear 512→n_action_dims"];
       v1 [label="Linear D→512"];
       v2 [label="Linear 512→1"];
-      A [label="A (B×K, n_actions)"];
+      A [label="A (B×K, n_action_dims)"];
       V [label="V (B×K, 1)"];
       Q [label="Q = V + A - mean(A)", fillcolor=lightgreen, style="filled"];
       in -> a1 -> a2 -> A;

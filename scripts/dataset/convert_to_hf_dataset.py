@@ -316,7 +316,7 @@ Source replays are from TMNF-X (ManiaExchange); frames were captured using rulka
 | replay_name | string | Replay filename stem (e.g. pos10_Dolby_42800ms.replay) |
 | step | int | Frame index |
 | time_ms | int | Simulation time (ms) |
-| action_idx | int | Discrete action ID (0–8) |
+| action_idx | int | Legacy discrete action ID (0–11, 12 classes); null if not set. BC cache may use multi-label vector instead. |
 | accelerate | bool | Gas pressed |
 | brake | bool | Brake pressed |
 | left | bool | Steer left |

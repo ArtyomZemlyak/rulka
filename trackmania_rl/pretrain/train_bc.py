@@ -76,7 +76,7 @@ def train_bc(cfg) -> Path:
     rl_cfg = get_config()
 
     image_size = rl_cfg.w_downsized
-    n_actions = len(rl_cfg.inputs)
+    n_actions = rl_cfg.n_action_dims
     dense_hidden_dimension = rl_cfg.dense_hidden_dimension
     iqn_embedding_dimension = rl_cfg.iqn_embedding_dimension
 

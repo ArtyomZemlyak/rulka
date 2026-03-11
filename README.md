@@ -63,6 +63,7 @@ Compared to original Linesight:
 - ✅ **Updated dependencies** - PyTorch 2.7+, TorchRL 0.6+, CUDA 12.6
 - ✅ **Expanded docs** - comprehensive FAQ, troubleshooting, dev guide
 - ✅ **YAML config** - single file with sections, versioned per experiment
+- ✅ **Multi-label actions** - ``n_steer_parts`` defines action vector size (e.g. 4 dims: accel, brake, left, right); extended float observations (car/track state, 215 dims by default)
 
 ## Documentation
 
@@ -71,6 +72,7 @@ Compared to original Linesight:
 - **[Installation Guide](https://artyomzemlyak.github.io/rulka/installation.html)** - detailed setup instructions
 - **[First Training](https://artyomzemlyak.github.io/rulka/first_training.html)** - get started with training
 - **[Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html)** - all config parameters
+- **[Game inputs & float vector](https://artyomzemlyak.github.io/rulka/game_inputs_and_float_vector.html)** - observation layout, multi-label actions, what we use from the game
 - **[TMNF replay download & frame capture](https://artyomzemlyak.github.io/rulka/tmnf_replays.html)** - download replays from TMNF-X, capture frames via TMInterface
 - **[User FAQ](https://artyomzemlyak.github.io/rulka/user_faq.html)** - 30+ common questions
 - **[Dev FAQ](https://artyomzemlyak.github.io/rulka/dev_faq.html)** - developer questions

@@ -16,6 +16,16 @@ from trackmania_rl.experience_replay.experience_replay_interface import Experien
 from trackmania_rl.reward_shaping import speedslide_quality_tarmac
 
 
+def _float_layout_indices(n_prev: int, n_action_dims: int):
+    """Indices into state_float. Layout (extended): [temporal, prev_actions, gear, ang_vel, vel, y_map, waypoints, margin, freewheel, turning_rate, mobil_is_sliding, car_track_extra]. Indices here are from the start only; trailing blocks do not affect waypoint/vel/wheel positions."""
+    gear_start = 1 + n_prev * n_action_dims
+    vel_start = gear_start + 32 + 3  # gear 32, ang_vel 3
+    waypoint_start = vel_start + 3 + 3  # vel 3, y_map 3
+    wheel_start = gear_start + 4
+    wheel_end = gear_start + 8
+    return gear_start, vel_start, waypoint_start, wheel_start, wheel_end
+
+
 @jit(nopython=True)
 def get_potential(
     state_float,
@@ -23,16 +33,18 @@ def get_potential(
     shaped_reward_min_dist_to_cur_vcp: float,
     shaped_reward_max_dist_to_cur_vcp: float,
     shaped_reward_point_to_vcp_ahead: float,
+    waypoint_cur_start: int = 62,
+    waypoint_next_start: int = 65,
 ):
     # https://people.eecs.berkeley.edu/~pabbeel/cs287-fa09/readings/NgHaradaRussell-shaping-ICML1999.pdf
-    vector_vcp_to_vcp_further_ahead = state_float[65:68] - state_float[62:65]
+    vector_vcp_to_vcp_further_ahead = state_float[waypoint_next_start : waypoint_next_start + 3] - state_float[waypoint_cur_start : waypoint_cur_start + 3]
     vector_vcp_to_vcp_further_ahead_normalized = vector_vcp_to_vcp_further_ahead / np.linalg.norm(vector_vcp_to_vcp_further_ahead)
 
     return (
         shaped_reward_dist_to_cur_vcp
         * max(
             shaped_reward_min_dist_to_cur_vcp,
-            min(shaped_reward_max_dist_to_cur_vcp, np.linalg.norm(state_float[62:65])),
+            min(shaped_reward_max_dist_to_cur_vcp, np.linalg.norm(state_float[waypoint_cur_start : waypoint_cur_start + 3])),
         )
     ) + (shaped_reward_point_to_vcp_ahead * (vector_vcp_to_vcp_further_ahead_normalized[2] - 1))
 
@@ -52,6 +64,12 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     import torch
     
     cfg = get_config()
+    n_prev = cfg.n_prev_actions_in_inputs
+    n_ad = cfg.n_action_dims
+    _gear_start, vel_start, waypoint_start, wheel_start, wheel_end = _float_layout_indices(n_prev, n_ad)
+    vel_end = vel_start + 3
+    waypoint_cur_end = waypoint_start + 3
+    waypoint_next_end = waypoint_start + 6
     assert len(rollout_results["frames"]) == len(rollout_results["current_zone_idx"])
     n_frames = len(rollout_results["frames"])
     n_states = len(rollout_results["state_float"])
@@ -74,11 +92,12 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     # =========================================================================
     # state_float: shape (N, D)
     state_float = torch.tensor(np.stack(rollout_results["state_float"]), dtype=torch.float32)
-    # rollout_results["actions"] can sometimes contain floats or NaNs due to how TMI deals with invalid frames.
-    # Convert safely by passing it to float first, fixing NaNs, and then casting to integer
+    # rollout_results["actions"]: list of action vectors (n_action_dims,) per step. Clean NaNs/inf.
     actions_raw = np.array(rollout_results["actions"], dtype=np.float32)
+    if actions_raw.ndim == 1:
+        actions_raw = actions_raw.reshape(-1, 1)  # (T,) -> (T, 1) for single dim
     actions_raw[np.isnan(actions_raw) | np.isinf(actions_raw)] = 0
-    actions = torch.tensor(actions_raw, dtype=torch.int64)
+    actions = torch.tensor(actions_raw, dtype=torch.float32)
 
     action_was_greedy = torch.tensor(rollout_results["action_was_greedy"], dtype=torch.bool)
     meters_advanced = torch.tensor(rollout_results["meters_advanced_along_centerline"], dtype=torch.float32)
@@ -112,17 +131,17 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     if n_mid > 0:
         # V Forward diff
         if cfg.final_speed_reward_per_m_per_s != 0:
-            vel_forward = state_float[1 : 1 + n_mid, 58]
-            vel_norm_curr = torch.linalg.norm(state_float[1 : 1 + n_mid, 56:59], dim=1)
-            vel_norm_prev = torch.linalg.norm(state_float[:n_mid, 56:59], dim=1)
+            vel_forward = state_float[1 : 1 + n_mid, vel_start + 2]
+            vel_norm_curr = torch.linalg.norm(state_float[1 : 1 + n_mid, vel_start:vel_end], dim=1)
+            vel_norm_prev = torch.linalg.norm(state_float[:n_mid, vel_start:vel_end], dim=1)
             fwd_mask = vel_forward > 0
             rewards_into[1 : 1 + n_mid] += torch.where(fwd_mask, (vel_norm_curr - vel_norm_prev) * cfg.final_speed_reward_per_m_per_s, 0.0)
 
         # Speedslide reward
         if engineered_speedslide_reward != 0:
-            wheels_ground_mask = torch.all(state_float[1 : 1 + n_mid, 25:29] > 0, dim=1)
-            lat = state_float[1 : 1 + n_mid, 56]
-            fwd = state_float[1 : 1 + n_mid, 58]
+            wheels_ground_mask = torch.all(state_float[1 : 1 + n_mid, wheel_start:wheel_end] > 0, dim=1)
+            lat = state_float[1 : 1 + n_mid, vel_start]
+            fwd = state_float[1 : 1 + n_mid, vel_start + 2]
             
             from trackmania_rl.reward_shaping import speedslide_quality_tarmac
             ss_qualities = torch.tensor([
@@ -137,26 +156,28 @@ def fill_buffer_from_rollout_with_n_steps_rule(
 
         # Neoslide
         if engineered_neoslide_reward != 0:
-            neo_mask = torch.abs(state_float[1 : 1 + n_mid, 56]) >= 2.0
+            neo_mask = torch.abs(state_float[1 : 1 + n_mid, vel_start]) >= 2.0
             rewards_into[1 : 1 + n_mid] += torch.where(neo_mask, engineered_neoslide_reward, 0.0)
             
-        # Kamikaze
+        # Kamikaze (brake not pressed or wheels off)
         if engineered_kamikaze_reward != 0:
-            kamikaze_mask = (actions[1 : 1 + n_mid] <= 2) | (torch.sum(state_float[1 : 1 + n_mid, 25:29] > 0, dim=1) <= 1)
+            brake_off = actions[1 : 1 + n_mid, 1] <= 0.5
+            wheels_off = torch.sum(state_float[1 : 1 + n_mid, wheel_start:wheel_end] > 0, dim=1) <= 1
+            kamikaze_mask = brake_off | wheels_off
             rewards_into[1 : 1 + n_mid] += torch.where(kamikaze_mask, engineered_kamikaze_reward, 0.0)
 
         # Close to VCP
         if engineered_close_to_vcp_reward != 0:
-            vcp_dist = torch.linalg.norm(state_float[1 : 1 + n_mid, 62:65], dim=1)
+            vcp_dist = torch.linalg.norm(state_float[1 : 1 + n_mid, waypoint_start:waypoint_cur_end], dim=1)
             clamped_dist = torch.clamp(vcp_dist, min=cfg.engineered_reward_min_dist_to_cur_vcp, max=cfg.engineered_reward_max_dist_to_cur_vcp)
             rewards_into[1 : 1 + n_mid] += engineered_close_to_vcp_reward * clamped_dist
 
     # =========================================================================
     # 3. Vectorized Potentials
     # =========================================================================
-    vcp_to_vcp = state_float[:, 65:68] - state_float[:, 62:65]
+    vcp_to_vcp = state_float[:, waypoint_start + 3 : waypoint_next_end] - state_float[:, waypoint_start:waypoint_cur_end]
     vcp_to_vcp_norm = vcp_to_vcp / (torch.linalg.norm(vcp_to_vcp, dim=1, keepdim=True) + 1e-8)
-    dist_cur_vcp = torch.linalg.norm(state_float[:, 62:65], dim=1)
+    dist_cur_vcp = torch.linalg.norm(state_float[:, waypoint_start:waypoint_cur_end], dim=1)
     clamped_dist_potential = torch.clamp(dist_cur_vcp, min=cfg.shaped_reward_min_dist_to_cur_vcp, max=cfg.shaped_reward_max_dist_to_cur_vcp)
     
     potentials = (cfg.shaped_reward_dist_to_cur_vcp * clamped_dist_potential) + \
@@ -211,7 +232,7 @@ def fill_buffer_from_rollout_with_n_steps_rule(
             rollout_results["frames"][i],
             rollout_results["state_float"][i],
             potentials[i].item(),
-            actions[i].item(),
+            actions[i].numpy(),
             n_steps,
             final_rewards,
             rollout_results["frames"][next_idx] if not next_state_has_passed_finish else rollout_results["frames"][i],

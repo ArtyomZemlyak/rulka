@@ -35,17 +35,23 @@ def write_actions_from_disk_in_tmi_format(infile_path: Path, outfile_path: Path)
     write_actions_in_tmi_format(joblib.load(infile_path), outfile_path)
 
 
-def write_actions_in_tmi_format(action_idxs: List[int], outfile_path: Path):
+def write_actions_in_tmi_format(actions: List, outfile_path: Path):
     """
-    Input : list of action indices.
+    Input: list of action vectors (n_action_dims,) or legacy list of action indices (int).
     Output: write a text file on disk containing the corresponding inputs, readable by TMI to load the replay
     """
+    from trackmania_rl.action_vector import action_vector_to_game_input
+    cfg = get_config()
     outfile = open(outfile_path, "w")
     time_from = 0
     time_delta_s = get_config().tm_engine_step_per_action * 0.01
     last_press = {"accelerate": -1, "brake": -1, "left": -1, "right": -1}
-    for action_idx in action_idxs[:-1]:
-        action = get_config().inputs[action_idx]
+    for act in actions[:-1]:
+        if isinstance(act, (int, np.integer)):
+            # Legacy: int index (0–11) → dict via STANDARD_12_ACTIONS
+            action = cfg.inputs[act]
+        else:
+            action = action_vector_to_game_input(np.asarray(act), cfg.n_steer_parts)
         for key, val in action.items():
             if val:
                 if last_press[key] == -1:
@@ -251,11 +257,16 @@ def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_ga
                     edgecolor="black",
                 )
 
+        n_keys = min(len(q_values[0]), 12)  # support multi-label (e.g. 4) and legacy 12
+        n_axes_needed = max(key_reorder[k] for k in range(n_keys)) + 1
+        nrows = max(1, (n_axes_needed + 2) // 3)
+        ncols = 3
         for frame_id in range(min(40000000, len(q_values))):
             print(f"{(1+frame_id) / len(q_values):.1%}", end="\r")
-            fig, axes = plt.subplots(nrows=len(q_values[0]) // 3, ncols=3)
-            for key_number in range(len(q_values[0])):
-                plot_q_and_key(axes.ravel()[key_reorder[key_number]], q_values[frame_id], key_number)
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols)
+            ax_flat = axes.ravel() if nrows * ncols > 1 else [axes]
+            for key_number in range(n_keys):
+                plot_q_and_key(ax_flat[key_reorder[key_number]], q_values[frame_id], key_number)
             fig.suptitle(frame_id)
             plt.savefig(Path(temp_dir) / f"frame_{frame_id:09}.png", transparent=True)
             plt.close(fig)

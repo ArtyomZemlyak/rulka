@@ -29,7 +29,7 @@ The ``config_files/`` folder holds configuration loaded from **YAML** at startup
 
 **Supporting Files:**
 
-    - ``inputs_list.py``: Defines discrete action space (forward, brake, steering combinations), used by the loader/schema.
+    - Action space is defined by ``n_steer_parts`` in the environment config; see ``trackmania_rl.action_vector`` for multi-label action vectors and conversion to game inputs.
     - ``state_normalization.py``: Helpers if needed; main normalization data can live in the YAML.
 
 User-specific settings (paths, usernames) are read from a ``.env`` file in the project root. In code, use ``from config_files.config_loader import get_config`` and then ``get_config().<attribute>`` for flat access to any setting.

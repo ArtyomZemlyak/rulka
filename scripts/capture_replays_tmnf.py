@@ -913,7 +913,7 @@ def _make_replay_policy(
     Signature matches what rollout() expects (same as inferer.get_exploration_action
     in the training pipeline)::
 
-        policy(frame, floats) -> (action_idx, action_was_greedy, q_value, q_values)
+        policy(frame, floats) -> (action_vector, action_was_greedy, q_value, q_values)
 
     **Timing contract** (verified by deep analysis of rollout()):
 
@@ -933,9 +933,12 @@ def _make_replay_policy(
     so ``inputs_per_step[1]`` (T=10) includes the Accelerate event.  ✓
     """
     # Reuses action_dict_to_index imported from capture_frames_from_replays
+    from trackmania_rl.action_vector import game_input_to_action_vector
+
+    cfg = get_config()
     action_indices = [action_dict_to_index(inp) for inp in inputs_per_step]
-    n_actions = len(get_config().inputs)
-    dummy_q = np.zeros(n_actions, dtype=np.float32)
+    n_ad = cfg.n_action_dims
+    dummy_q = np.zeros(n_ad, dtype=np.float32)
     step = [0]
     max_step = len(action_indices) - 1 if action_indices else 0
     clamped_warned = [False]
@@ -948,29 +951,28 @@ def _make_replay_policy(
     def policy(frame, floats):
         k = step[0]
         i = min(k, max_step)
-        act = action_indices[i] if action_indices else get_config().action_forward_idx
+        act_idx = action_indices[i] if action_indices else cfg.action_forward_idx
+        # rollout() expects action_vector (n_action_dims,); convert legacy index → dict → vector
+        action_vector = game_input_to_action_vector(cfg.inputs[act_idx], cfg.n_steer_parts)
 
         # Detect when rollout exceeds the replay's input range (clamping to last input).
-        # This happens when our car is slightly slower than the original replay
-        # (e.g. due to rewind_to_current_state drift) and hasn't finished yet.
         if k > max_step and not clamped_warned[0]:
             clamped_warned[0] = True
             log.warning(
                 "  Policy step=%d exceeds available inputs (%d). "
-                "Clamping to last input (idx=%d, action=%d). "
-                "Car may be drifting from original replay trajectory.",
-                k, len(action_indices), i, act,
+                "Clamping to last input (idx=%d). Car may be drifting from original replay trajectory.",
+                k, len(action_indices), i,
             )
 
         if k < _DEBUG_POLICY_ACTIONS_TO_LOG:
             inp = inputs_per_step[i] if inputs_per_step else {}
             game_time_ms = k * step_ms
             log.info(
-                "  Policy step=%d  game_time=%dms  input_src_idx=%d  action_idx=%d  inputs=%s",
-                k, game_time_ms, i, act, inp,
+                "  Policy step=%d  game_time=%dms  input_src_idx=%d  inputs=%s",
+                k, game_time_ms, i, inp,
             )
         step[0] += 1
-        return act, True, 0.0, dummy_q
+        return action_vector, True, 0.0, dummy_q
 
     return policy
 

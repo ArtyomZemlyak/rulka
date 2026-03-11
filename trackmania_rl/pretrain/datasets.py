@@ -432,12 +432,24 @@ class CachedBCDataset(Dataset):
             if len(self._actions) != len(self._frames):
                 raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
             self._n_offsets = 1
+            self._action_vectors = False
         elif self._actions.ndim == 2:
             if self._actions.shape[0] != len(self._frames):
                 raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
+            self._action_vectors = self._actions.dtype in (np.float32, np.float64)
+            if self._action_vectors:
+                self._n_offsets = 1
+                self._n_action_dims = self._actions.shape[1]
+            else:
+                self._n_offsets = self._actions.shape[1]
+        elif self._actions.ndim == 3:
+            if self._actions.shape[0] != len(self._frames):
+                raise ValueError(f"Actions shape {self._actions.shape} does not match frames {len(self._frames)}")
+            self._action_vectors = True
             self._n_offsets = self._actions.shape[1]
+            self._n_action_dims = self._actions.shape[2]
         else:
-            raise ValueError(f"Expected actions 1-D or 2-D, got {self._actions.shape}")
+            raise ValueError(f"Expected actions 1-D, 2-D or 3-D, got {self._actions.shape}")
 
         _, self._n_stack, _, h, w = self._frames.shape
         if expected_n_stack is not None and self._n_stack != expected_n_stack:
@@ -457,7 +469,13 @@ class CachedBCDataset(Dataset):
             t = (t - 0.5) / 0.5
         if self._n_stack == 1:
             t = t.squeeze(0)
-        act = int(self._actions[idx]) if self._n_offsets == 1 else torch.from_numpy(self._actions[idx].astype(np.int64))
+        if getattr(self, "_action_vectors", False):
+            if self._actions.ndim == 2:
+                act = torch.from_numpy(np.array(self._actions[idx], dtype=np.float32))
+            else:
+                act = torch.from_numpy(np.array(self._actions[idx], dtype=np.float32))  # (n_offsets, n_action_dims)
+        else:
+            act = int(self._actions[idx]) if self._n_offsets == 1 else torch.from_numpy(self._actions[idx].astype(np.int64))
         if self._floats is not None:
             f = torch.from_numpy(np.array(self._floats[idx], dtype=np.float32))
             return t, f, act

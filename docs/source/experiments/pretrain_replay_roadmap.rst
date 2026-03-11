@@ -345,7 +345,7 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
   +---------------------------+----------------------------------------+------------------------------------------------------------------+
   | Init from Level 0          | ``encoder_init_path``                  | Path to ``encoder.pt`` or null (train from scratch).              |
   +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Action space size          | ``n_actions``                         | Must match RL ``len(config.inputs)`` (e.g. 12).                    |
+  | Action space size          | ``n_action_dims`` / ``n_actions``      | Must match RL: ``n_action_dims = 2 + 2*n_steer_parts`` (e.g. 4 for n_steer_parts=1). BC uses multi-label vectors. |
   +---------------------------+----------------------------------------+------------------------------------------------------------------+
   | BC target                  | ``bc_target``                         | ``current_tick`` = action at last frame; ``next_tick`` = action at next timestep (MDP-aligned). |
   +---------------------------+----------------------------------------+------------------------------------------------------------------+

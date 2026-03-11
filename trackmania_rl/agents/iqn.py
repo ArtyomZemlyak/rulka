@@ -1,8 +1,7 @@
 """
-In this file, we define:
-    - The IQN_Network class, which defines the neural network's structure.
-    - The Trainer class, which implements the IQN training logic in method train_on_batch.
-    - The Inferer class, which implements utilities for forward propagation with and without exploration.
+IQN for multi-label actions: the network predicts several actions at once (e.g. gas + left + brake
+simultaneously). A_head outputs one logit per action dimension; greedy = all dimensions with
+positive advantage (no softmax/argmax — multiple outputs can be 1). Q(s,a) uses the full action vector.
 """
 
 import copy
@@ -99,6 +98,8 @@ class IQN_Network(torch.nn.Module):
 
         dense_input_dimension = (conv_head_output_dim if use_image_head else 0) + float_hidden_dim
 
+        # Multi-label head: one logit per dimension (accel, brake, left_1..N, right_1..N). No softmax —
+        # greedy = (A > 0) per dim, so several actions can be active at once (e.g. gas+left+brake).
         self.A_head = torch.nn.Sequential(
             torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
             activation_function(inplace=True),
@@ -136,7 +137,7 @@ class IQN_Network(torch.nn.Module):
 
     def forward(
         self, img: torch.Tensor, float_inputs: torch.Tensor, num_quantiles: int, tau: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         This method implements the forward pass through the IQN neural network.
 
@@ -148,9 +149,9 @@ class IQN_Network(torch.nn.Module):
 
         A dueling network architecture (https://arxiv.org/abs/1511.06581) is implemented, two output heads predict:
             - the value of a (state, quantile) pair
-            - the advantage of a (state, action, quantile) triplet
+            - the advantage per action dimension (multi-label: several actions at once, e.g. gas+left+brake)
 
-        The Value and Advantage heads are combined to return the Q values directly.
+        A_head outputs one logit per dimension; Q(s,a) = V + sum(a_i*A_i) - sum(max(0,A_i)). No softmax.
 
         Args:
             img: a torch.Tensor of shape (batch_size, 1, H, W) and type float16 or float32, depending on context.
@@ -160,8 +161,9 @@ class IQN_Network(torch.nn.Module):
                  if None, the method will sample tau randomly in num_quantiles regularly spaced segments, and symmetrically around 0.5.
 
         Returns:
-            Q: a torch.Tensor of shape (batch_size * num_quantiles, 1) representing the Q values for a given (state, quantile) combination
-            tau: a torch.Tensor of shape (batch_size * num_quantiles, 1) representing the quantiles used to make each prediction
+            V: (batch_size * num_quantiles, 1) value head output
+            A: (batch_size * num_quantiles, n_action_dims) advantage per action dimension (multi-label dueling)
+            tau: (batch_size * num_quantiles, 1) quantiles used. Use q_from_va(V, A, a) to get Q(s,a).
         """
         batch_size = img.shape[0]
         float_outputs = self.float_feature_extractor((float_inputs - self.float_inputs_mean) / self.float_inputs_std)
@@ -190,12 +192,16 @@ class IQN_Network(torch.nn.Module):
         # (batch_size*num_quantiles, dense_input_dimension)
         concat = concat * quantile_net
 
-        A = self.A_head(concat)  # (batch_size*num_quantiles, n_actions)
+        A = self.A_head(concat)  # (batch_size*num_quantiles, n_action_dims)
         V = self.V_head(concat)  # (batch_size*num_quantiles, 1)
 
-        Q = V + A - A.mean(dim=-1).unsqueeze(-1)
+        # Multi-label dueling: Q(s,a) = V + sum_i a_i*A_i - sum_i max(0, A_i); return (V, A) for caller to compute Q(s,a)
+        return V, A, tau
 
-        return Q, tau
+    @staticmethod
+    def q_from_va(V: torch.Tensor, A: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        """Compute Q(s,a) from dueling (V, A) and action vector a. a: (..., n_action_dims), A: (..., n_action_dims). Returns (..., 1)."""
+        return (V + (A * a).sum(dim=-1, keepdim=True) - A.clamp(min=0).sum(dim=-1, keepdim=True))
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -314,53 +320,37 @@ class Trainer:
                     [self.iqn_n, 1]
                 )  # (batch_size*iqn_n, 1)
                 gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
-                actions = actions.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
+                # actions: (batch_size, n_action_dims) -> repeat for quantiles (batch_size*iqn_n, n_action_dims)
+                actions = actions.unsqueeze(0).repeat([self.iqn_n, 1, 1]).reshape(-1, actions.shape[-1])  # (batch_size*iqn_n, n_action_dims)
                 #
-                #   Use target_network to evaluate the action chosen, per quantile.
+                #   Target network: (V2, A2, tau2). Greedy a' = (A2 > 0).float(); Q(s', a') = q_from_va(V2, A2, a').
                 #
-                q__stpo__target__quantiles_tau2, tau2 = self.target_network(
+                V2, A2, tau2 = self.target_network(
                     next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
-                )  # (batch_size*iqn_n, n_actions)
-                #
-                #   Use online network to choose an action for next state.
-                #   This action is chosen AFTER reduction to the mean, and repeated to all quantiles
-                #
+                )  # V2 (batch*iqn_n, 1), A2 (batch*iqn_n, n_action_dims)
                 if get_config().use_ddqn:
-                    a__tpo__online__reduced_repeated = (
-                        self.online_network(
-                            next_state_img_tensor,
-                            next_state_float_tensor,
-                            self.iqn_n,
-                            tau=None,
-                        )[0]
-                        .reshape([self.iqn_n, self.batch_size, self.online_network.n_actions])
-                        .mean(dim=0)
-                        .argmax(dim=1, keepdim=True)
-                        .repeat([self.iqn_n, 1])
-                    )  # (iqn_n * batch_size, 1)
-                    #
-                    #   Build IQN target on tau2 quantiles
-                    #
-                    outputs_target_tau2 = rewards + gammas_terminal * q__stpo__target__quantiles_tau2.gather(
-                        1, a__tpo__online__reduced_repeated
-                    )  # (batch_size*iqn_n, 1)
+                    _, A_online, _ = self.online_network(
+                        next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
+                    )
+                    A_online_mean = A_online.reshape([self.iqn_n, self.batch_size, -1]).mean(dim=0)  # (batch_size, n_action_dims)
+                    a__tpo__greedy = (A_online_mean > 0).float().unsqueeze(0).repeat([self.iqn_n, 1, 1]).reshape(-1, A_online_mean.shape[-1])
                 else:
-                    outputs_target_tau2 = (
-                        rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
-                    )  # (batch_size*iqn_n, 1)
+                    a__tpo__greedy = (A2 > 0).float()  # (batch*iqn_n, n_action_dims)
+                q__stpo__target__quantiles_tau2 = self.online_network.q_from_va(V2, A2, a__tpo__greedy)  # (batch*iqn_n, 1)
+                outputs_target_tau2 = (
+                    rewards + gammas_terminal * q__stpo__target__quantiles_tau2
+                )  # (batch_size*iqn_n, 1)
 
-                #
-                #   This is our target
-                #
                 outputs_target_tau2 = outputs_target_tau2.reshape([self.iqn_n, self.batch_size, 1]).transpose(
                     0, 1
                 )  # (batch_size, iqn_n, 1)
 
-            q__st__online__quantiles_tau3, tau3 = self.online_network(
+            V3, A3, tau3 = self.online_network(
                 state_img_tensor, state_float_tensor, self.iqn_n, tau=None
-            )  # (batch_size*iqn_n,n_actions)
+            )  # V3 (batch*iqn_n, 1), A3 (batch*iqn_n, n_action_dims)
+            q__st__online__quantiles_tau3 = self.online_network.q_from_va(V3, A3, actions)  # (batch_size*iqn_n, 1)
             outputs_tau3 = (
-                q__st__online__quantiles_tau3.gather(1, actions).reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
+                q__st__online__quantiles_tau3.reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
             )  # (batch_size, iqn_n, 1)
 
             loss = iqn_loss(outputs_target_tau2, outputs_tau3, tau3, get_config().iqn_n, get_config().batch_size)
@@ -467,17 +457,12 @@ class Inferer:
         self.tau_epsilon_boltzmann = tau_epsilon_boltzmann
         self.is_explo = None
 
-    def infer_network(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray, tau=None) -> npt.NDArray:
+    def infer_network(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray, tau=None) -> Tuple[npt.NDArray, npt.NDArray]:
         """
         Perform inference of a single state through self.inference_network.
 
-        Args:
-            img_inputs_uint8:   a numpy array of shape (1, H, W) and dtype np.uint8
-            float_inputs:       a numpy array of shape (float_input_dim, ) and dtype np.float32
-            tau:                a torch.Tensor of shape (iqn_k,  1)
-
         Returns:
-            q_values:           a numpy array of shape (iqn_k, 1)
+            V: (iqn_k, 1), A: (iqn_k, n_action_dims) — dueling outputs for multi-label Q(s,a) = V + (A*a).sum() - (A.clamp(min=0).sum()
         """
         with torch.no_grad():
             state_img_tensor = (
@@ -487,56 +472,39 @@ class Inferer:
                 - 128
             ) / 128
             state_float_tensor = torch.from_numpy(np.expand_dims(float_inputs, axis=0)).to("cuda", non_blocking=True)
-            q_values = (
-                self.inference_network(
-                    state_img_tensor,
-                    state_float_tensor,
-                    self.iqn_k,
-                    tau=tau,  # torch.linspace(0.05, 0.95, self.iqn_k, device="cuda")[:, None],
-                )[0]
-                .cpu()
-                .numpy()
-                .astype(np.float32)
+            V, A, _ = self.inference_network(
+                state_img_tensor,
+                state_float_tensor,
+                self.iqn_k,
+                tau=tau,
             )
-            return q_values
+            V = V.cpu().numpy().astype(np.float32)
+            A = A.cpu().numpy().astype(np.float32)
+            return V, A
 
-    def get_exploration_action(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray) -> Tuple[int, bool, float, npt.NDArray]:
+    def get_exploration_action(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray) -> Tuple[npt.NDArray, bool, float, npt.NDArray]:
         """
-        Selects an action according to the exploration strategy.
-        Implements epsilon-greedy exploration, as well as Boltzmann exploration, quantiles values are averaged.
-        Configuration is done with self.epsilon (float), self.epsilon_boltzmann (float), self.tau_epsilon_boltzmann (float), and self.is_explo (bool).
-
-        Args:
-            img_inputs_uint8:   a numpy array of shape (1, H, W) and dtype np.uint8
-            float_inputs:       a numpy array of shape (float_input_dim, ) and dtype np.float32
-
-        Returns:
-            action_chosen_idx:  an int indicating which exploration action is sampled
-            is_greedy:          a bool indicating whether this action would have been chosen under a greedy policy
-            V(state):           a float giving the value of the greedy action
-            q_values:           a numpy array giving the q_values for all actions
+        Multi-label: returns action vector (n_action_dims,) where several entries can be 1 at once
+        (e.g. gas + left + brake). Greedy = (A_mean > 0) per dimension — no argmax over actions.
         """
-
-        q_values = self.infer_network(img_inputs_uint8, float_inputs).mean(axis=0)
+        V, A = self.infer_network(img_inputs_uint8, float_inputs)
+        A_mean = A.mean(axis=0)  # (n_action_dims,)
+        # Greedy = each dimension independently: positive advantage → 1 (allows gas+left+brake etc.)
+        greedy_action = (A_mean > 0).astype(np.float32)
         r = random.random()
 
         if self.is_explo and r < self.epsilon:
-            # Choose a random action
-            get_argmax_on = np.random.randn(*q_values.shape)
+            n_ad = self.inference_network.n_actions
+            action_vector = (np.random.rand(n_ad) > 0.5).astype(np.float32)
         elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
-            get_argmax_on = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
+            get_on = A_mean + self.tau_epsilon_boltzmann * np.random.randn(*A_mean.shape)
+            action_vector = (get_on > 0).astype(np.float32)
         else:
-            get_argmax_on = q_values
+            action_vector = greedy_action
 
-        action_chosen_idx = np.argmax(get_argmax_on)
-        greedy_action_idx = np.argmax(q_values)
-
-        return (
-            action_chosen_idx,
-            action_chosen_idx == greedy_action_idx,
-            np.max(q_values),
-            q_values,
-        )
+        is_greedy = np.allclose(action_vector, greedy_action)
+        q_greedy = float(np.mean(V) + (A_mean * greedy_action).sum() - (np.maximum(A_mean, 0)).sum())
+        return action_vector, is_greedy, q_greedy, A_mean
 
 
 def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Network, IQN_Network]:
@@ -563,7 +531,7 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
         conv_head_output_dim=conv_head_output_dim,
         dense_hidden_dimension=get_config().dense_hidden_dimension,
         iqn_embedding_dimension=get_config().iqn_embedding_dimension,
-        n_actions=len(get_config().inputs),
+        n_actions=get_config().n_action_dims,
         float_inputs_mean=get_config().float_inputs_mean,
         float_inputs_std=get_config().float_inputs_std,
         use_image_head=use_image_head,

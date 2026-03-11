@@ -12,8 +12,6 @@ import yaml
 from config_files.config_schema import (
     EnvironmentConfig,
     ExplorationConfig,
-    InputAction,
-    InputsConfig,
     MapCycleConfig,
     MapCycleEntry,
     MemoryConfig,
@@ -24,6 +22,7 @@ from config_files.config_schema import (
     TrainingConfig,
     UserConfig,
 )
+from trackmania_rl.float_inputs import CAR_TRACK_EXTRA_DIM
 
 
 def _apply_schedule_speed(schedule: list, speed: int) -> list:
@@ -78,11 +77,15 @@ def _build_float_inputs_mean_std(
     margin_mean = env.margin_to_announce_finish_meters
     margin_std = margin_mean / 2.0
 
-    n_prev_actions = n_prev * 4
+    n_steer = getattr(env, "n_steer_parts", 1)
+    n_action_dims = 2 + 2 * n_steer
+    n_prev_actions = n_prev * n_action_dims
     n_gear = 4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * n_contact
     n_waypoints = n * 3
 
-    prev_actions_mean = [0.8, 0.2, 0.3, 0.3] * n_prev
+    # Per-step action: [accel, brake, left_1..left_N, right_1..right_N]; default mean/std per dim
+    prev_actions_mean = [0.8, 0.2] + [0.3] * n_steer + [0.3] * n_steer
+    prev_actions_mean = prev_actions_mean * n_prev
     prev_actions_std = [0.5] * n_prev_actions
 
     gear_mean = (
@@ -108,6 +111,39 @@ def _build_float_inputs_mean_std(
     w_mean = state_norm.waypoint_mean_40cp
     w_std = state_norm.waypoint_std_40cp
 
+    # turning_rate, mobil_is_sliding
+    turning_rate_mean, turning_rate_std = 0.0, 2.0
+    mobil_is_sliding_mean, mobil_is_sliding_std = 0.0, 0.5
+
+    # car_track_extra: add_linear_speed(3), force(3), torque(3), input_gas/brake/steer(3), speed_forward/sideward(2),
+    # max_linear_speed(1), current_local_speed(3), turbo_boost_factor, is_turbo(2), has_any_lateral_contact, burnout_state(2),
+    # engine_slide_factor, engine_braking_factor, engine_clamped_rpm(3), distance_since_track_begin, meters_in_current_zone,
+    # segment_length_meters, current_zone_idx(4)
+    car_track_extra_mean = (
+        [0.0] * 3  # add_linear_speed
+        + [0.0] * 3  # force
+        + [0.0] * 3  # torque
+        + [0.5, 0.2, 0.0]  # input_gas, input_brake, input_steer
+        + [55.0, 0.0]  # speed_forward, speed_sideward
+        + [100.0]  # max_linear_speed
+        + [0.0, 0.0, 55.0]  # current_local_speed
+        + [1.0, 0.0]  # turbo_boost_factor, is_turbo
+        + [0.0, 0.0]  # has_any_lateral_contact, burnout_state
+        + [1.0, 0.5, 5000.0]  # engine
+        + [1000.0, 50.0, 100.0, 20.0]  # track
+    )
+    car_track_extra_std = (
+        [5.0] * 3 + [5.0] * 3 + [100.0] * 3
+        + [0.5, 0.5, 1.0]
+        + [20.0, 10.0]
+        + [30.0]
+        + [10.0, 10.0, 20.0]
+        + [0.5, 0.5]
+        + [0.5, 0.5]
+        + [0.3, 0.3, 3000.0]
+        + [2000.0, 50.0, 50.0, 15.0]
+    )
+
     mean_arr = np.array(
         [
             float(mini_race_half),
@@ -119,6 +155,9 @@ def _build_float_inputs_mean_std(
             *_waypoint_mean(w_mean, n),
             margin_mean,
             0.0,
+            turning_rate_mean,
+            mobil_is_sliding_mean,
+            *car_track_extra_mean,
         ],
         dtype=np.float64,
     )
@@ -133,6 +172,9 @@ def _build_float_inputs_mean_std(
             *_waypoint_std(w_std, n),
             margin_std,
             1.0,
+            turning_rate_std,
+            mobil_is_sliding_std,
+            *car_track_extra_std,
         ],
         dtype=np.float64,
     )
@@ -161,7 +203,7 @@ class ConfigView:
     def __getattr__(self, name: str) -> Any:
         # Map flat names to nested config
         m = self._cfg
-        e, n, t, mem, exp, r, mc, p, inp, sn, u = (
+        e, n, t, mem, exp, r, mc, p, sn, u = (
             m.environment,
             m.neural_network,
             m.training,
@@ -170,7 +212,6 @@ class ConfigView:
             m.rewards,
             m.map_cycle,
             m.performance,
-            m.inputs,
             m.state_normalization,
             m.user,
         )
@@ -179,9 +220,16 @@ class ConfigView:
             return n.w_downsized
         if name == "H_downsized":
             return n.h_downsized
-        # inputs: list of dicts for set_input_state(**config.inputs[i])
+        if name == "n_actions":
+            return n.n_action_dims
+        # Action space is defined only by n_steer_parts (environment). Legacy conversion uses constants.
         if name == "inputs":
-            return [a.model_dump() for a in inp.actions]
+            from trackmania_rl.action_vector import STANDARD_12_ACTIONS
+            return STANDARD_12_ACTIONS
+        if name == "action_forward_idx":
+            return 0
+        if name == "action_backward_idx":
+            return 6
         # map_cycle: expanded list of tuples
         if name == "map_cycle":
             return mc.map_cycle
@@ -213,9 +261,6 @@ class ConfigView:
         # Performance
         if hasattr(p, name):
             return getattr(p, name)
-        # Inputs (action_forward_idx, action_backward_idx)
-        if hasattr(inp, name):
-            return getattr(inp, name)
         # State normalization
         if hasattr(sn, name):
             return getattr(sn, name)
@@ -270,13 +315,6 @@ def load_config(config_path: Path | str) -> ConfigView:
     map_entries = [MapCycleEntry.model_validate(e) for e in map_cycle_data.get("entries", [])]
     map_cycle = MapCycleConfig(entries=map_entries, map_cycle=_expand_map_cycle(map_entries))
     performance = PerformanceConfig.model_validate(data.get("performance", {}))
-    inputs_data = data.get("inputs", {})
-    actions = [InputAction.model_validate(a) for a in inputs_data.get("actions", [])]
-    inputs = InputsConfig(
-        actions=actions,
-        action_forward_idx=inputs_data.get("action_forward_idx", 0),
-        action_backward_idx=inputs_data.get("action_backward_idx", 6),
-    )
     state_norm_data = data.get("state_normalization", {})
     state_norm = StateNormalizationConfig(
         waypoint_mean_40cp=state_norm_data.get("waypoint_mean_40cp", []),
@@ -284,12 +322,19 @@ def load_config(config_path: Path | str) -> ConfigView:
     )
 
     # Compute cross-section values
+    n_steer = getattr(env, "n_steer_parts", 1)
+    n_action_dims = 2 + 2 * n_steer
+    neural.n_action_dims = n_action_dims
+    n_per_step = n_action_dims
     neural.float_input_dim = (
-        27
-        + 3 * env.n_zone_centers_in_inputs
-        + 4 * env.n_prev_actions_in_inputs
-        + 4 * env.n_contact_material_physics_behavior_types
-        + 1
+        1
+        + env.n_prev_actions_in_inputs * n_per_step
+        + (4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * env.n_contact_material_physics_behavior_types)
+        + 3 + 3 + 3
+        + env.n_zone_centers_in_inputs * 3
+        + 1 + 1
+        + 1 + 1  # turning_rate, mobil_is_sliding
+        + CAR_TRACK_EXTRA_DIM  # car_track_extra (dyna, mobil, engine, track)
     )
     training.min_horizon_to_update_priority_actions = (
         env.temporal_mini_race_duration_actions - 40
@@ -304,8 +349,8 @@ def load_config(config_path: Path | str) -> ConfigView:
     n_p = env.n_prev_actions_in_inputs
     n_c = env.n_contact_material_physics_behavior_types
     expected_len = (
-        1 + n_p * 4 + (4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * n_c)
-        + 3 + 3 + 3 + n_z * 3 + 1 + 1
+        1 + n_p * n_per_step + (4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * n_c)
+        + 3 + 3 + 3 + n_z * 3 + 1 + 1 + 1 + 1 + CAR_TRACK_EXTRA_DIM
     )
     assert len(mean_arr) == expected_len == neural.float_input_dim, (
         f"float_inputs_mean length {len(mean_arr)} != expected {expected_len} != float_input_dim {neural.float_input_dim}"
@@ -324,7 +369,6 @@ def load_config(config_path: Path | str) -> ConfigView:
         rewards=rewards,
         map_cycle=map_cycle,
         performance=performance,
-        inputs=inputs,
         state_normalization=state_norm,
         user=user,
     )

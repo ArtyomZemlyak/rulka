@@ -38,7 +38,7 @@ from config_files.config_loader import get_config
 from trackmania_rl import map_loader
 from trackmania_rl.float_inputs import (
     build_float_vector,
-    prev_actions_flat_from_indices,
+    prev_actions_flat_from_rollout_actions,
     state_dict_from_sim_state,
 )
 from trackmania_rl.tmi_interaction.tminterface2 import MessageType, TMInterface
@@ -477,8 +477,12 @@ class GameInstanceManager:
         self.iface.set_speed(requested_speed)
         self.latest_tm_engine_speed_requested = requested_speed
 
-    def request_inputs(self, action_idx: int, rollout_results: Dict):
-        self.iface.set_input_state(**get_config().inputs[action_idx])
+    def request_inputs(self, action_vector: npt.NDArray, rollout_results: Dict):
+        """Apply multi-label action vector to game (convert to left/right/accel/brake)."""
+        from trackmania_rl.action_vector import action_vector_to_game_input
+        cfg = get_config()
+        game_inp = action_vector_to_game_input(action_vector, cfg.n_steer_parts)
+        self.iface.set_input_state(**game_inp)
 
     def request_map(self, map_path: str, zone_centers: npt.NDArray):
         # Normalize map path and remove quotes so TMInterface can parse "map"
@@ -632,15 +636,8 @@ class GameInstanceManager:
                     rollout_results["car_gear_and_wheels"].append(
                         sim_state_car_gear_and_wheels
                     )
-                    prev_indices = [
-                        rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
-                        for k in range(
-                            len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
-                            len(rollout_results["actions"]),
-                        )
-                    ]
-                    prev_flat = prev_actions_flat_from_indices(
-                        prev_indices, cfg.inputs, cfg.action_forward_idx
+                    prev_flat = prev_actions_flat_from_rollout_actions(
+                        rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
                     )
                     floats = build_float_vector(state_dict, prev_flat, 0, cfg)
 
@@ -772,15 +769,8 @@ class GameInstanceManager:
                                 sim_state_car_gear_and_wheels = state_dict["gear_and_wheels"]
                                 rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
 
-                                prev_indices = [
-                                    rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
-                                    for k in range(
-                                        len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
-                                        len(rollout_results["actions"]),
-                                    )
-                                ]
-                                prev_flat = prev_actions_flat_from_indices(
-                                    prev_indices, cfg.inputs, cfg.action_forward_idx
+                                prev_flat = prev_actions_flat_from_rollout_actions(
+                                    rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
                                 )
                                 floats = build_float_vector(state_dict, prev_flat, 0, cfg)
 
@@ -790,7 +780,7 @@ class GameInstanceManager:
                                 rollout_results["frames"].append(_dummy_frame)
 
                                 (
-                                    action_idx,
+                                    action_vector,
                                     action_was_greedy,
                                     q_value,
                                     q_values,
@@ -805,7 +795,7 @@ class GameInstanceManager:
                                     if get_config().is_linux:
                                         self.game_spawning_lock.release()
 
-                                self.request_inputs(action_idx, rollout_results)
+                                self.request_inputs(action_vector, rollout_results)
                                 self.request_speed(self.running_speed)  # keep running — no pause!
 
                                 if n_th_action_we_compute == 0:
@@ -814,8 +804,8 @@ class GameInstanceManager:
                                         end_race_stats[f"q_value_{i}_starting_frame"] = val
 
                                 rollout_results["meters_advanced_along_centerline"].append(distance_since_track_begin)
-                                rollout_results["input_w"].append(get_config().inputs[action_idx]["accelerate"])
-                                rollout_results["actions"].append(action_idx)
+                                rollout_results["input_w"].append(float(action_vector[0]))
+                                rollout_results["actions"].append(action_vector)
                                 rollout_results["action_was_greedy"].append(action_was_greedy)
                                 rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
                                 rollout_results["q_values"].append(q_values)
@@ -906,7 +896,7 @@ class GameInstanceManager:
                             )
                             rollout_results["frames"].append(np.nan)
                             rollout_results["input_w"].append(np.nan)
-                            rollout_results["actions"].append(np.nan)
+                            rollout_results["actions"].append(np.full(get_config().n_action_dims, np.nan, dtype=np.float32))
                             rollout_results["action_was_greedy"].append(np.nan)
                             rollout_results["car_gear_and_wheels"].append(np.nan)
                             rollout_results["meters_advanced_along_centerline"].append(
@@ -947,7 +937,7 @@ class GameInstanceManager:
                         instrumentation__convert_frame += pc7 - pc6
 
                         (
-                            action_idx,
+                            action_vector,
                             action_was_greedy,
                             q_value,
                             q_values,
@@ -967,7 +957,7 @@ class GameInstanceManager:
                                 # but this needs to be done late enough AND not when another game instance is starting.
                                 self.game_spawning_lock.release()
 
-                        self.request_inputs(action_idx, rollout_results)
+                        self.request_inputs(action_vector, rollout_results)
                         self.request_speed(self.running_speed)
 
                         if n_th_action_we_compute == 0:
@@ -975,8 +965,8 @@ class GameInstanceManager:
                             for i, val in enumerate(np.nditer(q_values)):
                                 end_race_stats[f"q_value_{i}_starting_frame"] = val
                         rollout_results["meters_advanced_along_centerline"].append(distance_since_track_begin)
-                        rollout_results["input_w"].append(get_config().inputs[action_idx]["accelerate"])
-                        rollout_results["actions"].append(action_idx)
+                        rollout_results["input_w"].append(float(action_vector[0]))
+                        rollout_results["actions"].append(action_vector)
                         rollout_results["action_was_greedy"].append(action_was_greedy)
                         rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
                         rollout_results["q_values"].append(q_values)

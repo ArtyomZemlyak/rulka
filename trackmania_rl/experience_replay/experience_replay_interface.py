@@ -3,6 +3,7 @@ In this file, we define the Experience type.
 This is used to represent a transition sampled from a ReplayBuffer.
 """
 
+import numpy as np
 import numpy.typing as npt
 
 
@@ -15,7 +16,7 @@ class Experience:
                                                 next_state_img is a np.array of shape (1, H, W) and dtype np.uint8
                                                 next_state_float is a np.array of shape (config.float_input_dim, ) and dtype np.float32
     (state_potential and next_state_potential)  are floats, used for reward shaping as per Andrew Ng's paper: https://people.eecs.berkeley.edu/~russell/papers/icml99-shaping.pdf
-    action                                      is an integer representing the action taken for this transition, mapped to config_files/inputs_list.py
+    action                                      is an array of shape (n_action_dims,) — multi-label action vector (accelerate, brake, left_1..left_N, right_1..right_N)
     terminal_actions                            is an integer representing the number of steps between "state" and race finish in the rollout from which this transition was extracted. If the rollout did not finish (ie: early cutoff), then contains math.inf
     n_steps                                     How many steps were taken between "state" and "next state". Not all transitions contain the same value, as this may depend on exploration policy. Note that in buffer_collate_function, a transition may be reinterpreted as terminal with a lower n_steps, depending on the random horizon that was sampled.
     gammas                                      a numpy array of shape (config.n_steps, ) containing the gamma value if steps = 0, 1, 2, etc...
@@ -44,7 +45,7 @@ class Experience:
         state_img: npt.NDArray,
         state_float: npt.NDArray,
         state_potential: float,
-        action: int,
+        action: npt.NDArray,  # (n_action_dims,) multi-label vector
         n_steps: int,
         rewards: npt.NDArray,
         next_state_img: npt.NDArray,
@@ -56,7 +57,7 @@ class Experience:
         self.state_img = state_img
         self.state_float = state_float
         self.state_potential = state_potential
-        self.action = action
+        self.action = np.asarray(action, dtype=np.float32)
         self.n_steps = n_steps
         self.rewards = rewards
         self.next_state_img = next_state_img

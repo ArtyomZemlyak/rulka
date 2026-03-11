@@ -11,7 +11,7 @@ This experiment compares two BC (behavioral cloning) pretrain runs to answer: **
 - **v1**: Stopped at **25 epochs** (early stopping enabled in config, or 25-epoch cap). Lower final val_loss (1.038) at stop.
 - **v1.1**: **No early stopping**, **lr=0.0005**, full **50 epochs**. Slightly higher final val_loss (1.119); train_acc a bit higher (0.699 vs 0.696).
 
-Goal: understand if we can use early stopping to save time without hurting downstream RL, and how **per-action accuracy** (e.g. left, right, accel, brake) evolves. When using **multi-offset BC** (``bc_time_offsets_ms`` with several values), **per-offset accuracy** is logged (e.g. ``train_acc_offset_ms_-10``, ``val_acc_offset_ms_0``, ``val_acc_offset_ms_10``) in TensorBoard and ``metrics.csv`` for analysis in doc/exp.
+Goal: understand if we can use early stopping to save time without hurting downstream RL, and how **per-action accuracy** (e.g. per dimension: accel, brake, left, right for ``n_steer_parts=1``) evolves. **Current setup:** BC uses **multi-label** action vectors (length ``n_action_dims = 2 + 2*n_steer_parts``) and **extended float inputs** (turning_rate, mobil_is_sliding, car_track_extra; see :doc:`../../game_inputs_and_float_vector`). When using **multi-offset BC** (``bc_time_offsets_ms`` with several values), **per-offset accuracy** is logged (e.g. ``train_acc_offset_ms_-10``, ``val_acc_offset_ms_0``, ``val_acc_offset_ms_10``) in TensorBoard and ``metrics.csv`` for analysis in doc/exp.
 
 A second experiment (**v1.1 vs v1.2**) compares **image normalization**: v1.2 uses **IQN-style normalization** ``(x - 0.5) / 0.5`` at BC input (cache is [0,1]), while v1.1 uses default ``[0, 1]``. Both use the **same visual backbone** (Level 0 vis/v1) trained **without** IQN normalization, so v1.2 tests whether normalizing inputs at BC time improves validation loss and generalization despite the backbone having been pretrained on [0,1].
 
@@ -138,7 +138,7 @@ Per-action accuracy vs training (epoch)
 The figure below shows **validation accuracy for each action** (accel, left+accel, right+accel, coast, etc.) over **epochs** for v1 and v1.1. Main actions (0, 1, 2, 3, 10, 11) show clear learning curves; rare actions (4–9) stay near zero.
 
 .. image:: ../../_static/exp_pretrain_bc_v1_v1.1_per_action_accuracy.jpg
-   :alt: Per-action validation accuracy vs epoch (v1 and v1.1, 12 actions)
+   :alt: Per-action validation accuracy vs epoch (v1 and v1.1, per dimension)
 
 Experiment: IQN-style image normalization (v1.1 vs v1.2)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -502,7 +502,7 @@ The dataset is **highly imbalanced**:
 The three main actions (accel, left+accel, right+accel) account for ~99% of samples. Rare actions (brake, left+accel+brake, etc.) have few or no validation samples in some track splits, which explains val_acc_class = 0 for brake and left+accel+brake. The high overall val_acc (0.89) reflects good prediction of the dominant classes.
 
 .. image:: ../../_static/exp_pretrain_bc_v3_multi_offset_v3_only_vis_per_action_accuracy.jpg
-   :alt: Per-action validation accuracy vs epoch (v3_multi_offset, v3_only_vis, 12 actions)
+   :alt: Per-action validation accuracy vs epoch (v3_multi_offset, v3_only_vis, per dimension)
 
 **Comparison with v3 and v3_only_vis**
 
