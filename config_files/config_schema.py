@@ -22,6 +22,22 @@ def _parse_deck_height(v: Any) -> float:
 ScheduleStepFloat = list[Union[int, float]]
 ScheduleStepTuple = list[Union[int, list[int]]]
 
+# --- Action space (parameterized inputs: enabled + discretization per input) ---
+ACTION_INPUT_NAMES: tuple[str, ...] = ("accelerate", "brake", "left", "right")
+
+
+class ActionInputSpec(BaseModel):
+    """Per-input spec: whether the input is enabled and its discretization (number of dimensions)."""
+
+    enabled: bool = True
+    discretization: int = 1  # 1 = binary (on/off); N > 1 = N binary dimensions (e.g. left_1..left_N)
+
+
+class ActionSpaceConfig(BaseModel):
+    """Action space: which inputs are enabled and their discretization. Missing inputs default to enabled=True, discretization=1."""
+
+    inputs: dict[str, ActionInputSpec] = Field(default_factory=dict)
+
 
 # --- Environment ---
 class EnvironmentConfig(BaseModel):
@@ -98,10 +114,12 @@ class NeuralNetworkConfig(BaseModel):
     use_jit: bool = True
     # If False, IQN uses only float features (no CNN image head). Useful for ablation or float-only training.
     use_iqn_image_head: bool = True
+    # "classification" = one head, N discrete classes, dueling, argmax (legacy). "multilabel" = branching (BDQ-style), multiple dims can be 1.
+    action_head_mode: str = "multilabel"
 
-    # Computed by loader (depends on environment)
+    # Computed by loader (depends on environment / action_space)
     float_input_dim: int = 0
-    n_action_dims: int = 4  # 2 + 2*n_steer_parts (accelerate, brake, left_1..left_N, right_1..right_N)
+    n_action_dims: int = 4  # from action space module (sum of discretization over enabled inputs)
 
 
 # --- Training ---
@@ -273,7 +291,8 @@ class StateNormalizationConfig(BaseModel):
     waypoint_mean_40cp: list[float] = Field(default_factory=list)
     waypoint_std_40cp: list[float] = Field(default_factory=list)
 
-    # Built by loader
+    # Built by loader: merged state_observation.include (name -> bool). Empty = all enabled.
+    state_observation_include: dict[str, bool] = Field(default_factory=dict)
     float_inputs_mean: np.ndarray = Field(default_factory=lambda: np.array([]))
     float_inputs_std: np.ndarray = Field(default_factory=lambda: np.array([]))
 
@@ -312,6 +331,8 @@ class UserConfig(BaseSettings):
 class RulkaConfig(BaseModel):
     environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
     neural_network: NeuralNetworkConfig = Field(default_factory=NeuralNetworkConfig)
+    # Optional. When absent, action space is derived from environment.n_steer_parts (all 4 inputs, left/right discretization = n_steer_parts).
+    action_space: Optional[ActionSpaceConfig] = None
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     exploration: ExplorationConfig = Field(default_factory=ExplorationConfig)

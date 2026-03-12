@@ -26,6 +26,15 @@ environment:
   game_camera_number: 2
   sync_virtual_and_real_checkpoints: true
 
+# Action space: which inputs are enabled and discretization (dims per input). Omit to use n_steer_parts for left/right (all 4 enabled).
+# Default per input: enabled true, discretization 1 (binary). n_action_dims = sum(discretization) over enabled inputs.
+action_space:
+  inputs:
+    accelerate: { enabled: true, discretization: 1 }
+    brake:      { enabled: true, discretization: 1 }
+    left:       { enabled: true, discretization: 10 }
+    right:      { enabled: true, discretization: 10 }
+
 neural_network:
   w_downsized: 64
   h_downsized: 64
@@ -49,6 +58,8 @@ neural_network:
   use_jit: true
   # Set to false to train IQN without image head (float features only).
   use_iqn_image_head: true
+  # "classification" = one head, N discrete classes, dueling, argmax. "multilabel" = branching (BDQ), multiple dims can be 1.
+  action_head_mode: multilabel
 
 training:
   run_name: "A01_long_v3"
@@ -184,6 +195,16 @@ performance:
 
 # Action space is defined only by environment.n_steer_parts (see trackmania_rl.action_vector).
 # n_action_dims = 2 + 2*n_steer_parts: [accelerate, brake, left_1..left_N, right_1..right_N].
+
+# Which scalar state features are included in the observation vector (RL, BC, data collection).
+# Used everywhere: rollout, replay buffer, pretrain cache, IQN input. Omit a key or set to true = include; false = exclude.
+# Names: temporal, prev_actions, gear_and_wheels, angular_velocity, velocity, y_map, zone_centers_in_car_frame,
+#   margin, is_freewheeling, turning_rate, mobil_is_sliding; then add_linear_speed, force, torque, input_gas, input_brake,
+#   input_steer, speed_forward, speed_sideward, max_linear_speed, current_local_speed, turbo_boost_factor, is_turbo,
+#   has_any_lateral_contact, burnout_state, engine_slide_factor, engine_braking_factor, engine_clamped_rpm,
+#   distance_since_track_begin, meters_in_current_zone, segment_length_meters, current_zone_idx.
+state_observation:
+  include: {}   # all enabled by default; e.g. distance_since_track_begin: false to exclude that feature
 
 state_normalization:
   waypoint_mean_40cp:

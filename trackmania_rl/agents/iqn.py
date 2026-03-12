@@ -1,7 +1,6 @@
 """
-IQN for multi-label actions: the network predicts several actions at once (e.g. gas + left + brake
-simultaneously). A_head outputs one logit per action dimension; greedy = all dimensions with
-positive advantage (no softmax/argmax — multiple outputs can be 1). Q(s,a) uses the full action vector.
+IQN with configurable action head: classification (one head, N discrete classes, dueling, argmax)
+or multilabel (one logit per dimension; greedy = (A > 0) per dim; optionally branching architecture).
 """
 
 import copy
@@ -16,6 +15,7 @@ from torchrl.data import ReplayBuffer
 
 from config_files.config_loader import get_config
 from trackmania_rl import utilities
+from trackmania_rl.float_inputs import get_segment_start_index
 
 
 def calculate_conv_output_dim(height: int, width: int) -> int:
@@ -69,10 +69,13 @@ class IQN_Network(torch.nn.Module):
         float_inputs_mean: npt.NDArray,
         float_inputs_std: npt.NDArray,
         use_image_head: bool = True,
+        action_head_mode: str = "multilabel",
+        branch_dims: Optional[list[int]] = None,
     ):
         super().__init__()
         self.iqn_embedding_dimension = iqn_embedding_dimension
         self.use_image_head = use_image_head
+        self.action_head_mode = action_head_mode  # "classification" | "multilabel"
         activation_function = torch.nn.LeakyReLU
         if use_image_head:
             img_head_channels = [1, 16, 32, 64, 32]
@@ -100,11 +103,24 @@ class IQN_Network(torch.nn.Module):
 
         # Multi-label head: one logit per dimension (accel, brake, left_1..N, right_1..N). No softmax —
         # greedy = (A > 0) per dim, so several actions can be active at once (e.g. gas+left+brake).
-        self.A_head = torch.nn.Sequential(
-            torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
-            activation_function(inplace=True),
-            torch.nn.Linear(dense_hidden_dimension // 2, n_actions),
-        )
+        self._branch_dims = branch_dims if branch_dims else []
+        if branch_dims and len(branch_dims) > 0 and action_head_mode == "multilabel":
+            self.A_head_shared = torch.nn.Sequential(
+                torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
+                activation_function(inplace=True),
+            )
+            self.A_branches = torch.nn.ModuleList(
+                [torch.nn.Linear(dense_hidden_dimension // 2, d) for d in branch_dims]
+            )
+            self.A_head = None
+        else:
+            self.A_head_shared = None
+            self.A_branches = torch.nn.ModuleList()
+            self.A_head = torch.nn.Sequential(
+                torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
+                activation_function(inplace=True),
+                torch.nn.Linear(dense_hidden_dimension // 2, n_actions),
+            )
         self.V_head = torch.nn.Sequential(
             torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
             activation_function(inplace=True),
@@ -122,18 +138,29 @@ class IQN_Network(torch.nn.Module):
     def initialize_weights(self):
         lrelu_neg_slope = 1e-2
         activation_gain = torch.nn.init.calculate_gain("leaky_relu", lrelu_neg_slope)
-        modules_to_init = [self.float_feature_extractor, self.A_head[:-1], self.V_head[:-1]]
+        modules_to_init = [self.float_feature_extractor, self.V_head[:-1]]
+        if self.A_head is not None:
+            modules_to_init.append(self.A_head[:-1])
+        if self.A_head_shared is not None:
+            modules_to_init.append(self.A_head_shared)
         if self.img_head is not None:
             modules_to_init.insert(0, self.img_head)
         for module in modules_to_init:
-            for m in module:
-                if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Linear):
+            for m in (module if isinstance(module, torch.nn.ModuleList) else [module]):
+                if isinstance(m, torch.nn.Sequential):
+                    for subm in m:
+                        if isinstance(subm, (torch.nn.Conv2d, torch.nn.Linear)):
+                            utilities.init_orthogonal(subm, activation_gain)
+                elif isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
                     utilities.init_orthogonal(m, activation_gain)
         utilities.init_orthogonal(
             self.iqn_fc[0], np.sqrt(2) * activation_gain
-        )  # Since cosine has a variance of 1/2, and we would like to exit iqn_fc with a variance of 1, we need a weight variance double that of what a normal leaky relu would need
-        for module in [self.A_head[-1], self.V_head[-1]]:
-            utilities.init_orthogonal(module)
+        )
+        if self.A_head is not None:
+            utilities.init_orthogonal(self.A_head[-1])
+        for br in self.A_branches:
+            utilities.init_orthogonal(br)
+        utilities.init_orthogonal(self.V_head[-1])
 
     def forward(
         self, img: torch.Tensor, float_inputs: torch.Tensor, num_quantiles: int, tau: Optional[torch.Tensor] = None
@@ -192,7 +219,11 @@ class IQN_Network(torch.nn.Module):
         # (batch_size*num_quantiles, dense_input_dimension)
         concat = concat * quantile_net
 
-        A = self.A_head(concat)  # (batch_size*num_quantiles, n_action_dims)
+        if self.A_branches and len(self.A_branches) > 0:
+            x = self.A_head_shared(concat)
+            A = torch.cat([br(x) for br in self.A_branches], dim=-1)
+        else:
+            A = self.A_head(concat)
         V = self.V_head(concat)  # (batch_size*num_quantiles, 1)
 
         # Multi-label dueling: Q(s,a) = V + sum_i a_i*A_i - sum_i max(0, A_i); return (V, A) for caller to compute Q(s,a)
@@ -200,8 +231,16 @@ class IQN_Network(torch.nn.Module):
 
     @staticmethod
     def q_from_va(V: torch.Tensor, A: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """Compute Q(s,a) from dueling (V, A) and action vector a. a: (..., n_action_dims), A: (..., n_action_dims). Returns (..., 1)."""
+        """Compute Q(s,a) from dueling (V, A) and action vector a. Multilabel: a (..., n_action_dims), A (..., n_action_dims). Returns (..., 1)."""
         return (V + (A * a).sum(dim=-1, keepdim=True) - A.clamp(min=0).sum(dim=-1, keepdim=True))
+
+    @staticmethod
+    def q_from_va_classification(V: torch.Tensor, A: torch.Tensor, action_indices: torch.Tensor) -> torch.Tensor:
+        """Compute Q(s,a) for classification: A (..., N_classes), action_indices (...,) long. Returns (..., 1)."""
+        # V + A[..., k] - max(A); gather A at action_indices
+        a_idx = action_indices.long().clamp(0, A.shape[-1] - 1)
+        q = V + A.gather(-1, a_idx.unsqueeze(-1)).squeeze(-1) - A.max(dim=-1).values
+        return q.unsqueeze(-1)
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -288,18 +327,14 @@ class Trainer:
         """
         Phase B: GPU compute — forward pass, loss, backward, optimizer step.
         Does NOT touch the buffer. No lock needed.
-
-        Args:
-            batch: tuple from sample_batch (tensors already on GPU)
-            batch_info: dict from sample_batch
-            do_learn: whether to backprop and update weights
-
-        Returns:
-            total_loss: a float
-            grad_norm: a float (after clipping)
-            grad_norm_before_clip: a float (before clipping)
-            priority_update: None or (indices, priorities) tuple for Phase C
+        Supports classification (A = N classes, argmax greedy) and multilabel (A = n_action_dims, (A>0) greedy).
         """
+        from trackmania_rl.action_vector import ActionSpace
+
+        cfg = get_config()
+        action_head_mode = getattr(self.online_network, "action_head_mode", "multilabel") or "multilabel"
+        action_space = ActionSpace.from_config(cfg) if action_head_mode == "classification" else None
+
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -320,35 +355,52 @@ class Trainer:
                     [self.iqn_n, 1]
                 )  # (batch_size*iqn_n, 1)
                 gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
-                # actions: (batch_size, n_action_dims) -> repeat for quantiles (batch_size*iqn_n, n_action_dims)
-                actions = actions.unsqueeze(0).repeat([self.iqn_n, 1, 1]).reshape(-1, actions.shape[-1])  # (batch_size*iqn_n, n_action_dims)
-                #
-                #   Target network: (V2, A2, tau2). Greedy a' = (A2 > 0).float(); Q(s', a') = q_from_va(V2, A2, a').
-                #
+                actions = actions.unsqueeze(0).repeat([self.iqn_n, 1, 1]).reshape(-1, actions.shape[-1])  # (batch_size*iqn_n, n_action_dims or same)
+
                 V2, A2, tau2 = self.target_network(
                     next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
-                )  # V2 (batch*iqn_n, 1), A2 (batch*iqn_n, n_action_dims)
-                if get_config().use_ddqn:
-                    _, A_online, _ = self.online_network(
-                        next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
-                    )
-                    A_online_mean = A_online.reshape([self.iqn_n, self.batch_size, -1]).mean(dim=0)  # (batch_size, n_action_dims)
-                    a__tpo__greedy = (A_online_mean > 0).float().unsqueeze(0).repeat([self.iqn_n, 1, 1]).reshape(-1, A_online_mean.shape[-1])
+                )
+                if action_head_mode == "classification":
+                    if get_config().use_ddqn:
+                        _, A_online, _ = self.online_network(
+                            next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
+                        )
+                        A_online_mean = A_online.reshape([self.iqn_n, self.batch_size, -1]).mean(dim=0)
+                        a__tpo__greedy_idx = A_online_mean.argmax(dim=-1)  # (batch_size,)
+                        a__tpo__greedy_idx = a__tpo__greedy_idx.unsqueeze(0).repeat([self.iqn_n, 1]).reshape(-1)  # (batch*iqn_n,)
+                    else:
+                        a__tpo__greedy_idx = A2.argmax(dim=-1)  # (batch*iqn_n,)
+                    q__stpo__target__quantiles_tau2 = self.online_network.q_from_va_classification(V2, A2, a__tpo__greedy_idx)
                 else:
-                    a__tpo__greedy = (A2 > 0).float()  # (batch*iqn_n, n_action_dims)
-                q__stpo__target__quantiles_tau2 = self.online_network.q_from_va(V2, A2, a__tpo__greedy)  # (batch*iqn_n, 1)
+                    if get_config().use_ddqn:
+                        _, A_online, _ = self.online_network(
+                            next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
+                        )
+                        A_online_mean = A_online.reshape([self.iqn_n, self.batch_size, -1]).mean(dim=0)
+                        a__tpo__greedy = (A_online_mean > 0).float().unsqueeze(0).repeat([self.iqn_n, 1, 1]).reshape(-1, A_online_mean.shape[-1])
+                    else:
+                        a__tpo__greedy = (A2 > 0).float()
+                    q__stpo__target__quantiles_tau2 = self.online_network.q_from_va(V2, A2, a__tpo__greedy)
                 outputs_target_tau2 = (
                     rewards + gammas_terminal * q__stpo__target__quantiles_tau2
-                )  # (batch_size*iqn_n, 1)
-
+                )
                 outputs_target_tau2 = outputs_target_tau2.reshape([self.iqn_n, self.batch_size, 1]).transpose(
                     0, 1
-                )  # (batch_size, iqn_n, 1)
+                )
 
             V3, A3, tau3 = self.online_network(
                 state_img_tensor, state_float_tensor, self.iqn_n, tau=None
-            )  # V3 (batch*iqn_n, 1), A3 (batch*iqn_n, n_action_dims)
-            q__st__online__quantiles_tau3 = self.online_network.q_from_va(V3, A3, actions)  # (batch_size*iqn_n, 1)
+            )
+            if action_head_mode == "classification":
+                # Convert action vectors (batch*iqn_n, n_action_dims) to indices (batch*iqn_n,)
+                actions_np = actions.cpu().numpy()
+                indices = torch.tensor(
+                    [action_space.action_vector_to_index(actions_np[i]) for i in range(actions_np.shape[0])],
+                    device=actions.device, dtype=torch.long
+                )
+                q__st__online__quantiles_tau3 = self.online_network.q_from_va_classification(V3, A3, indices)
+            else:
+                q__st__online__quantiles_tau3 = self.online_network.q_from_va(V3, A3, actions)
             outputs_tau3 = (
                 q__st__online__quantiles_tau3.reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
             )  # (batch_size, iqn_n, 1)
@@ -399,7 +451,11 @@ class Trainer:
             # Compute priority update data (CPU tensors) but don't write to buffer yet
             priority_update = None
             if get_config().prio_alpha > 0:
-                mask_update_priority = torch.lt(state_float_tensor[:, 0], get_config().min_horizon_to_update_priority_actions).detach().cpu()
+                temporal_idx = get_segment_start_index("temporal", get_config())
+                if temporal_idx is not None:
+                    mask_update_priority = torch.lt(state_float_tensor[:, temporal_idx], get_config().min_horizon_to_update_priority_actions).detach().cpu()
+                else:
+                    mask_update_priority = torch.zeros(state_float_tensor.shape[0], dtype=torch.bool, device=state_float_tensor.device).cpu()
                 priority_indices = batch_info["index"][mask_update_priority]
                 priority_values = (
                     (outputs_tau3.mean(axis=1) - outputs_target_tau2.mean(axis=1))
@@ -484,26 +540,47 @@ class Inferer:
 
     def get_exploration_action(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray) -> Tuple[npt.NDArray, bool, float, npt.NDArray]:
         """
-        Multi-label: returns action vector (n_action_dims,) where several entries can be 1 at once
-        (e.g. gas + left + brake). Greedy = (A_mean > 0) per dimension — no argmax over actions.
+        Returns action vector (n_action_dims,) for game input.
+        Classification: A has N classes, greedy = argmax A_mean → index → action_index_to_vector.
+        Multilabel: greedy = (A_mean > 0) per dimension.
         """
+        from trackmania_rl.action_vector import ActionSpace
+
+        cfg = get_config()
+        action_head_mode = getattr(self.inference_network, "action_head_mode", "multilabel") or "multilabel"
+        action_space = ActionSpace.from_config(cfg)
+
         V, A = self.infer_network(img_inputs_uint8, float_inputs)
-        A_mean = A.mean(axis=0)  # (n_action_dims,)
-        # Greedy = each dimension independently: positive advantage → 1 (allows gas+left+brake etc.)
-        greedy_action = (A_mean > 0).astype(np.float32)
-        r = random.random()
+        A_mean = A.mean(axis=0)
 
-        if self.is_explo and r < self.epsilon:
-            n_ad = self.inference_network.n_actions
-            action_vector = (np.random.rand(n_ad) > 0.5).astype(np.float32)
-        elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
-            get_on = A_mean + self.tau_epsilon_boltzmann * np.random.randn(*A_mean.shape)
-            action_vector = (get_on > 0).astype(np.float32)
+        if action_head_mode == "classification":
+            greedy_idx = int(np.argmax(A_mean))
+            greedy_action = action_space.action_index_to_vector(greedy_idx)
+            r = random.random()
+            if self.is_explo and r < self.epsilon:
+                idx = random.randint(0, action_space.n_discrete_actions - 1)
+                action_vector = action_space.action_index_to_vector(idx)
+            elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
+                noise = np.random.randn(*A_mean.shape).astype(np.float32)
+                idx = int(np.argmax(A_mean + self.tau_epsilon_boltzmann * noise))
+                action_vector = action_space.action_index_to_vector(idx)
+            else:
+                action_vector = greedy_action
+            is_greedy = np.allclose(action_vector, greedy_action)
+            q_greedy = float(np.mean(V) + A_mean[greedy_idx] - np.max(A_mean))
         else:
-            action_vector = greedy_action
-
-        is_greedy = np.allclose(action_vector, greedy_action)
-        q_greedy = float(np.mean(V) + (A_mean * greedy_action).sum() - (np.maximum(A_mean, 0)).sum())
+            greedy_action = (A_mean > 0).astype(np.float32)
+            r = random.random()
+            if self.is_explo and r < self.epsilon:
+                n_ad = self.inference_network.n_actions
+                action_vector = (np.random.rand(n_ad) > 0.5).astype(np.float32)
+            elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
+                get_on = A_mean + self.tau_epsilon_boltzmann * np.random.randn(*A_mean.shape)
+                action_vector = (get_on > 0).astype(np.float32)
+            else:
+                action_vector = greedy_action
+            is_greedy = np.allclose(action_vector, greedy_action)
+            q_greedy = float(np.mean(V) + (A_mean * greedy_action).sum() - (np.maximum(A_mean, 0)).sum())
         return action_vector, is_greedy, q_greedy, A_mean
 
 
@@ -513,28 +590,37 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
 
     The first copy is compiled (if jit == True) and is used for inference, for rollouts, for training, etc...
     The second copy is never compiled and **only** used to efficiently share a neural network's weights between processes.
-
-    Args:
-        jit: a boolean indicating whether compilation should be used
     """
-    use_image_head = get_config().use_iqn_image_head
-    # When image head is disabled, conv_head_output_dim is 0; otherwise compute from image size
+    from trackmania_rl.action_vector import ActionSpace
+
+    cfg = get_config()
+    use_image_head = cfg.use_iqn_image_head
+    action_head_mode = getattr(cfg, "action_head_mode", "multilabel") or "multilabel"
+    action_space = ActionSpace.from_config(cfg)
+    n_actions = (
+        action_space.n_discrete_actions
+        if action_head_mode == "classification"
+        else action_space.n_action_dims
+    )
     conv_head_output_dim = (
-        calculate_conv_output_dim(get_config().H_downsized, get_config().W_downsized)
+        calculate_conv_output_dim(cfg.H_downsized, cfg.W_downsized)
         if use_image_head
         else 0
     )
 
+    branch_dims = action_space.branch_dims if action_head_mode == "multilabel" else None
     uncompiled_model = IQN_Network(
-        float_inputs_dim=get_config().float_input_dim,
-        float_hidden_dim=get_config().float_hidden_dim,
+        float_inputs_dim=cfg.float_input_dim,
+        float_hidden_dim=cfg.float_hidden_dim,
         conv_head_output_dim=conv_head_output_dim,
-        dense_hidden_dimension=get_config().dense_hidden_dimension,
-        iqn_embedding_dimension=get_config().iqn_embedding_dimension,
-        n_actions=get_config().n_action_dims,
-        float_inputs_mean=get_config().float_inputs_mean,
-        float_inputs_std=get_config().float_inputs_std,
+        dense_hidden_dimension=cfg.dense_hidden_dimension,
+        iqn_embedding_dimension=cfg.iqn_embedding_dimension,
+        n_actions=n_actions,
+        float_inputs_mean=cfg.float_inputs_mean,
+        float_inputs_std=cfg.float_inputs_std,
         use_image_head=use_image_head,
+        action_head_mode=action_head_mode,
+        branch_dims=branch_dims,
     )
     if jit:
         # torch.compile; multi-process stability is handled by warmup in main process + collector warmup under game_spawning_lock (see train.py, collector_process.py).

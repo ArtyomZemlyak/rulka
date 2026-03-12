@@ -790,6 +790,7 @@ def _get_float_config_signature(floats_config) -> dict:
     inputs_hash = hashlib.sha256(
         json.dumps(floats_config.inputs, sort_keys=True).encode()
     ).hexdigest()
+    include = getattr(floats_config, "state_observation_include", None) or {}
     return {
         "n_zone_centers_in_inputs": floats_config.n_zone_centers_in_inputs,
         "one_every_n_zone_centers_in_inputs": floats_config.one_every_n_zone_centers_in_inputs,
@@ -797,6 +798,7 @@ def _get_float_config_signature(floats_config) -> dict:
         "n_contact_material_physics_behavior_types": floats_config.n_contact_material_physics_behavior_types,
         "action_forward_idx": floats_config.action_forward_idx,
         "float_input_dim": int(floats_config.float_input_dim),
+        "state_observation_include": sorted(include.items()),
         "inputs_hash": inputs_hash,
         # v2: prev_actions exclude current step (RL-aligned; was v1 leaky)
         "bc_prev_actions_version": 2,
@@ -1236,7 +1238,8 @@ def _build_bc_floats_and_update_meta(
         from trackmania_rl.float_inputs import build_float_vector, prev_actions_flat_from_indices, state_dict_from_meta
         state_dict = state_dict_from_meta(nearest, floats_config)
         prev_flat = prev_actions_flat_from_indices(
-            prev_indices, floats_config.inputs, floats_config.action_forward_idx, floats_config.n_steer_parts
+            prev_indices, floats_config.inputs, floats_config.action_forward_idx,
+            getattr(floats_config, "n_steer_parts", 1), config=floats_config
         )
         return build_float_vector(state_dict, prev_flat, 0.0, floats_config)
 
@@ -1409,13 +1412,13 @@ def build_bc_cache(
 
     # Write train_actions.npy (multi-label: n_action_dims per sample)
     actions_path = cache_dir / CACHE_TRAIN_ACTIONS_FILE
-    from trackmania_rl.action_vector import game_input_to_action_vector
-    n_steer = getattr(floats_config, "n_steer_parts", 1) if floats_config else 1
+    from trackmania_rl.action_vector import ActionSpace
+    action_space = ActionSpace.from_config(floats_config) if floats_config else ActionSpace(n_steer_parts=1)
     inputs = getattr(floats_config, "inputs", []) if floats_config else []
     if len(bc_time_offsets_ms) == 1:
         if inputs:
             actions_arr = np.array([
-                game_input_to_action_vector(inputs[acts[0] if isinstance(acts, (list, tuple)) else acts], n_steer)
+                action_space.from_game_input(inputs[acts[0] if isinstance(acts, (list, tuple)) else acts])
                 for _, acts in train_items
             ], dtype=np.float32)
         else:
@@ -1423,7 +1426,7 @@ def build_bc_cache(
     else:
         if inputs:
             actions_arr = np.array([
-                [game_input_to_action_vector(inputs[a], n_steer) for a in acts]
+                [action_space.from_game_input(inputs[a]) for a in acts]
                 for _, acts in train_items
             ], dtype=np.float32)  # (N, n_offsets, n_action_dims)
         else:
@@ -1446,10 +1449,10 @@ def build_bc_cache(
             del arr
         if inputs:
             val_actions_arr = np.array([
-                game_input_to_action_vector(inputs[acts[0] if isinstance(acts, (list, tuple)) else acts], n_steer)
+                action_space.from_game_input(inputs[acts[0] if isinstance(acts, (list, tuple)) else acts])
                 for _, acts in val_items
             ], dtype=np.float32) if len(bc_time_offsets_ms) == 1 else np.array([
-                [game_input_to_action_vector(inputs[a], n_steer) for a in acts] for _, acts in val_items
+                [action_space.from_game_input(inputs[a]) for a in acts] for _, acts in val_items
             ], dtype=np.float32)
         else:
             val_actions_arr = np.array([acts[0] for _, acts in val_items], dtype=np.int64) if len(bc_time_offsets_ms) == 1 else np.array([acts for _, acts in val_items], dtype=np.int64)

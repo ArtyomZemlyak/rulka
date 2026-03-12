@@ -18,6 +18,7 @@ from torchrl.data.replay_buffers.storages import Storage
 from torchrl.data.replay_buffers.utils import INT_CLASSES, _to_numpy
 
 from config_files.config_loader import get_config
+from trackmania_rl.float_inputs import get_segment_start_index
 
 to_torch_dtype = {
     np.uint8: torch.uint8,
@@ -108,8 +109,10 @@ def buffer_collate_function(batch):
 
     temporal_mini_race_next_time_actions = temporal_mini_race_current_time_actions + n_steps
 
-    state_float[:, 0] = temporal_mini_race_current_time_actions
-    next_state_float[:, 0] = temporal_mini_race_next_time_actions
+    temporal_idx = get_segment_start_index("temporal", get_config())
+    if temporal_idx is not None:
+        state_float[:, temporal_idx] = temporal_mini_race_current_time_actions
+        next_state_float[:, temporal_idx] = temporal_mini_race_next_time_actions
 
     possibly_reduced_n_steps = n_steps - (temporal_mini_race_next_time_actions - get_config().temporal_mini_race_duration_actions).clip(
         min=0

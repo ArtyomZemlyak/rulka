@@ -40,8 +40,9 @@ def write_actions_in_tmi_format(actions: List, outfile_path: Path):
     Input: list of action vectors (n_action_dims,) or legacy list of action indices (int).
     Output: write a text file on disk containing the corresponding inputs, readable by TMI to load the replay
     """
-    from trackmania_rl.action_vector import action_vector_to_game_input
+    from trackmania_rl.action_vector import ActionSpace
     cfg = get_config()
+    action_space = ActionSpace.from_config(cfg)
     outfile = open(outfile_path, "w")
     time_from = 0
     time_delta_s = get_config().tm_engine_step_per_action * 0.01
@@ -51,7 +52,7 @@ def write_actions_in_tmi_format(actions: List, outfile_path: Path):
             # Legacy: int index (0–11) → dict via STANDARD_12_ACTIONS
             action = cfg.inputs[act]
         else:
-            action = action_vector_to_game_input(np.asarray(act), cfg.n_steer_parts)
+            action = action_space.to_game_input(np.asarray(act))
         for key, val in action.items():
             if val:
                 if last_press[key] == -1:

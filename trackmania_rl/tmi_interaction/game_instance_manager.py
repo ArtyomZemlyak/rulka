@@ -479,9 +479,9 @@ class GameInstanceManager:
 
     def request_inputs(self, action_vector: npt.NDArray, rollout_results: Dict):
         """Apply multi-label action vector to game (convert to left/right/accel/brake)."""
-        from trackmania_rl.action_vector import action_vector_to_game_input
+        from trackmania_rl.action_vector import ActionSpace
         cfg = get_config()
-        game_inp = action_vector_to_game_input(action_vector, cfg.n_steer_parts)
+        game_inp = ActionSpace.from_config(cfg).to_game_input(action_vector)
         self.iface.set_input_state(**game_inp)
 
     def request_map(self, map_path: str, zone_centers: npt.NDArray):
@@ -637,7 +637,8 @@ class GameInstanceManager:
                         sim_state_car_gear_and_wheels
                     )
                     prev_flat = prev_actions_flat_from_rollout_actions(
-                        rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
+                        rollout_results["actions"], cfg.n_prev_actions_in_inputs,
+                        getattr(cfg, "n_steer_parts", 1), config=cfg
                     )
                     floats = build_float_vector(state_dict, prev_flat, 0, cfg)
 
@@ -770,7 +771,8 @@ class GameInstanceManager:
                                 rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
 
                                 prev_flat = prev_actions_flat_from_rollout_actions(
-                                    rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
+                                    rollout_results["actions"], cfg.n_prev_actions_in_inputs,
+                                    getattr(cfg, "n_steer_parts", 1), config=cfg
                                 )
                                 floats = build_float_vector(state_dict, prev_flat, 0, cfg)
 

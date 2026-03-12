@@ -46,6 +46,8 @@ The default YAML (``config_files/rl/config_default.yaml``) is organized into sec
 6. **rewards** - Reward shaping
 7. **map_cycle** - Map training cycle
 8. **performance** - System performance
+9. **state_observation** - Which scalar state features are included in the float vector
+10. **state_normalization** - Waypoint and float-input mean/std (normalization)
 
 Environment Configuration
 ==========================
@@ -332,11 +334,28 @@ Contact and Physics
    :type: int
    :value: 1
 
-   **Number of binary "parts" for left and right steering** (action space resolution)
+   **Number of binary "parts" for left and right steering** (used when ``action_space`` is not set)
    
-   The action space is **multi-label**: the agent outputs a vector of ``n_action_dims = 2 + 2 * n_steer_parts`` independent binary dimensions (accelerate, brake, left_1..left_N, right_1..right_N). With ``n_steer_parts=1`` there are 4 dimensions (accelerate, brake, left, right); with ``n_steer_parts=2`` there are 6 (accelerate, brake, left_1, left_2, right_1, right_2). The network can activate several at once (e.g. gas + left + brake). Game commands are still binary (left/right/accelerate/brake); left = any of left_1..left_N, right = any of right_1..right_N. See :doc:`game_inputs_and_float_vector` and ``trackmania_rl.action_vector``.
+   When the config does **not** define an ``action_space`` section, the action space is derived from ``n_steer_parts``: all four inputs (accelerate, brake, left, right) are enabled, with ``discretization`` 1 for accel/brake and ``n_steer_parts`` for left/right. So ``n_action_dims = 2 + 2 * n_steer_parts``. When ``action_space`` is present, ``n_steer_parts`` is still available for backward compatibility (effective value from the action space). See ``action_space`` below and :doc:`game_inputs_and_float_vector`.
+
+Action space (parameterized)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. py:data:: action_space
+   :type: optional section
+
+   **Parameterized action space**: which inputs are enabled and their discretization, without listing all combinations.
    
-   **Current:** 1 → 4 action dimensions. Increasing adds more steering granularity and more floats in the state (previous actions block).
+   Under ``action_space.inputs`` you specify per input (``accelerate``, ``brake``, ``left``, ``right``):
+   
+   - **``enabled``** (bool, default true): include this input in the action vector.
+   - **``discretization``** (int, default 1): number of dimensions for this input. 1 = single binary (on/off). N > 1 = N binary dimensions (e.g. left_1..left_N).
+   
+   **``n_action_dims``** = sum of ``discretization`` over enabled inputs. Example: all four enabled with ``discretization: 1`` → 4 dims; left and right with ``discretization: 10`` → 2 + 2 + 10 + 10 = 24 dims.
+   
+   If ``action_space`` is omitted, the space is built from ``n_steer_parts`` (all four inputs, left/right discretization = ``n_steer_parts``).
+   
+   Single source of truth: ``trackmania_rl.action_vector.ActionSpace.from_config(config)``; use it for ``to_game_input``, ``from_game_input``, and (in classification mode) ``action_index_to_vector`` / ``action_vector_to_index``.
 
 .. py:data:: n_prev_actions_in_inputs
    :type: int
@@ -492,29 +511,92 @@ Input Dimensions
    :type: int
    :value: 215
 
-   **Total dimension of scalar (non-image) inputs** (computed)
+   **Total dimension of scalar (non-image) inputs** (computed at load time)
    
-   Size of the **extended** feature vector fed to network alongside images.
+   Size of the feature vector fed to the network alongside images. **Computed** from ``state_observation.include`` and environment parameters: only **included** segments contribute; excluded segments are omitted from the vector. So ``float_input_dim`` equals the sum of dimensions of all segments where ``state_observation.include[name]`` is true (or omitted, which defaults to true).
    
-   **Layout (see :doc:`game_inputs_and_float_vector`):**
+   **When all segments are included**, the layout is (see :doc:`game_inputs_and_float_vector`):
    
-   - 1: Time remaining in mini-race
-   - ``n_prev_actions_in_inputs × n_action_dims`` (e.g. 5 × 4 = 20): Previous action encodings
-   - 32: gear_and_wheels (gear, wheels, contact materials)
-   - 3 + 3 + 3: Angular velocity, velocity, y_map (car frame)
-   - ``n_zone_centers_in_inputs × 3`` (e.g. 120): Waypoint coordinates in car frame
-   - 1 + 1: Margin to finish, is_freewheeling
+   - 1: temporal (time in mini-race)
+   - ``n_prev_actions_in_inputs × n_action_dims``: prev_actions
+   - 32 (with n_contact=4): gear_and_wheels
+   - 3 + 3 + 3: angular_velocity, velocity, y_map
+   - ``n_zone_centers_in_inputs × 3``: zone_centers_in_car_frame
+   - 1 + 1: margin, is_freewheeling
    - 1 + 1: turning_rate, mobil_is_sliding
-   - 29: car_track_extra (dyna forces/torques, mobil inputs/speeds/turbo/burnout, engine, track metrics)
+   - 29: car_track_extra (21 sub-segments)
    
-   **Current** (defaults: n_zone=40, n_prev=5, n_steer_parts=1, n_contact=4): **215** features.
+   **Example** (defaults, all included: n_zone=40, n_prev=5, n_steer_parts=1, n_contact=4): **215** features.
 
-   For a detailed mapping of each segment to game data (SimStateData) and the multi-label action space, see :doc:`game_inputs_and_float_vector`.
+   For segment list, optional exclusion, and SimStateData mapping, see :ref:`state_observation_config` and :doc:`game_inputs_and_float_vector`.
+
+Action head mode
+~~~~~~~~~~~~~~~~
+
+.. py:data:: action_head_mode
+   :type: str
+   :value: "multilabel"
+
+   **How the IQN head interprets actions.**
+   
+   - **``multilabel``**: Branching (BDQ-style) or flat head with one logit per action dimension. Greedy = (A > 0) per dimension; several dimensions can be 1 at once (e.g. gas + left + brake). Output size = ``n_action_dims``.
+   - **``classification``**: One head with N discrete classes (e.g. 12 canonical actions). Dueling V + A over N; greedy = argmax A → index → action vector via ``ActionSpace.action_index_to_vector``. Output size = ``n_discrete_actions`` (12). The replay buffer still stores action vectors; conversion to/from index is done in the trainer and inferer.
+
+State Observation Configuration
+-------------------------------
+.. _state_observation_config:
+
+Located in the ``state_observation`` section of the config YAML. Controls **which scalar state features** are included in the float observation vector. Used everywhere: RL rollout, replay buffer, BC pretrain cache, IQN input.
+
+.. py:data:: state_observation.include
+   :type: dict (name → bool)
+   :value: {} (empty = all enabled)
+
+   **Per-segment include/exclude flags**
+   
+   Each key is a **segment name**; value ``true`` (or omitted) = include, ``false`` = exclude. Excluded segments are not appended to the float vector, and ``float_input_dim`` is reduced accordingly. Mean and std in ``state_normalization`` are built only for included segments in the same order as :doc:`game_inputs_and_float_vector`.
+   
+   **Main segments (order in vector):**
+   
+   - **temporal** (1) — Time remaining in mini-race (overwritten in buffer collate with sampled time).
+   - **prev_actions** (variable) — Last ``n_prev_actions_in_inputs`` actions, each ``n_action_dims`` floats (from ``n_steer_parts``).
+   - **gear_and_wheels** (32 with n_contact=4) — Wheel sliding/contact/damper, gearbox, gear, rpm, contact material one-hot per wheel.
+   - **angular_velocity** (3) — Angular velocity in car frame.
+   - **velocity** (3) — Linear velocity in car frame (lateral, up, forward).
+   - **y_map** (3) — World up vector in car frame.
+   - **zone_centers_in_car_frame** (n_zone×3) — Waypoint positions in car frame.
+   - **margin** (1) — Distance to finish (meters).
+   - **is_freewheeling** (1) — Freewheeling flag.
+   - **turning_rate** (1) — Car turning rate.
+   - **mobil_is_sliding** (1) — Car-level sliding flag.
+   
+   **car_track_extra sub-segments (21 names, 29 floats total):**
+   
+   - **add_linear_speed** (3) — Additive linear speed from physics (world).
+   - **force** (3), **torque** (3) — Force and torque on car (world).
+   - **input_gas**, **input_brake**, **input_steer** (1 each) — Current gas/brake/steer inputs.
+   - **speed_forward**, **speed_sideward** (1 each) — Forward/sideward speed from sync state.
+   - **max_linear_speed** (1) — Max linear speed.
+   - **current_local_speed** (3) — Velocity in local frame.
+   - **turbo_boost_factor**, **is_turbo** (1 each) — Turbo state.
+   - **has_any_lateral_contact** (1), **burnout_state** (1) — Contact and burnout.
+   - **engine_slide_factor**, **engine_braking_factor**, **engine_clamped_rpm** (1 each) — Engine state.
+   - **distance_since_track_begin**, **meters_in_current_zone**, **segment_length_meters**, **current_zone_idx** (1 each) — Track position.
+   
+   **Example:** To exclude only distance-from-start from the vector:
+   
+   .. code-block:: yaml
+   
+      state_observation:
+        include:
+          distance_since_track_begin: false
+   
+   **Requirements:** Reward shaping in ``buffer_management`` requires **gear_and_wheels**, **velocity**, and **zone_centers_in_car_frame** to be included; otherwise filling the buffer raises an error.
 
 State Normalization (float_inputs_mean / float_inputs_std)
 ---------------------------------------------------------
 
-Defined in the ``state_normalization`` section of the config YAML (or built from defaults in the loader).
+Defined in the ``state_normalization`` section of the config YAML (or built from defaults in the loader). **float_inputs_mean** and **float_inputs_std** are built only for **included** segments (see :ref:`state_observation_config`); their length equals ``float_input_dim``.
 
 Scalar inputs are normalized before the network: ``(float_inputs - float_inputs_mean) / float_inputs_std``. This keeps activations in a reasonable range and can speed up training.
 
@@ -532,12 +614,12 @@ The repo does **not** include a script that computes them from data. The current
 
 **How to recompute from your own data:**
 
-1. Collect many ``state_float`` vectors (same order as in ``game_instance_manager.py``: temporal, previous_actions, gear/wheels, angular velocity, velocity, y_map, zone_centers, margin, freewheeling, turning_rate, mobil_is_sliding, car_track_extra). During training, the first element is overwritten with mini-race time in ``buffer_collate_function``, so for normalization you can either use the "raw" state from the game or the post-collate state from the buffer.
+1. Collect many ``state_float`` vectors (order is defined in ``trackmania_rl.float_inputs.build_float_vector`` and depends on ``state_observation.include``). During training, the temporal element is overwritten with mini-race time in ``buffer_collate_function``; use the same include and order when computing mean/std.
 2. Stack into a matrix of shape ``(N, float_input_dim)``.
 3. Compute ``mean = np.nanmean(data, axis=0)`` and ``std = np.nanstd(data, axis=0)`` (or replace zeros in std with a small constant to avoid division by zero).
-4. Update ``float_inputs_mean`` and ``float_inputs_std`` in ``state_normalization.py``.
+4. Update ``float_inputs_mean`` and ``float_inputs_std`` in the config (they are built by the loader from defaults when not provided; see config_loader).
 
-If you change the number or order of float features (e.g. waypoints, actions), the length and indices in the config's state normalization must match ``float_input_dim`` and the order in ``game_instance_manager.py`` / ``buffer_utilities.py``.
+If you change **which** segments are included (``state_observation.include``) or add/remove/reorder segments in code, ``float_input_dim`` and the state normalization arrays are recomputed at config load; ensure the YAML or loader defaults match the layout in ``float_inputs.py``.
 
 Network Architecture
 --------------------

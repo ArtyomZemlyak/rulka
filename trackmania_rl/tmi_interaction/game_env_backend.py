@@ -252,7 +252,8 @@ class GameEnvBackend:
                             sim_state_car_gear_and_wheels
                         )
                         prev_flat = prev_actions_flat_from_rollout_actions(
-                            rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
+                            rollout_results["actions"], cfg.n_prev_actions_in_inputs,
+                            getattr(cfg, "n_steer_parts", 1), config=cfg
                         )
                         floats = build_float_vector(state_dict, prev_flat, 0, cfg)
                         pc5 = time.perf_counter_ns()
@@ -812,7 +813,8 @@ class GameEnvBackend:
                         rollout_results["current_zone_idx"].append(current_zone_idx)
                         sim_state_car_gear_and_wheels = state_dict["gear_and_wheels"]
                         prev_flat = prev_actions_flat_from_rollout_actions(
-                            rollout_results["actions"], cfg.n_prev_actions_in_inputs, cfg.n_steer_parts
+                            rollout_results["actions"], cfg.n_prev_actions_in_inputs,
+                            getattr(cfg, "n_steer_parts", 1), config=cfg
                         )
                         floats = build_float_vector(state_dict, prev_flat, 0, cfg)
                         pc5 = time.perf_counter_ns()

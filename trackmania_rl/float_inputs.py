@@ -3,6 +3,7 @@ Unified float vector construction for RL and BC.
 
 Single source of truth for building the float observation vector.
 Includes all car state and track state fields we get from the game (SimStateData / meta).
+State observation segments can be enabled/disabled via config.state_observation.include (name: bool).
 """
 
 from __future__ import annotations
@@ -17,6 +18,127 @@ import numpy.typing as npt
 # has_any_lateral_contact (1) + burnout_state (1) + engine (slide_factor, braking_factor, clamped_rpm) (3) +
 # track (distance_since_track_begin, meters_in_current_zone, segment_length_meters, current_zone_idx) (4)
 CAR_TRACK_EXTRA_DIM = 29
+
+# Ordered list of segment names for the scalar state observation. Used for config.state_observation.include.
+# Variable-length segments: prev_actions, gear_and_wheels, zone_centers_in_car_frame (dims from config).
+# Rest are fixed; car_track_extra is expanded into the 29 sub-names below.
+CAR_TRACK_EXTRA_SEGMENT_NAMES = [
+    "add_linear_speed",  # 3
+    "force",  # 3
+    "torque",  # 3
+    "input_gas",
+    "input_brake",
+    "input_steer",
+    "speed_forward",
+    "speed_sideward",
+    "max_linear_speed",
+    "current_local_speed",  # 3
+    "turbo_boost_factor",
+    "is_turbo",
+    "has_any_lateral_contact",
+    "burnout_state",
+    "engine_slide_factor",
+    "engine_braking_factor",
+    "engine_clamped_rpm",
+    "distance_since_track_begin",
+    "meters_in_current_zone",
+    "segment_length_meters",
+    "current_zone_idx",
+]
+CAR_TRACK_EXTRA_SEGMENT_DIMS = [3, 3, 3, 1, 1, 1, 1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]  # sum=29
+
+STATE_OBSERVATION_MAIN_NAMES = [
+    "temporal",
+    "prev_actions",
+    "gear_and_wheels",
+    "angular_velocity",
+    "velocity",
+    "y_map",
+    "zone_centers_in_car_frame",
+    "margin",
+    "is_freewheeling",
+    "turning_rate",
+    "mobil_is_sliding",
+]
+ALL_STATE_OBSERVATION_NAMES: tuple[str, ...] = (
+    tuple(STATE_OBSERVATION_MAIN_NAMES) + tuple(CAR_TRACK_EXTRA_SEGMENT_NAMES)
+)
+
+
+def _get_segment_dim(name: str, config: Any) -> int:
+    """Return dimension of a state observation segment (for computing float_input_dim)."""
+    from trackmania_rl.action_vector import ActionSpace
+
+    n_zone = config.n_zone_centers_in_inputs
+    n_contact = config.n_contact_material_physics_behavior_types
+    n_prev = config.n_prev_actions_in_inputs
+    n_steer = getattr(config, "n_steer_parts", 1)
+    n_action_dims = (
+        ActionSpace.from_config(config).n_action_dims
+        if getattr(config, "action_space", None) is not None
+        else (2 + 2 * n_steer)
+    )
+    if name == "temporal":
+        return 1
+    if name == "prev_actions":
+        return n_prev * n_action_dims
+    if name == "gear_and_wheels":
+        return 4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * n_contact
+    if name == "angular_velocity":
+        return 3
+    if name == "velocity":
+        return 3
+    if name == "y_map":
+        return 3
+    if name == "zone_centers_in_car_frame":
+        return n_zone * 3
+    if name in ("margin", "is_freewheeling", "turning_rate", "mobil_is_sliding"):
+        return 1
+    if name in CAR_TRACK_EXTRA_SEGMENT_NAMES:
+        idx = CAR_TRACK_EXTRA_SEGMENT_NAMES.index(name)
+        return CAR_TRACK_EXTRA_SEGMENT_DIMS[idx]
+    return 0
+
+
+def get_segment_dim(name: str, config: Any) -> int:
+    """Public API: dimension of a state observation segment (single source of truth for layout)."""
+    return _get_segment_dim(name, config)
+
+
+# Within gear_and_wheels segment: first 4 = is_sliding per wheel, next 4 = has_ground_contact per wheel (used by buffer_management).
+GEAR_WHEEL_GROUND_CONTACT_START = 4
+GEAR_WHEEL_GROUND_CONTACT_END = 8
+
+
+def get_state_observation_include(config: Any) -> dict[str, bool]:
+    """Merge config.state_observation.include with defaults (all True). Missing keys = included."""
+    include_from_config = getattr(config, "state_observation_include", None) or {}
+    return {name: include_from_config.get(name, True) for name in ALL_STATE_OBSERVATION_NAMES}
+
+
+def compute_float_input_dim(config: Any, include_override: dict[str, bool] | None = None) -> int:
+    """Total dimension of the scalar state observation. Uses include_override if given, else config.state_observation_include (default all True)."""
+    include = include_override if include_override is not None else get_state_observation_include(config)
+    return sum(
+        _get_segment_dim(name, config) for name in ALL_STATE_OBSERVATION_NAMES if include[name]
+    )
+
+
+def get_segment_start_indices(config: Any) -> dict[str, int]:
+    """Return start index of each included segment in the built float vector. Excluded segments are omitted."""
+    include = get_state_observation_include(config)
+    out: dict[str, int] = {}
+    offset = 0
+    for name in ALL_STATE_OBSERVATION_NAMES:
+        if include[name]:
+            out[name] = offset
+            offset += _get_segment_dim(name, config)
+    return out
+
+
+def get_segment_start_index(name: str, config: Any) -> int | None:
+    """Return start index of segment in the built vector, or None if segment is excluded."""
+    return get_segment_start_indices(config).get(name)
 
 
 class FloatStateDict(TypedDict):
@@ -38,6 +160,16 @@ class FloatStateDict(TypedDict):
     car_track_extra: npt.NDArray[np.float32]
 
 
+def _car_track_extra_slice_indices() -> list[tuple[int, int]]:
+    """Start:end indices for each CAR_TRACK_EXTRA_SEGMENT_NAMES (for slicing 29-dim array)."""
+    idx = 0
+    out = []
+    for d in CAR_TRACK_EXTRA_SEGMENT_DIMS:
+        out.append((idx, idx + d))
+        idx += d
+    return out
+
+
 def build_float_vector(
     state: FloatStateDict,
     prev_actions_flat: npt.NDArray[np.floating],
@@ -46,8 +178,10 @@ def build_float_vector(
 ) -> npt.NDArray[np.float32]:
     """Build the canonical float vector from state dict and prev actions.
 
-    Layout: [temporal, prev_actions, gear_and_wheels, ang_vel, vel, y_map, zone_centers, margin, freewheel,
-             turning_rate, mobil_is_sliding, car_track_extra(CAR_TRACK_EXTRA_DIM)].
+    Only segments enabled in config.state_observation.include are included (default: all enabled).
+    Order: temporal, prev_actions, gear_and_wheels, angular_velocity, velocity, y_map,
+    zone_centers_in_car_frame, margin, is_freewheeling, turning_rate, mobil_is_sliding,
+    then car_track_extra sub-segments (add_linear_speed, force, ...).
     """
     n_zone = config.n_zone_centers_in_inputs
     zone_arr = np.asarray(state["zone_centers_in_car_frame"], dtype=np.float32).ravel()
@@ -62,75 +196,96 @@ def build_float_vector(
     else:
         extra = extra[:CAR_TRACK_EXTRA_DIM]
 
-    return np.hstack(
-        (
-            float(temporal),
-            np.asarray(prev_actions_flat, dtype=np.float32).ravel(),
-            np.asarray(state["gear_and_wheels"], dtype=np.float32).ravel(),
-            np.asarray(state["angular_velocity"], dtype=np.float32).ravel(),
-            np.asarray(state["velocity"], dtype=np.float32).ravel(),
-            np.asarray(state["y_map"], dtype=np.float32).ravel(),
-            zone_arr,
-            float(state["margin"]),
-            float(state["is_freewheeling"]),
-            float(state["turning_rate"]),
-            float(state["mobil_is_sliding"]),
-            extra,
-        )
-    ).astype(np.float32)
+    include = get_state_observation_include(config)
+    segments: list[npt.NDArray[np.float32]] = []
+    # Main segments in order
+    main_arrays = [
+        (STATE_OBSERVATION_MAIN_NAMES[0], np.array([float(temporal)], dtype=np.float32)),
+        (STATE_OBSERVATION_MAIN_NAMES[1], np.asarray(prev_actions_flat, dtype=np.float32).ravel()),
+        (STATE_OBSERVATION_MAIN_NAMES[2], np.asarray(state["gear_and_wheels"], dtype=np.float32).ravel()),
+        (STATE_OBSERVATION_MAIN_NAMES[3], np.asarray(state["angular_velocity"], dtype=np.float32).ravel()),
+        (STATE_OBSERVATION_MAIN_NAMES[4], np.asarray(state["velocity"], dtype=np.float32).ravel()),
+        (STATE_OBSERVATION_MAIN_NAMES[5], np.asarray(state["y_map"], dtype=np.float32).ravel()),
+        (STATE_OBSERVATION_MAIN_NAMES[6], zone_arr),
+        (STATE_OBSERVATION_MAIN_NAMES[7], np.array([float(state["margin"])], dtype=np.float32)),
+        (STATE_OBSERVATION_MAIN_NAMES[8], np.array([float(state["is_freewheeling"])], dtype=np.float32)),
+        (STATE_OBSERVATION_MAIN_NAMES[9], np.array([float(state["turning_rate"])], dtype=np.float32)),
+        (STATE_OBSERVATION_MAIN_NAMES[10], np.array([float(state["mobil_is_sliding"])], dtype=np.float32)),
+    ]
+    for name, arr in main_arrays:
+        if include.get(name, True):
+            segments.append(arr)
+    slices = _car_track_extra_slice_indices()
+    for name, (start, end) in zip(CAR_TRACK_EXTRA_SEGMENT_NAMES, slices):
+        if include.get(name, True):
+            segments.append(extra[start:end].astype(np.float32))
+    if not segments:
+        return np.array([], dtype=np.float32)
+    return np.hstack(segments).astype(np.float32)
+
+
+def _action_space_from_config_or_steer(config: Any | None, n_steer_parts: int) -> Any:
+    """Return ActionSpace from config if config has action_space, else ActionSpace(n_steer_parts=n_steer_parts)."""
+    from trackmania_rl.action_vector import ActionSpace
+
+    if config is not None and getattr(config, "action_space", None) is not None:
+        return ActionSpace.from_config(config)
+    return ActionSpace(n_steer_parts=n_steer_parts)
 
 
 def prev_actions_flat_from_indices(
     prev_action_indices: list[int],
     inputs: list[dict],
     action_forward_idx: int,
-    n_steer_parts: int,
+    n_steer_parts: int = 1,
+    config: Any = None,
 ) -> npt.NDArray[np.float32]:
-    """Build flat action vector * n_prev from action indices (legacy: each index → inputs[idx] → vector)."""
-    from trackmania_rl.action_vector import game_input_to_action_vector
-
+    """Build flat action vector * n_prev from action indices (each index → inputs[idx] → vector). Use config when available for action space."""
+    action_space = _action_space_from_config_or_steer(config, n_steer_parts)
     out: list[npt.NDArray[np.float32]] = []
     for idx in prev_action_indices:
         if idx < 0 or idx >= len(inputs):
             act = inputs[action_forward_idx]
         else:
             act = inputs[idx]
-        out.append(game_input_to_action_vector(act, n_steer_parts))
+        out.append(action_space.from_game_input(act))
     return np.concatenate(out, axis=0).astype(np.float32)
 
 
 def prev_actions_flat_from_rollout_actions(
     actions_list: list[npt.NDArray[np.floating]],
     n_prev: int,
-    n_steer_parts: int,
+    n_steer_parts: int = 1,
+    config: Any = None,
 ) -> npt.NDArray[np.float32]:
     """Build prev_actions flat from rollout list of action vectors. Pads with zeros if len(actions_list) < n_prev."""
-    n_ad = 2 + 2 * n_steer_parts
+    action_space = _action_space_from_config_or_steer(config, n_steer_parts)
+    n_ad = action_space.n_action_dims
     zero = np.zeros(n_ad, dtype=np.float32)
     if len(actions_list) >= n_prev:
         prev_actions = actions_list[-n_prev:]
     else:
         prev_actions = [zero] * (n_prev - len(actions_list)) + list(actions_list)
-    return prev_actions_flat_from_actions(prev_actions, n_steer_parts)
+    return prev_actions_flat_from_actions(prev_actions, n_steer_parts=n_steer_parts, config=config)
 
 
 def prev_actions_flat_from_actions(
     previous_actions: list[dict] | list[npt.NDArray[np.floating]],
-    n_steer_parts: int,
+    n_steer_parts: int = 1,
+    config: Any = None,
 ) -> npt.NDArray[np.float32]:
-    """Build flat [accel, brake, left_1..left_N, right_1..right_N]*n from list of action dicts or vectors."""
-    from trackmania_rl.action_vector import game_input_to_action_vector
-
+    """Build flat action vectors from list of action dicts or vectors. Use config when available for action space."""
+    action_space = _action_space_from_config_or_steer(config, n_steer_parts)
+    n_ad = action_space.n_action_dims
     out: list[npt.NDArray[np.float32]] = []
     for act in previous_actions:
         if isinstance(act, dict):
-            out.append(game_input_to_action_vector(act, n_steer_parts))
+            out.append(action_space.from_game_input(act))
         else:
             arr = np.asarray(act, dtype=np.float32).ravel()
-            n = 2 + 2 * n_steer_parts
-            if len(arr) < n:
-                arr = np.pad(arr, (0, n - len(arr)))
-            out.append(arr[:n])
+            if len(arr) < n_ad:
+                arr = np.pad(arr, (0, n_ad - len(arr)))
+            out.append(arr[:n_ad].astype(np.float32))
     return np.concatenate(out, axis=0).astype(np.float32)
 
 

@@ -13,16 +13,27 @@ from torchrl.data import ReplayBuffer
 
 from config_files.config_loader import get_config
 from trackmania_rl.experience_replay.experience_replay_interface import Experience
+from trackmania_rl.float_inputs import (
+    GEAR_WHEEL_GROUND_CONTACT_END,
+    GEAR_WHEEL_GROUND_CONTACT_START,
+    get_segment_start_indices,
+)
 from trackmania_rl.reward_shaping import speedslide_quality_tarmac
 
 
-def _float_layout_indices(n_prev: int, n_action_dims: int):
-    """Indices into state_float. Layout (extended): [temporal, prev_actions, gear, ang_vel, vel, y_map, waypoints, margin, freewheel, turning_rate, mobil_is_sliding, car_track_extra]. Indices here are from the start only; trailing blocks do not affect waypoint/vel/wheel positions."""
-    gear_start = 1 + n_prev * n_action_dims
-    vel_start = gear_start + 32 + 3  # gear 32, ang_vel 3
-    waypoint_start = vel_start + 3 + 3  # vel 3, y_map 3
-    wheel_start = gear_start + 4
-    wheel_end = gear_start + 8
+def _float_layout_indices(config):
+    """Indices into state_float from config.state_observation.include. Returns (gear_start, vel_start, waypoint_start, wheel_start, wheel_end). Requires gear_and_wheels, velocity, zone_centers_in_car_frame to be included."""
+    layout = get_segment_start_indices(config)
+    gear_start = layout.get("gear_and_wheels")
+    vel_start = layout.get("velocity")
+    waypoint_start = layout.get("zone_centers_in_car_frame")
+    if gear_start is None or vel_start is None or waypoint_start is None:
+        raise ValueError(
+            "buffer_management reward shaping requires gear_and_wheels, velocity, zone_centers_in_car_frame "
+            "in state_observation.include"
+        )
+    wheel_start = gear_start + GEAR_WHEEL_GROUND_CONTACT_START
+    wheel_end = gear_start + GEAR_WHEEL_GROUND_CONTACT_END
     return gear_start, vel_start, waypoint_start, wheel_start, wheel_end
 
 
@@ -33,9 +44,10 @@ def get_potential(
     shaped_reward_min_dist_to_cur_vcp: float,
     shaped_reward_max_dist_to_cur_vcp: float,
     shaped_reward_point_to_vcp_ahead: float,
-    waypoint_cur_start: int = 62,
-    waypoint_next_start: int = 65,
+    waypoint_cur_start: int = 0,
+    waypoint_next_start: int = 3,
 ):
+    # Waypoint indices must come from get_segment_start_indices(config)["zone_centers_in_car_frame"]; defaults are placeholders (function not called from this codebase).
     # https://people.eecs.berkeley.edu/~pabbeel/cs287-fa09/readings/NgHaradaRussell-shaping-ICML1999.pdf
     vector_vcp_to_vcp_further_ahead = state_float[waypoint_next_start : waypoint_next_start + 3] - state_float[waypoint_cur_start : waypoint_cur_start + 3]
     vector_vcp_to_vcp_further_ahead_normalized = vector_vcp_to_vcp_further_ahead / np.linalg.norm(vector_vcp_to_vcp_further_ahead)
@@ -66,7 +78,7 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     cfg = get_config()
     n_prev = cfg.n_prev_actions_in_inputs
     n_ad = cfg.n_action_dims
-    _gear_start, vel_start, waypoint_start, wheel_start, wheel_end = _float_layout_indices(n_prev, n_ad)
+    _gear_start, vel_start, waypoint_start, wheel_start, wheel_end = _float_layout_indices(cfg)
     vel_end = vel_start + 3
     waypoint_cur_end = waypoint_start + 3
     waypoint_next_end = waypoint_start + 6

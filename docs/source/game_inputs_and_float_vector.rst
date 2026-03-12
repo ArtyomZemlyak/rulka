@@ -12,19 +12,30 @@ Sources
 - **Float vector** is built in ``trackmania_rl.float_inputs``: ``build_float_vector()``, ``state_dict_from_sim_state()`` (RL), and ``state_dict_from_meta()`` (BC from manifest).
 - **RL rollout**: ``game_env_backend.py`` / ``game_instance_manager.py`` call ``get_simulation_state()``, then ``state_dict_from_sim_state()``, then ``build_float_vector()``.
 
-Action space (multi-label)
---------------------------
+Action space (parameterized, multi-label or classification)
+------------------------------------------------------------
 
-The agent does **not** choose one of 12 discrete actions. The action space is **multi-label**: a vector of independent binary dimensions.
+The action space is **parameterized** by config: either the optional **``action_space``** section (per-input ``enabled`` and ``discretization``) or, when omitted, **``n_steer_parts``** (all four inputs, left/right discretization = ``n_steer_parts``).
 
-- **``n_steer_parts``** (config, default 1): number of binary "parts" for left and for right steering. With ``n_steer_parts=1`` we have 4 dimensions: accelerate, brake, left, right. With ``n_steer_parts=2`` we have 6: accelerate, brake, left_1, left_2, right_1, right_2.
-- **``n_action_dims``** = ``2 + 2 * n_steer_parts`` (computed). The network outputs one logit per dimension; greedy action is "logit > 0" per dimension, so the agent can press **several keys at once** (e.g. accelerate + left + brake).
-- **Conversion**: ``trackmania_rl.action_vector`` provides ``ActionSpace(n_steer_parts)``, ``action_vector_to_game_input()``, ``game_input_to_action_vector()``. Commands sent to the game are still binary (left/right/accelerate/brake) via ``TMInterface.set_input_state()``; the multi-label vector is converted to game booleans by combining left_1..left_N and right_1..right_N.
+- **``action_space.inputs``**: For each of ``accelerate``, ``brake``, ``left``, ``right``: ``enabled`` (bool), ``discretization`` (int). ``n_action_dims`` = sum of ``discretization`` over enabled inputs. Default per input: enabled true, discretization 1.
+- **``n_steer_parts``**: Used when ``action_space`` is not set; also exposed as the effective steering resolution for backward compatibility.
+- **``n_action_dims``**: Computed from action space (single source of truth: ``ActionSpace.from_config(config).n_action_dims``).
+- **Head mode** (``neural_network.action_head_mode``): **``multilabel``** = one logit per dimension (or BDQ-style branching), greedy = (A > 0) per dim; **``classification``** = one head with N discrete classes (e.g. 12), dueling, greedy = argmax → index → ``action_index_to_vector``.
+- **Conversion**: ``trackmania_rl.action_vector.ActionSpace.from_config(config)`` provides ``to_game_input()``, ``from_game_input()``, and (for classification) ``action_index_to_vector`` / ``action_vector_to_index``. Game commands are binary (left/right/accelerate/brake) via ``TMInterface.set_input_state()``.
 
-Float vector layout (dimension and indices)
--------------------------------------------
+Configurable segments (state_observation.include)
+-------------------------------------------------
 
-**Formula** (see ``config_loader.py``):
+Which segments are included in the float vector is controlled by **``state_observation.include``** in the RL config (see ``config_default.yaml``). Each segment name maps to ``true`` (include) or ``false`` (exclude). Omitted keys default to **included**. This affects rollout, replay buffer, BC cache, and IQN input everywhere.
+
+Segment names: ``temporal``, ``prev_actions``, ``gear_and_wheels``, ``angular_velocity``, ``velocity``, ``y_map``, ``zone_centers_in_car_frame``, ``margin``, ``is_freewheeling``, ``turning_rate``, ``mobil_is_sliding``; then the 21 car_track_extra sub-names (e.g. ``add_linear_speed``, ``force``, ``distance_since_track_begin``, ``current_zone_idx``). See ``trackmania_rl.float_inputs.ALL_STATE_OBSERVATION_NAMES``.
+
+**``float_input_dim``** is the sum of dimensions of **included** segments only. Indices into the vector are computed by ``float_inputs.get_segment_start_indices(config)``; do not assume a fixed index (e.g. temporal at 0) if segments can be disabled.
+
+Float vector layout (dimension and indices when all included)
+-------------------------------------------------------------
+
+**Formula** when all segments are included (see ``config_loader.py`` and ``float_inputs.compute_float_input_dim()``):
 
 .. code-block:: text
 
@@ -101,7 +112,7 @@ With defaults (n_zone=40, n_prev=5, n_steer_parts=1 → n_action_dims=4, n_conta
      - **car_track_extra**: add_linear_speed(3), force(3), torque(3), input_gas/brake/steer(3), speed_forward/sideward(2), max_linear_speed(1), current_local_speed(3), turbo(2), has_any_lateral_contact, burnout_state, engine(3), track(4)
      - dyna, scene_mobil, sync_vehicle_state, engine, zone math
 
-**Indices used elsewhere:** ``buffer_management._float_layout_indices()`` computes waypoint/vel/wheel positions from the start of the layout; the trailing blocks (turning_rate, mobil_is_sliding, car_track_extra) do not change those indices. If you add/remove/reorder features, update ``float_inputs.py``, ``config_loader.py`` (float_input_dim and mean/std), and any code that slices by position.
+**Indices used elsewhere:** ``buffer_management._float_layout_indices(config)`` uses ``float_inputs.get_segment_start_indices(config)`` so indices respect ``state_observation.include``. Reward shaping requires ``gear_and_wheels``, ``velocity``, ``zone_centers_in_car_frame`` to be included.
 
 What we use from SimStateData
 -----------------------------
@@ -127,9 +138,9 @@ What the game provides but we do NOT use
 Outputs: commands we send to the car
 -------------------------------------
 
-We send commands via ``TMInterface.set_input_state(left, right, accelerate, brake)`` — all four arguments are **booleans**. The agent outputs a **multi-label action vector** (length ``n_action_dims``); we convert it to game booleans with ``action_vector_to_game_input()`` (in ``trackmania_rl.action_vector``): left = any of left_1..left_N, right = any of right_1..right_N, accelerate/brake from the first two dimensions. So we still drive the car with binary inputs; the multi-label space allows the network to express "gas + slight left" or "brake + right" as separate dimensions for learning.
+We send commands via ``TMInterface.set_input_state(left, right, accelerate, brake)`` — all four arguments are **booleans**. The agent outputs a **multi-label action vector** (length ``n_action_dims``); we convert it to game booleans with ``ActionSpace.from_config(cfg).to_game_input(vec)`` (or legacy ``action_vector_to_game_input()`` in ``trackmania_rl.action_vector``): left = any of left_1..left_N, right = any of right_1..right_N, accelerate/brake from the first two dimensions. So we still drive the car with binary inputs; the multi-label space allows the network to express "gas + slight left" or "brake + right" as separate dimensions for learning.
 
-**Legacy:** Old replays or manifests may store a single integer ``action_idx`` (0..11). For backward compatibility we use ``STANDARD_12_ACTIONS`` and ``game_input_to_action_vector()`` to convert that index to an action vector when building BC cache or replaying.
+**Legacy:** Old replays or manifests may store a single integer ``action_idx`` (0..11). For backward compatibility we use ``STANDARD_12_ACTIONS`` and ``ActionSpace.from_config(cfg).from_game_input(inputs[idx])`` (or ``game_input_to_action_vector()``) to convert that index to an action vector when building BC cache or replaying.
 
 Meta capture (full state in manifest)
 -------------------------------------
@@ -139,7 +150,7 @@ When capturing replays with ``capture_replays_tmnf.py`` and ``--fps-meta``, we s
 Summary
 -------
 
-- **Dimension**: 215 with default config (n_zone=40, n_prev=5, n_steer_parts=1, n_contact=4). Layout is fixed in ``float_inputs.build_float_vector()`` and must match ``float_input_dim`` and state normalization in config.
-- **Actions**: Multi-label vector of length ``n_action_dims = 2 + 2*n_steer_parts``; converted to game (left, right, accelerate, brake) for control.
+- **Dimension**: 215 with default config (n_zone=40, n_prev=5, n_contact=4). Layout is fixed in ``float_inputs.build_float_vector()`` and must match ``float_input_dim`` and state normalization in config.
+- **Actions**: Multi-label vector of length ``n_action_dims`` (from ``action_space.inputs`` or legacy ``2 + 2*n_steer_parts``); converted to game (left, right, accelerate, brake) via ``ActionSpace.from_config(cfg).to_game_input(vec)``.
 - **Used from game**: dyna (position, orientation, speeds, add_linear_speed, force, torque), mobil (engine, gearbox, freewheeling, turning_rate, is_sliding, inputs, turbo, burnout, engine stats, sync speeds), per-wheel state, and track/zone metrics in car_track_extra.
 - **Not used**: previous/temp dyna state, some mobil flags/timers, wheel geometry/sync state, replay input string, raw checkpoint data. Adding more would require extending ``FloatStateDict``, ``build_float_vector()``, config, and reward/buffer indices.

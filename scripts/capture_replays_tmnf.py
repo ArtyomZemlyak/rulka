@@ -933,9 +933,10 @@ def _make_replay_policy(
     so ``inputs_per_step[1]`` (T=10) includes the Accelerate event.  ✓
     """
     # Reuses action_dict_to_index imported from capture_frames_from_replays
-    from trackmania_rl.action_vector import game_input_to_action_vector
+    from trackmania_rl.action_vector import ActionSpace
 
     cfg = get_config()
+    action_space = ActionSpace.from_config(cfg)
     action_indices = [action_dict_to_index(inp) for inp in inputs_per_step]
     n_ad = cfg.n_action_dims
     dummy_q = np.zeros(n_ad, dtype=np.float32)
@@ -953,7 +954,7 @@ def _make_replay_policy(
         i = min(k, max_step)
         act_idx = action_indices[i] if action_indices else cfg.action_forward_idx
         # rollout() expects action_vector (n_action_dims,); convert legacy index → dict → vector
-        action_vector = game_input_to_action_vector(cfg.inputs[act_idx], cfg.n_steer_parts)
+        action_vector = action_space.from_game_input(cfg.inputs[act_idx])
 
         # Detect when rollout exceeds the replay's input range (clamping to last input).
         if k > max_step and not clamped_warned[0]:

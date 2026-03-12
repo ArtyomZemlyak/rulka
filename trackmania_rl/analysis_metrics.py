@@ -16,6 +16,7 @@ from PIL import Image
 
 from config_files.config_loader import get_config
 from trackmania_rl.agents.iqn import iqn_loss
+from trackmania_rl.float_inputs import get_segment_start_index
 
 
 def batched(iterable, n):  # Can be included from itertools with python >=3.12
@@ -65,8 +66,10 @@ def race_time_left_curves(rollout_results, inferer, save_dir, map_name):
 
             n_ad = get_config().n_action_dims
             tau = torch.linspace(0.05, 0.95, get_config().iqn_k)[:, None].to("cuda")
+            temporal_idx = get_segment_start_index("temporal", get_config())
             for j in x_axis:
-                rollout_results_copy["state_float"][frame_number][0] = j
+                if temporal_idx is not None:
+                    rollout_results_copy["state_float"][frame_number][temporal_idx] = j
                 _V, A = inferer.infer_network(
                     rollout_results_copy["frames"][frame_number], rollout_results_copy["state_float"][frame_number], tau
                 )  # A: (iqn_k, n_action_dims)
@@ -151,9 +154,11 @@ def patrick_curves(rollout_results, inferer, save_dir, map_name):
     values_predicted = [[] for _ in horizons_to_plot]
     values_observed = [[] for _ in horizons_to_plot]
 
+    temporal_idx = get_segment_start_index("temporal", get_config())
     for frame_number in range(0, len(rollout_results_copy["frames"]) - 200, 5):
         for ihorz, horizon in enumerate(horizons_to_plot):
-            rollout_results_copy["state_float"][frame_number][0] = 140 - horizon
+            if temporal_idx is not None:
+                rollout_results_copy["state_float"][frame_number][temporal_idx] = 140 - horizon
 
             _V, A = inferer.infer_network(
                 rollout_results_copy["frames"][frame_number], rollout_results_copy["state_float"][frame_number], tau
@@ -211,9 +216,11 @@ def get_output_and_target_for_batch(batch, online_network, target_network, num_q
 
     is_terminal = gammas_terminal > 0
 
-    delta = next_state_float_tensor[:, 0] - state_float_tensor[:, 0]
-    state_float_tensor[:, 0] = (0 - get_config().float_inputs_mean[0]) / get_config().float_inputs_std[0]
-    next_state_float_tensor[:, 0] = state_float_tensor[:, 0] + delta
+    temporal_idx = get_segment_start_index("temporal", get_config())
+    if temporal_idx is not None:
+        delta = next_state_float_tensor[:, temporal_idx] - state_float_tensor[:, temporal_idx]
+        state_float_tensor[:, temporal_idx] = (0 - get_config().float_inputs_mean[temporal_idx]) / get_config().float_inputs_std[temporal_idx]
+        next_state_float_tensor[:, temporal_idx] = state_float_tensor[:, temporal_idx] + delta
 
     tau = torch.linspace(0, 1, num_quantiles, device="cuda").repeat_interleave(batch_size).unsqueeze(1)
     with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
