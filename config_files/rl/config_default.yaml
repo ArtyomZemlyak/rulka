@@ -46,10 +46,10 @@ neural_network:
   overall_reset_mul_factor: 0.01
   use_jit: true
   # Set to false to train IQN without image head (float features only).
-  use_iqn_image_head: false
+  use_iqn_image_head: true
 
 training:
-  run_name: "A01_as20_long_no_image_test_speed"
+  run_name: "A01_long_v3"
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -99,7 +99,7 @@ training:
   # Path: BC run directory containing iqn_bc.pt, or path to iqn_bc.pt.
   # Loads img_head, float_feature_extractor, iqn_fc, A_head, V_head. Applied after encoder injection on fresh run.
   pretrain_bc_heads_path: null
-  # pretrain_bc_heads_path: "output/ptretrain/bc/v4_multi_offset_A01_Race"
+  # pretrain_bc_heads_path: "output/ptretrain/bc/v4_multi_offset"
 
   # Piecewise: load only float_feature_extractor or A_head from BC run (use_floats+save_float_head / use_actions_head+save_actions_head).
   # Path: BC run directory (with float_head.pt / actions_head.pt) or path to the .pt file. Requires existing checkpoints (e.g. after encoder injection).

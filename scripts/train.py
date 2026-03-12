@@ -7,6 +7,9 @@ import argparse
 import ctypes
 import os
 import random
+
+# Disable inductor/Triton autotune console spam (must be set before torch is imported)
+os.environ["TORCH_LOGS"] = "-inductor"
 import shutil
 import signal
 import sys
@@ -45,10 +48,6 @@ from trackmania_rl.agents.iqn import make_untrained_iqn_network
 from trackmania_rl.multiprocess.collector_process import collector_process_fn
 from trackmania_rl.multiprocess.learner_process import learner_process_fn
 from trackmania_rl.utilities import set_random_seed
-
-# Reduce Triton/inductor console spam (AUTOTUNE logs appear when new kernels compile mid-training)
-if "TORCH_LOGS" not in os.environ:
-    os.environ["TORCH_LOGS"] = "-inductor"
 
 # noinspection PyUnresolvedReferences
 torch.backends.cudnn.benchmark = True
@@ -190,7 +189,7 @@ if __name__ == "__main__":
     if config.use_jit:
         print("\n[INFO] Warming up torch.compile (Populating Triton cache)...")
         # Dummy inputs for warmup
-        dummy_img = torch.zeros((1, 1, config.H_downsized, config.W_downsized), device="cuda", dtype=torch.uint8)
+        dummy_img = torch.zeros((1, 1, config.H_downsized, config.W_downsized), device="cuda", dtype=torch.float32)
         dummy_float = torch.zeros((1, config.float_input_dim), device="cuda", dtype=torch.float32)
         
         # 1. Warm up Inference (Collectors use mode="max-autotune")
