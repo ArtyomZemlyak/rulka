@@ -49,13 +49,13 @@ neural_network:
   use_iqn_image_head: true
 
 training:
-  run_name: "A01_long_v3"
+  run_name: "A01_as20_long_v2.1"
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
   adam_beta2: 0.999
   weight_decay_lr_ratio: 0.1
-  global_schedule_speed: 1
+  global_schedule_speed: 8
   lr_schedule:
     - [0, 0.001]
     - [3000000, 0.00005]
@@ -99,7 +99,7 @@ training:
   # Path: BC run directory containing iqn_bc.pt, or path to iqn_bc.pt.
   # Loads img_head, float_feature_extractor, iqn_fc, A_head, V_head. Applied after encoder injection on fresh run.
   pretrain_bc_heads_path: null
-  # pretrain_bc_heads_path: "output/ptretrain/bc/v4_multi_offset"
+  # pretrain_bc_heads_path: "output/ptretrain/bc/v4_multi_offset_A01_Race"
 
   # Piecewise: load only float_feature_extractor or A_head from BC run (use_floats+save_float_head / use_actions_head+save_actions_head).
   # Path: BC run directory (with float_head.pt / actions_head.pt) or path to the .pt file. Requires existing checkpoints (e.g. after encoder injection).
@@ -152,9 +152,9 @@ rewards:
   engineered_reward_min_dist_to_cur_vcp: 5
   engineered_reward_max_dist_to_cur_vcp: 25
   shaped_reward_point_to_vcp_ahead: 0
-  # Small bonuses/penalties throughout training ([[frames, value]] — constant from start)
-  engineered_speedslide_reward_schedule: [[0, 0.0]]
-  engineered_neoslide_reward_schedule: [[0, 0.0]]
+  # Small bonuses/penalties throughout training ([[frames, value]] — must include step 0)
+  engineered_speedslide_reward_schedule: [[0, 0.000], [4500000, 0.000], [5000000, 0.001], [15000000, 0.0]]
+  engineered_neoslide_reward_schedule: [[0, 0.000], [4500000, 0.000], [5000000, 0.001], [15000000, 0.0]]
   engineered_kamikaze_reward_schedule: [[0, 0.0]]
   engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
   final_speed_reward_as_if_duration_s: 2

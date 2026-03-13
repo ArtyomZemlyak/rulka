@@ -614,6 +614,11 @@ def learner_process_fn(
                 accumulated_stats["cumul_number_single_memories_used"] + offset_cumul_number_single_memories_used
                 <= accumulated_stats["cumul_number_single_memories_should_have_been_used"]
             ):
+                # Yield to 5-min summary periodically so logs/tensorboard keep updating
+                # when learner can't keep up with collectors (e.g. many workers, long runs).
+                if time.perf_counter() - time_last_save >= 5 * 60:
+                    break
+
                 with buffer_lock:
                     buf = ingest_state["buffer"]
                     buf_test = ingest_state["buffer_test"]

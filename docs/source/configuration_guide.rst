@@ -746,11 +746,13 @@ Values are linearly interpolated between schedule points.
 
    **Global schedule multiplier**
    
-   Speeds up or slows down all frame-based schedules uniformly.
+   Multiplies all frame counts in schedules by this value. Larger value =
+   longer training (schedules stretch); smaller value = shorter training
+   (schedules compress).
    
    - **1.0**: Normal speed
-   - **>1.0**: Accelerated schedules
-   - **<1.0**: Decelerated schedules
+   - **>1.0**: Slower schedules (e.g. 4 → each step at 4× more frames)
+   - **<1.0**: Faster schedules (e.g. 0.8 → each step at 0.8× frames)
    
    Useful for adjusting training duration without editing all schedules.
 
