@@ -40,29 +40,30 @@ def _apply_schedule_speed(schedule: list, speed: int) -> list:
 
 
 def _waypoint_mean(data: list[float], n: int) -> list[float]:
-    """Waypoint mean block of length n*3."""
-    n_waypoints = n * 3
-    if n == 40:
-        return list(data)[:n_waypoints]
-    if n < 40:
-        return data[: n * 3]
-    out = list(data)
-    last_fwd = data[-3] if data else 0.0
-    for _ in range(n - 40):
-        out.extend([last_fwd, 0.0, 0.0])
-    return out
+    """Waypoint mean block of length n*3. Base block is 40 waypoints (120 floats).
+    For n < 40: use first n*3. For n > 40: tile the 40-waypoint block (e.g. 200 = 5 copies).
+    """
+    base = list(data)[: 40 * 3]  # 120 floats
+    if n <= 40:
+        return base[: n * 3]
+    # Tile: repeat the 40-waypoint block until we have at least n waypoints
+    out = []
+    while len(out) < n * 3:
+        out.extend(base)
+    return out[: n * 3]
 
 
 def _waypoint_std(data: list[float], n: int) -> list[float]:
-    """Waypoint std block of length n*3."""
-    if n == 40:
-        return list(data)[: n * 3]
-    if n < 40:
-        return data[: n * 3]
-    out = list(data)
-    for _ in range(n - 40):
-        out.extend([50.0, 50.0, 50.0])
-    return out
+    """Waypoint std block of length n*3. Base block is 40 waypoints (120 floats).
+    For n < 40: use first n*3. For n > 40: tile the 40-waypoint block.
+    """
+    base = list(data)[: 40 * 3]
+    if n <= 40:
+        return base[: n * 3]
+    out = []
+    while len(out) < n * 3:
+        out.extend(base)
+    return out[: n * 3]
 
 
 def _build_float_inputs_mean_std(
