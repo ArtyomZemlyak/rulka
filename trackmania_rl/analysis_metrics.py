@@ -69,7 +69,9 @@ def race_time_left_curves(rollout_results, inferer, save_dir, map_name):
                 rollout_results_copy["state_float"][frame_number][0] = j
                 per_quantile_output = inferer.infer_network(
                     rollout_results_copy["frames"][frame_number], rollout_results_copy["state_float"][frame_number], tau
-                )  # (iqn_k, n_actions)
+                )
+                if per_quantile_output.ndim == 3:
+                    per_quantile_output = per_quantile_output[:, 0, :]  # (iqn_k, n_actions) first head for plotting
                 for i, q_val in enumerate(list(per_quantile_output.mean(axis=0))):
                     # print(i, q_val)
                     q[i].append(q_val)
@@ -121,8 +123,9 @@ def tau_curves(rollout_results, inferer, save_dir, map_name):
 
         per_quantile_output = inferer.infer_network(
             rollout_results_copy["frames"][frame_number], rollout_results_copy["state_float"][frame_number], tau
-        )  # (iqn_k, n_actions)
-
+        )
+        if per_quantile_output.ndim == 3:
+            per_quantile_output = per_quantile_output[:, 0, :]
         for i in range(n_best_actions_to_plot):
             action_idx = per_quantile_output.mean(axis=0).argmax()
             axes[i].plot(
@@ -160,13 +163,14 @@ def patrick_curves(rollout_results, inferer, save_dir, map_name):
 
             per_quantile_output = inferer.infer_network(
                 rollout_results_copy["frames"][frame_number], rollout_results_copy["state_float"][frame_number], tau
-            )  # (iqn_k, n_actions)
-
+            )
+            if per_quantile_output.ndim == 3:
+                per_quantile_output = per_quantile_output[:, 0, :]
             action_idx = per_quantile_output.mean(axis=0).argmax()
             values_predicted[ihorz].append(per_quantile_output[:, action_idx].mean())
 
             values_observed[ihorz].append(
-                horizon * get_config().ms_per_action * get_config().constant_reward_per_ms
+                horizon * get_config().ms_per_block * get_config().constant_reward_per_ms
                 + get_config().reward_per_m_advanced_along_centerline
                 * (
                     rollout_results_copy["meters_advanced_along_centerline"][frame_number + horizon]
@@ -219,37 +223,48 @@ def get_output_and_target_for_batch(batch, online_network, target_network, num_q
     state_float_tensor[:, 0] = (0 - get_config().float_inputs_mean[0]) / get_config().float_inputs_std[0]
     next_state_float_tensor[:, 0] = state_float_tensor[:, 0] + delta
 
+    n_ab = online_network.n_actions_per_block
     tau = torch.linspace(0, 1, num_quantiles, device="cuda").repeat_interleave(batch_size).unsqueeze(1)
     with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
         with torch.no_grad():
-            rewards = rewards.unsqueeze(-1).repeat(
-                [num_quantiles, 1]
-            )  # (batch_size*iqn_n, 1)     a,b,c,d devient a,b,c,d,a,b,c,d,a,b,c,d,...
-            gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([num_quantiles, 1])  # (batch_size*iqn_n, 1)
-            actions = actions.unsqueeze(-1).repeat([num_quantiles, 1])  # (batch_size*iqn_n, 1)
-            #
-            #   Use target_network to evaluate the action chosen, per quantile.
-            #
+            rewards = rewards.unsqueeze(-1).repeat([num_quantiles, 1])  # (batch_size*K, 1)
+            gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([num_quantiles, 1])  # (batch_size*K, 1)
+            # actions: (batch_size,) for single, (batch_size, N) for multi
+            if n_ab <= 1:
+                actions = actions.unsqueeze(-1).repeat([num_quantiles, 1])  # (batch_size*K, 1)
+            else:
+                actions = actions.repeat([num_quantiles, 1])  # (batch_size*K, N)
+
             q__stpo__target__quantiles_tau2, _ = target_network(
                 next_state_img_tensor, next_state_float_tensor, num_quantiles, tau=tau
-            )  # (batch_size*iqn_n,n_actions)
-            #
-            #   Use online network to choose an action for next state.
-            #   This action is chosen AFTER reduction to the mean, and repeated to all quantiles
-            #
-            outputs_target_tau2 = (
-                rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
-            )  # (batch_size*iqn_n, 1)
-            #
-            #   This is our target
-            #
-            outputs_target_tau2 = outputs_target_tau2.reshape([num_quantiles, batch_size, 1]).transpose(0, 1)  # (batch_size, iqn_n, 1)
+            )
+
+            if n_ab <= 1:
+                outputs_target_tau2 = (
+                    rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
+                )  # (batch_size*K, 1)
+            else:
+                # Factorized Q: sum_i max_a Q_i(s')[a]
+                target_sum = q__stpo__target__quantiles_tau2.max(dim=2)[0].sum(dim=1, keepdim=True)
+                outputs_target_tau2 = rewards + gammas_terminal * target_sum  # (batch_size*K, 1)
+
+            outputs_target_tau2 = outputs_target_tau2.reshape([num_quantiles, batch_size, 1]).transpose(0, 1)  # (batch_size, K, 1)
+
             q__st__online__quantiles_tau3, tau3 = online_network(
                 state_img_tensor, state_float_tensor, num_quantiles, tau=tau
-            )  # (batch_size*iqn_n,n_actions)
-            outputs_tau3 = (
-                q__st__online__quantiles_tau3.gather(1, actions).reshape([num_quantiles, batch_size, 1]).transpose(0, 1)
-            )  # (batch_size, iqn_n, 1)
+            )
+
+            if n_ab <= 1:
+                outputs_tau3 = (
+                    q__st__online__quantiles_tau3.gather(1, actions).reshape([num_quantiles, batch_size, 1]).transpose(0, 1)
+                )
+            else:
+                # Factorized Q: sum_i Q_i(s)[a_i]
+                current_q = torch.gather(
+                    q__st__online__quantiles_tau3, 2, actions.unsqueeze(-1)
+                ).sum(dim=1)  # (batch_size*K, 1)
+                outputs_tau3 = current_q.reshape([num_quantiles, batch_size, 1]).transpose(0, 1)
+            # outputs_tau3: (batch_size, K, 1)
 
     losses = {
         "target_self_loss": iqn_loss(outputs_target_tau2, outputs_target_tau2, tau, num_quantiles, batch_size).cpu().numpy(),

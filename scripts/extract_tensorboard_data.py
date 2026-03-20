@@ -17,6 +17,42 @@ except ImportError:
     sys.exit(1)
 
 
+# tensorboard_suffix_schedule creates run_2, run_3, ... at step thresholds.
+# For "one experiment run", treat them as continuation chunks of the same run.
+SUFFIXES = ["", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9", "_10"]
+
+
+def discover_run_paths(base_dir: Path, run_name: str) -> List[Path]:
+    """Find all TensorBoard log dirs for a run (run_name, run_name_2, run_name_3, ...)."""
+    paths: List[Path] = []
+    for suf in SUFFIXES:
+        p = base_dir / (run_name + suf)
+        if p.exists():
+            paths.append(p)
+        elif suf == "":
+            break  # base run missing
+        else:
+            break
+    return paths
+
+
+def merge_scalar_points(run_paths: List[Path], metric_tag: str) -> List[Tuple[int, float]]:
+    """Load scalar points from multiple run chunks and merge by step."""
+    all_points: List[Tuple[int, float]] = []
+    for run_path in run_paths:
+        if not run_path.exists():
+            continue
+        ea = EventAccumulator(str(run_path))
+        ea.Reload()
+        available = ea.Tags().get("scalars", [])
+        if metric_tag not in available:
+            continue
+        scalar_events = ea.Scalars(metric_tag)
+        all_points.extend([(event.step, event.value) for event in scalar_events])
+    all_points.sort(key=lambda x: x[0])
+    return all_points
+
+
 def extract_scalars(
     log_dir: Path, 
     run_name: str, 
@@ -33,39 +69,36 @@ def extract_scalars(
     Returns:
         Dictionary mapping metric tags to lists of (step, value) tuples
     """
-    run_path = log_dir / run_name
-    if not run_path.exists():
-        print(f"Warning: Run directory {run_path} not found. Skipping...")
+    run_paths = discover_run_paths(log_dir, run_name)
+    if not run_paths:
+        run_paths = [log_dir / run_name]
+    if not any(p.exists() for p in run_paths):
+        print(f"Warning: Run directory {log_dir / run_name} not found. Skipping...")
         return {}
     
-    # Find all event files in the run directory
-    event_files = list(run_path.glob("events.out.tfevents.*"))
-    if not event_files:
-        print(f"Warning: No event files found in {run_path}. Skipping...")
-        return {}
-    
-    # Load event accumulator
-    ea = EventAccumulator(str(run_path))
-    ea.Reload()
-    
-    # Extract scalars
     results = {}
-    available_tags = ea.Tags().get('scalars', [])
+    # Discover scalar tags from all existing chunks (tags can differ across suffix dirs).
+    available_tag_set = set()
+    for p in run_paths:
+        if not p.exists():
+            continue
+        ea0 = EventAccumulator(str(p))
+        ea0.Reload()
+        available_tag_set.update(ea0.Tags().get('scalars', []))
+    available_tags = sorted(available_tag_set)
     
     for tag in metric_tags:
         if tag in available_tags:
-            scalar_events = ea.Scalars(tag)
-            results[tag] = [(event.step, event.value) for event in scalar_events]
+            results[tag] = merge_scalar_points(run_paths, tag)
         else:
             # Try to find partial matches (e.g., for map-specific metrics)
             matching_tags = [t for t in available_tags if tag in t or tag.replace('_hock', '') in t]
             if matching_tags:
                 print(f"Found matching tags for {tag}: {matching_tags}")
-                # Use the first matching tag
-                scalar_events = ea.Scalars(matching_tags[0])
-                results[tag] = [(event.step, event.value) for event in scalar_events]
+                # Use the first matching tag and merge across suffix chunks.
+                results[tag] = merge_scalar_points(run_paths, matching_tags[0])
             else:
-                print(f"Warning: Metric {tag} not found in {run_name}")
+                print(f"Warning: Metric {tag} not found in {run_name} (available: {len(available_tags)} tags)")
                 results[tag] = []
     
     return results
@@ -118,14 +151,12 @@ def main():
     # List tags only (e.g. for pretrain TensorBoard with different tag names)
     if args.list_tags:
         run_name = args.runs[0]
-        run_path = log_dir / run_name
-        if not run_path.exists():
-            print(f"Error: Run directory {run_path} not found")
+        run_paths = discover_run_paths(log_dir, run_name)
+        if not run_paths:
+            print(f"Error: Run directory {log_dir / run_name} not found")
             sys.exit(1)
-        event_files = list(run_path.glob("events.out.tfevents.*"))
-        if not event_files:
-            print(f"No event files in {run_path}")
-            sys.exit(1)
+        # Use the first chunk only for listing tags (usually identical across chunks).
+        run_path = run_paths[0]
         ea = EventAccumulator(str(run_path))
         ea.Reload()
         tags = ea.Tags().get("scalars", [])

@@ -291,6 +291,7 @@ def build_iqn_for_bc(
     iqn_embedding_dimension: int = 128,
     float_inputs_mean: Optional[list[float]] = None,
     float_inputs_std: Optional[list[float]] = None,
+    n_actions_per_block: int = 1,
 ) -> IQN_Network:
     """Build full IQN_Network for BC training (use_full_iqn).
 
@@ -308,6 +309,9 @@ def build_iqn_for_bc(
     float_inputs_mean, float_inputs_std : list[float] or None
         Same as RL state_normalization; length must equal float_inputs_dim.
         If None, use zeros and ones (no normalization).
+    n_actions_per_block : int
+        Number of actions per block for multi-action prediction (fused mode).
+        1 = single action (default); >1 = RL-identical A_head + A_head_multi.
     """
     conv_head_output_dim = calculate_conv_output_dim(image_size, image_size)
     mean_arr = np.array(float_inputs_mean, dtype=np.float32) if float_inputs_mean else np.zeros(float_inputs_dim, dtype=np.float32)
@@ -326,6 +330,7 @@ def build_iqn_for_bc(
         n_actions=n_actions,
         float_inputs_mean=mean_arr,
         float_inputs_std=std_arr,
+        n_actions_per_block=n_actions_per_block,
     )
 
 

@@ -18,6 +18,9 @@ Contents
    extended_training
    temporal_mini_race_duration
    exploration
+   global_schedule_speed
+   multi_action_prediction
+   iqn_modernization_plan
    network_size_long_training
    pretrain_replay_roadmap
    pretrain_visual_backbone

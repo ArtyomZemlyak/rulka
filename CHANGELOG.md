@@ -8,6 +8,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 (No changes yet.)
 
+## [1.6.0] - 2026-03-20
+
+### Training and Analysis
+- **Multi-action prediction pipeline** finalized for RL + BC: multi-offset heads, decision-block training path, and related config/schema updates.
+- **Experiment validation tooling** hardened to avoid partial conclusions:
+  - TensorBoard run continuation chunks are now treated as one run (`run`, `run_2`, `run_3`, ...).
+  - Analysis checks were expanded and documented so relative-time and by-step comparisons are consistently reproduced.
+- **Documentation command/rules** for experiment writeups were updated with stricter verification steps (suffix-merge checks, save-state cross-checks, direct pairwise checks for top runs).
+
+### Documentation and Plots
+- Added/updated experiment pages for:
+  - Global schedule speed (`A01_as20_long_v2` series),
+  - Multi-action prediction (`A01_as20_long_v3`/`v3.1`/`v3.1_pretrained_bc`),
+  - BC multi-offset pretrain comparisons.
+- Regenerated and committed comparison plots (relative-time and by-step) for updated experiment analyses.
+
+### Experimental Outcomes (technical takeaways)
+- **What worked**
+  - `global_schedule_speed = 4` was the strongest setting in the checked long A01 runs, with best final saved time in the v2 series.
+  - Multi-action RL + BC pretrain improved stability and peak time over non-pretrained multi-action runs.
+  - Temporal/action alignment between BC pretrain and multi-action RL (5-action offset structure) improved transfer quality.
+- **What did not work / underperformed**
+  - Some v2 variants (`v2.2`, `v2.3`) did not converge to competitive A01 best times.
+  - Multi-action without BC pretrain underperformed the strongest single-action baseline (`v2`) on final best A01.
+
 ## [1.5.0] - 2026-03-10
 
 ### Training

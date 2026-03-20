@@ -2,7 +2,7 @@
 # Use: python scripts/train.py --config config_files/rl/config_default.yaml
 
 environment:
-  tm_engine_step_per_action: 3 # 5
+  tm_engine_step_per_action: 5 # 5
   ms_per_tm_engine_step: 10
   n_zone_centers_in_inputs: 40 # 40
   one_every_n_zone_centers_in_inputs: 20
@@ -13,7 +13,7 @@ environment:
   temporal_mini_race_duration_ms: 7000
   margin_to_announce_finish_meters: 700
   n_contact_material_physics_behavior_types: 4
-  n_prev_actions_in_inputs: 5
+  n_prev_actions_in_inputs: 25 # individual actions (25 × 10ms = 250ms; was 5 × 50ms = 250ms)
   cutoff_rollout_if_race_not_finished_within_duration_ms: 300000
   cutoff_rollout_if_no_vcp_passed_within_duration_ms: 2000
   timeout_during_run_ms: 10100
@@ -23,6 +23,8 @@ environment:
   deck_height: "-inf"
   game_camera_number: 2
   sync_virtual_and_real_checkpoints: true
+  # Multi-action: e.g. [0, 10, 20, 30, 40] for N=5 actions per block (10ms each). Omit or [0] = single action.
+  rl_action_offsets_ms: [0, 10, 20, 30, 40]
 
 neural_network:
   w_downsized: 64
@@ -49,13 +51,13 @@ neural_network:
   use_iqn_image_head: true
 
 training:
-  run_name: "A01_as20_long_v2.4"
+  run_name: "A01_as20_long_v3.1_pretrained_bc"
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
   adam_beta2: 0.999
   weight_decay_lr_ratio: 0.1
-  global_schedule_speed: 1
+  global_schedule_speed: 4
   lr_schedule:
     - [0, 0.001]
     - [3000000, 0.00005]
@@ -98,8 +100,8 @@ training:
   # BC full IQN state from BC run with use_full_iqn (iqn_bc.pt).
   # Path: BC run directory containing iqn_bc.pt, or path to iqn_bc.pt.
   # Loads img_head, float_feature_extractor, iqn_fc, A_head, V_head. Applied after encoder injection on fresh run.
-  pretrain_bc_heads_path: null
-  # pretrain_bc_heads_path: "output/ptretrain/bc/v4_multi_offset_A01_Race"
+  # pretrain_bc_heads_path: null
+  pretrain_bc_heads_path: "output/ptretrain/bc/v5_multi_offset"
 
   # Piecewise: load only float_feature_extractor or A_head from BC run (use_floats+save_float_head / use_actions_head+save_actions_head).
   # Path: BC run directory (with float_head.pt / actions_head.pt) or path to the .pt file. Requires existing checkpoints (e.g. after encoder injection).
@@ -139,9 +141,11 @@ exploration:
   epsilon_boltzmann_schedule:
     - [0, 0.15]
     - [10000000, 0.03]
-    # - [0, 0.03]
-    # - [3000000, 0.03]
+  # - [0, 0.03]
+  # - [3000000, 0.03]
   tau_epsilon_boltzmann: 0.01
+  # When n_actions_per_block > 1: "per_action" (default) or "per_block"
+  multi_action_exploration: per_block
 
 rewards:
   constant_reward_per_ms: -0.0012

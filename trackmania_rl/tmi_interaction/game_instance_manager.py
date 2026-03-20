@@ -26,6 +26,7 @@ import os
 import socket
 import subprocess
 import time
+from collections import deque
 from typing import Callable, Dict, List
 
 import cv2
@@ -42,6 +43,31 @@ from trackmania_rl.float_inputs import (
     state_dict_from_sim_state,
 )
 from trackmania_rl.tmi_interaction.tminterface2 import MessageType, TMInterface
+
+
+def _prev_indices_from_rollout_actions(actions_list, n_prev: int, n_actions_per_block: int, action_forward_idx: int):
+    """Build prev_indices for build_float_vector: last n_prev individual actions.
+
+    When n_actions_per_block > 1, actions_list contains arrays of shape (N,) per block;
+    we flatten all blocks into individual actions and take the last n_prev.
+    """
+    if n_actions_per_block <= 1:
+        start = len(actions_list) - n_prev
+        return [
+            actions_list[k] if k >= 0 else action_forward_idx
+            for k in range(start, len(actions_list))
+        ]
+    flat = []
+    for block in actions_list:
+        if hasattr(block, "__len__") and not isinstance(block, (int, float)):
+            flat.extend(int(a) for a in block)
+        else:
+            flat.append(int(block))
+    if len(flat) >= n_prev:
+        return flat[-n_prev:]
+    pad = n_prev - len(flat)
+    return [action_forward_idx] * pad + flat
+
 
 if get_config().is_linux:
     from xdo import Xdo
@@ -478,7 +504,8 @@ class GameInstanceManager:
         self.latest_tm_engine_speed_requested = requested_speed
 
     def request_inputs(self, action_idx: int, rollout_results: Dict):
-        self.iface.set_input_state(**get_config().inputs[action_idx])
+        """Apply one action (by index) to the game. action_idx is int in [0, n_actions)."""
+        self.iface.set_input_state(**get_config().inputs[int(action_idx)])
 
     def request_map(self, map_path: str, zone_centers: npt.NDArray):
         # Normalize map path and remove quotes so TMInterface can parse "map"
@@ -598,6 +625,8 @@ class GameInstanceManager:
         floats = None
         distance_since_track_begin = 0
         sim_state_car_gear_and_wheels = None
+        n_ab = get_config().n_actions_per_block
+        action_buffer = deque()  # for multi-action: N actions to apply over next N steps
 
         try:
             while not this_rollout_is_finished:
@@ -632,13 +661,12 @@ class GameInstanceManager:
                     rollout_results["car_gear_and_wheels"].append(
                         sim_state_car_gear_and_wheels
                     )
-                    prev_indices = [
-                        rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
-                        for k in range(
-                            len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
-                            len(rollout_results["actions"]),
-                        )
-                    ]
+                    prev_indices = _prev_indices_from_rollout_actions(
+                        rollout_results["actions"],
+                        cfg.n_prev_actions_in_inputs,
+                        n_ab,
+                        cfg.action_forward_idx,
+                    )
                     prev_flat = prev_actions_flat_from_indices(
                         prev_indices, cfg.inputs, cfg.action_forward_idx
                     )
@@ -730,7 +758,24 @@ class GameInstanceManager:
                     if not this_rollout_is_finished:
                         this_rollout_has_seen_t_negative |= _time < 0
 
-                        if _time >= 0 and _time % (10 * self.run_steps_per_action) == 0 and this_rollout_has_seen_t_negative:
+                        steps_per_decision = n_ab if n_ab > 1 else self.run_steps_per_action
+                        at_action_step = (
+                            _time >= 0
+                            and this_rollout_has_seen_t_negative
+                            and (n_ab > 1 or _time % (10 * self.run_steps_per_action) == 0)
+                        )
+                        # Multi-action mid-block: only apply next action from buffer (no state record)
+                        if at_action_step and n_ab > 1 and action_buffer:
+                            if not self.game_activated:
+                                ensure_window_focused(self.tm_window_id)
+                                self.game_activated = True
+                                if get_config().is_linux:
+                                    self.game_spawning_lock.release()
+                            self.request_inputs(int(action_buffer.popleft()), rollout_results)
+                            self.request_speed(self.running_speed)
+                            if _time % (10 * n_ab * get_config().update_inference_network_every_n_actions) == 0:
+                                update_network()
+                        elif at_action_step and (n_ab <= 1 or not action_buffer):
                             last_known_simulation_state = self.iface.get_simulation_state()
                             self.iface.rewind_to_current_state()
 
@@ -772,13 +817,12 @@ class GameInstanceManager:
                                 sim_state_car_gear_and_wheels = state_dict["gear_and_wheels"]
                                 rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
 
-                                prev_indices = [
-                                    rollout_results["actions"][k] if k >= 0 else cfg.action_forward_idx
-                                    for k in range(
-                                        len(rollout_results["actions"]) - cfg.n_prev_actions_in_inputs,
-                                        len(rollout_results["actions"]),
-                                    )
-                                ]
+                                prev_indices = _prev_indices_from_rollout_actions(
+                                    rollout_results["actions"],
+                                    cfg.n_prev_actions_in_inputs,
+                                    n_ab,
+                                    cfg.action_forward_idx,
+                                )
                                 prev_flat = prev_actions_flat_from_indices(
                                     prev_indices, cfg.inputs, cfg.action_forward_idx
                                 )
@@ -790,7 +834,7 @@ class GameInstanceManager:
                                 rollout_results["frames"].append(_dummy_frame)
 
                                 (
-                                    action_idx,
+                                    action_or_block,
                                     action_was_greedy,
                                     q_value,
                                     q_values,
@@ -798,6 +842,12 @@ class GameInstanceManager:
 
                                 pc6 = time.perf_counter_ns()
                                 instrumentation__exploration_policy += pc6 - pc5
+
+                                if n_ab > 1:
+                                    action_buffer.extend(np.atleast_1d(action_or_block).tolist())
+                                    action_idx = int(action_buffer.popleft())
+                                else:
+                                    action_idx = int(action_or_block)
 
                                 if not self.game_activated:
                                     ensure_window_focused(self.tm_window_id)
@@ -815,7 +865,10 @@ class GameInstanceManager:
 
                                 rollout_results["meters_advanced_along_centerline"].append(distance_since_track_begin)
                                 rollout_results["input_w"].append(get_config().inputs[action_idx]["accelerate"])
-                                rollout_results["actions"].append(action_idx)
+                                if n_ab > 1:
+                                    rollout_results["actions"].append(np.array(action_or_block, dtype=np.int64))
+                                else:
+                                    rollout_results["actions"].append(action_idx)
                                 rollout_results["action_was_greedy"].append(action_was_greedy)
                                 rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
                                 rollout_results["q_values"].append(q_values)
@@ -824,7 +877,7 @@ class GameInstanceManager:
                                 n_th_action_we_compute += 1
                                 instrumentation__request_inputs_and_speed += time.perf_counter_ns() - pc6
 
-                            if _time % (10 * self.run_steps_per_action * get_config().update_inference_network_every_n_actions) == 0:
+                            if _time % (10 * steps_per_decision * get_config().update_inference_network_every_n_actions) == 0:
                                 update_network()
 
                     # ============================
@@ -947,7 +1000,7 @@ class GameInstanceManager:
                         instrumentation__convert_frame += pc7 - pc6
 
                         (
-                            action_idx,
+                            action_or_block,
                             action_was_greedy,
                             q_value,
                             q_values,
@@ -955,6 +1008,14 @@ class GameInstanceManager:
 
                         pc8 = time.perf_counter_ns()
                         instrumentation__exploration_policy += pc8 - pc7
+
+                        cfg = get_config()
+                        n_ab_frame = cfg.n_actions_per_block
+                        if n_ab_frame > 1:
+                            action_buffer.extend(np.atleast_1d(action_or_block).tolist())
+                            action_idx = int(action_buffer.popleft())
+                        else:
+                            action_idx = int(action_or_block)
 
                         # CRITICAL: Window must be focused at least once after activation
                         # Game needs initial focus to start processing inputs, but doesn't need
@@ -976,7 +1037,10 @@ class GameInstanceManager:
                                 end_race_stats[f"q_value_{i}_starting_frame"] = val
                         rollout_results["meters_advanced_along_centerline"].append(distance_since_track_begin)
                         rollout_results["input_w"].append(get_config().inputs[action_idx]["accelerate"])
-                        rollout_results["actions"].append(action_idx)
+                        if n_ab_frame > 1:
+                            rollout_results["actions"].append(np.array(action_or_block, dtype=np.int64))
+                        else:
+                            rollout_results["actions"].append(action_idx)
                         rollout_results["action_was_greedy"].append(action_was_greedy)
                         rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
                         rollout_results["q_values"].append(q_values)
@@ -993,7 +1057,8 @@ class GameInstanceManager:
                     if self.latest_map_path_requested == -1:  # Game was relaunched and must have console open
                         self.iface.execute_command("toggle_console")
                     self.request_speed(1)
-                    self.iface.set_on_step_period(self.run_steps_per_action * 10)
+                    period_ms = 10 if get_config().n_actions_per_block > 1 else self.run_steps_per_action * 10
+                    self.iface.set_on_step_period(period_ms)
                     self.iface.execute_command(f"set countdown_speed {self.running_speed}")
                     self.iface.execute_command(f"set autologin {get_config().username}")
                     self.iface.execute_command("set unfocused_fps_limit false")

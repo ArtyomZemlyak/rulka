@@ -35,14 +35,20 @@ def write_actions_from_disk_in_tmi_format(infile_path: Path, outfile_path: Path)
     write_actions_in_tmi_format(joblib.load(infile_path), outfile_path)
 
 
-def write_actions_in_tmi_format(action_idxs: List[int], outfile_path: Path):
+def write_actions_in_tmi_format(action_idxs, outfile_path: Path):
     """
-    Input : list of action indices.
-    Output: write a text file on disk containing the corresponding inputs, readable by TMI to load the replay
+    Input : list of action indices (single-action) or list of arrays of shape (N,) per block (multi-action).
+    Output: write a text file on disk containing the corresponding inputs, readable by TMI to load the replay.
+    When n_actions_per_block > 1, each block is flattened to one action per 10ms step.
     """
+    n_ab = get_config().n_actions_per_block
+    if n_ab > 1 and action_idxs and hasattr(action_idxs[0], "__len__") and not isinstance(action_idxs[0], (int, float)):
+        action_idxs = [int(a) for block in action_idxs for a in (block.tolist() if hasattr(block, "tolist") else block)]
+    else:
+        action_idxs = [int(a) for a in action_idxs]
     outfile = open(outfile_path, "w")
     time_from = 0
-    time_delta_s = get_config().tm_engine_step_per_action * 0.01
+    time_delta_s = 0.01 if n_ab > 1 else get_config().tm_engine_step_per_action * 0.01
     last_press = {"accelerate": -1, "brake": -1, "left": -1, "right": -1}
     for action_idx in action_idxs[:-1]:
         action = get_config().inputs[action_idx]
@@ -84,6 +90,9 @@ def make_widget_video_from_q_values_on_disk(q_values_path: Path, video_path: Pat
 
 
 def make_widget_video_from_q_values(q_values: List, video_path: Path, q_value_gap):
+    q_arr = np.array(q_values, dtype=np.float64)
+    if q_arr.ndim == 3:
+        q_values = [q_arr[t, 0, :] for t in range(q_arr.shape[0])]  # (T, N, n_actions) -> use first head per frame
     with tempfile.TemporaryDirectory() as zou_dir:
         path_str = "C:\\Users\\chopi\\projects\\trackmania_rl\\temp"
         temp_dir = Path(path_str)

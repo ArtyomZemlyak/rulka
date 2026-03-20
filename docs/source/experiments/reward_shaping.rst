@@ -98,20 +98,27 @@ BC full IQN resume with engineered rewards (A01_as20_long_full_iqn_bc_3_resume_e
 Experiment Overview
 ~~~~~~~~~~~~~~~~~~~
 
-This run tests **engineered rewards (speedslide and neoslide) on top of a BC full IQN–pretrained agent**. It was **initialized from the checkpoint in** ``save/A01_as20_long_full_iqn_bc_3`` (weights and optimizer state from that run). Unlike the earlier engineer_rewards experiment (no pretrain), the policy thus starts from an already RL-trained BC full IQN; then training continues with higher engineered reward coefficients (0.1 each instead of 0.01).
+This run tests **engineered rewards (speedslide and neoslide) on top of a BC full IQN–pretrained agent**. It was **initialized from the checkpoint in** ``save/A01_as20_long_full_iqn_bc_3`` (weights and optimizer state from that run). Unlike the earlier engineer_rewards experiment (no pretrain), the policy thus starts from an already RL-trained BC full IQN; then training continues with **higher** engineered reward coefficients (**0.1** each). v2 and v3 use **lower** coefficients (0.01/0.01 and 0.05/0.01).
 
 **Goal:** See whether engineered rewards help or hurt when the agent already has good driving priors from BC.
 
 Results
 ~~~~~~~
 
-**Note:** TensorBoard logs for this run were not present under the default ``tensorboard/`` path at documentation time. Run the analysis script with your log dir to get metrics by relative time and by steps. When available, compare to ``A01_as20_long_full_iqn_bc_3`` (same BC pretrain, no engineered rewards) over the same time or step window.
+**Important:** All findings are by **relative time**. Common window for the three runs: **up to 215 min** (baseline ~231 min, v2 ~222 min, v3 ~217 min).
+
+- **Baseline (resume_engineer_rewards, 0.1/0.1):** **No eval finishes** over the full run. Eval race time stays at 300s (timeout), 0% finish rate; ``alltime_min_ms_A01`` remains 300s. Explo also shows 300s until ~300k steps. **Conclusion:** High (0.1/0.1) engineered rewards **broke** the resumed policy — the agent stopped finishing eval (and initially explo) races.
+- **v2 (0.01/0.01)** and **v3 (0.05/0.01):** Both keep **24.52s** best (inherited from checkpoint). v2 improves robust mean (25.60s at 215 min) and explo best (25.04s); v3 gives higher eval finish rate (86%) and better mean eval time (71.11s at 210 min) but worse robust mean (32.29s) and no explo best improvement (26.86s). See the "v2 vs v3" subsection below for full comparison.
 
 Run Analysis
 ~~~~~~~~~~~~
 
-- **A01_as20_long_full_iqn_bc_3_resume_engineer_rewards**: Initialized from ``save/A01_as20_long_full_iqn_bc_3`` (checkpoint and optimizer from that run). ``pretrain_bc_heads_path: null``. ``engineered_speedslide_reward_schedule: [[0, 0.1]]``, ``engineered_neoslide_reward_schedule: [[0, 0.1]]``. Map: A01, reference line ``A01_0.5m_cl.npy``. Config snapshot: ``save/A01_as20_long_full_iqn_bc_3_resume_engineer_rewards/config_snapshot.yaml``.
-- **Baseline for comparison:** ``A01_as20_long_full_iqn_bc_3`` (the run this checkpoint was loaded from; no or zero engineered rewards). Compare by relative time once TensorBoard logs are available.
+- **A01_as20_long_full_iqn_bc_3_resume_engineer_rewards**: Initialized from ``save/A01_as20_long_full_iqn_bc_3``. Speedslide **0.1**, neoslide **0.1**. Map A01, ref ``A01_0.5m_cl.npy``. **~231 min.** **No eval finishes** (0% rate, 300s throughout). Config: ``save/A01_as20_long_full_iqn_bc_3_resume_engineer_rewards/config_snapshot.yaml``.
+- **A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2**: Speedslide 0.01, neoslide 0.01. **~222 min.** Best 24.52s; eval rate 77% at 210 min; explo best 25.04s.
+- **A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3**: Speedslide 0.05, neoslide 0.01. **~217 min.** Best 24.52s; eval rate 86% at 210 min; explo best 26.86s (no improvement).
+- **Baseline for comparison:** ``A01_as20_long_full_iqn_bc_3`` (checkpoint source; no or zero engineered rewards). Compare by relative time when needed.
+
+**Three-way analysis (and plots):** ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_full_iqn_bc_3_resume_engineer_rewards A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2 A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3 --interval 10 --step_interval 100000 --plot --output-dir docs/source/_static --prefix exp_reward_shaping_bc_resume_triple``. Generated JPGs: ``exp_reward_shaping_bc_resume_triple_*.jpg`` (A01 best, loss, avg_q, etc.).
 
 Configuration Changes
 ~~~~~~~~~~~~~~~~~~~~~
@@ -130,9 +137,8 @@ Configuration Changes
 Conclusions and Recommendations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- Document run duration and key metrics (best A01 time, eval finish rate, loss at checkpoints) once TensorBoard data is available.
-- Compare by **relative time** and **by steps** to ``A01_as20_long_full_iqn_bc_3`` to see if 0.1/0.1 engineered rewards improve or degrade performance after BC pretrain.
-- **Analysis command** (when logs exist): ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_full_iqn_bc_3_resume_engineer_rewards A01_as20_long_full_iqn_bc_3 --interval 5 --step_interval 50000`` (add ``--logdir <path>`` if TensorBoard logs are not in ``tensorboard/``).
+- **High (0.1/0.1) engineered rewards** on BC resume **broke** the policy: no eval finishes, 300s timeout throughout. Use **low** coefficients (v2: 0.01/0.01 or v3: 0.05/0.01) when resuming with engineered rewards.
+- Compare by **relative time** and **by steps** to ``A01_as20_long_full_iqn_bc_3`` when needed. For the three resume runs (baseline, v2, v3): ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_full_iqn_bc_3_resume_engineer_rewards A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2 A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3 --interval 10 --step_interval 100000`` (add ``--logdir <path>`` if TensorBoard logs are not in ``tensorboard/``).
 
 
 BC full IQN resume: v2 vs v3 (engineered reward coefficients)

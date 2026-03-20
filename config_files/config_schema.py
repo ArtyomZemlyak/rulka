@@ -5,7 +5,7 @@ All config sections with validation and computed fields.
 
 from pathlib import Path
 from sys import platform
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -46,29 +46,62 @@ class EnvironmentConfig(BaseModel):
     deck_height: Union[str, float] = "-inf"
     game_camera_number: int = 2
     sync_virtual_and_real_checkpoints: bool = True
+    # Multi-action: offsets in ms from current moment, e.g. [0, 10, 20, 30, 40]. Empty or [0] = single action (current behavior).
+    rl_action_offsets_ms: list[int] = Field(default_factory=lambda: [0])
 
     # Computed (filled by validator)
     ms_per_action: int = 0
+    ms_per_block: int = 0  # N * 10 when multi-action, else same as ms_per_action
     max_allowable_distance_to_virtual_checkpoint: float = 0.0
     temporal_mini_race_duration_actions: int = 0
+    n_actions_per_block: int = 1  # len(rl_action_offsets_ms) when multi-action, else 1
 
     @field_validator("deck_height", mode="before")
     @classmethod
     def parse_deck_height(cls, v: Any) -> float:
         return _parse_deck_height(v)
 
+    @field_validator("rl_action_offsets_ms")
+    @classmethod
+    def validate_rl_action_offsets_ms(cls, v: list[int]) -> list[int]:
+        if len(v) == 0:
+            raise ValueError("rl_action_offsets_ms must not be empty")
+        expected = [i * 10 for i in range(len(v))]
+        if v != expected:
+            raise ValueError(
+                f"rl_action_offsets_ms must be consecutive 10ms steps starting from 0: "
+                f"expected {expected}, got {v}. "
+                f"The game engine applies actions every 10ms; non-uniform spacing is not supported."
+            )
+        return v
+
     @model_validator(mode="after")
     def compute_derived(self) -> "EnvironmentConfig":
-        self.ms_per_action = self.ms_per_tm_engine_step * self.tm_engine_step_per_action
         self.max_allowable_distance_to_virtual_checkpoint = float(
             np.sqrt(
                 (self.distance_between_checkpoints / 2) ** 2
                 + (self.road_width / 2) ** 2
             )
         )
-        self.temporal_mini_race_duration_actions = (
-            self.temporal_mini_race_duration_ms // self.ms_per_action
+        # Multi-action: rl_action_offsets_ms e.g. [0, 10, 20, 30, 40] -> N=5
+        use_multi_action = (
+            len(self.rl_action_offsets_ms) > 1
+            or (len(self.rl_action_offsets_ms) == 1 and self.rl_action_offsets_ms[0] != 0)
         )
+        if use_multi_action:
+            self.n_actions_per_block = len(self.rl_action_offsets_ms)
+            self.ms_per_action = self.ms_per_tm_engine_step  # 10 ms per env step
+            self.ms_per_block = self.n_actions_per_block * self.ms_per_tm_engine_step
+            self.temporal_mini_race_duration_actions = (
+                self.temporal_mini_race_duration_ms // self.ms_per_block
+            )
+        else:
+            self.n_actions_per_block = 1
+            self.ms_per_action = self.ms_per_tm_engine_step * self.tm_engine_step_per_action
+            self.ms_per_block = self.ms_per_action
+            self.temporal_mini_race_duration_actions = (
+                self.temporal_mini_race_duration_ms // self.ms_per_action
+            )
         return self
 
 
@@ -190,6 +223,8 @@ class ExplorationConfig(BaseModel):
         default_factory=lambda: [[0, 0.15], [3_000_000, 0.03]]
     )
     tau_epsilon_boltzmann: float = 0.01
+    # When n_actions_per_block > 1: "per_action" = epsilon per each of N actions; "per_block" = one draw for whole block.
+    multi_action_exploration: Literal["per_action", "per_block"] = "per_action"
 
 
 # --- Rewards ---

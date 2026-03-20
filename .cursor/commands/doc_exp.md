@@ -49,11 +49,11 @@ When creating or updating an experiment page, ensure it has:
 - **Wording in docs:** “at 60 min”, “at 70 min”, “common window up to 85 min”, “by relative time”.
 
 - **Relative time and by steps (default for comparisons):**  
-  ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 50000]``  
+  ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 1000000]``  
   Output: (1) tables by **min**, then (2) **BY STEP** tables by training step. Use for both "same wall-clock" and "same steps". Use when runs had different lengths or when you care about “same wall-clock time” comparison. Output: per-race tables (best/mean/std, finish rate, first finish) then scalar metrics.
 ### By steps (mandatory as well)
 
-- **Compare by steps** — training step checkpoints (e.g. 50k, 100k, 150k). Use the **BY STEP** tables printed by the same script; compare only up to the **smallest** max step among runs (equal number of gradient updates).
+- **Compare by steps** — training step checkpoints (default: 1M, 2M, 3M). Use the **BY STEP** tables printed by the same script; compare only up to the **smallest** max step among runs (equal number of gradient updates).
 - **At each checkpoint (step):** same metrics — best/mean/std race times, finish rate, first finish step; scalar loss, Q, GPU % at that step.
 - **Wording in docs:** "at 100k steps", "common step window up to 200k steps", "by steps".
 
@@ -61,7 +61,7 @@ When creating or updating an experiment page, ensure it has:
 
 - **Script:** ``scripts/analyze_experiment_by_relative_time.py``. **Outputs both** relative-time tables and **BY STEP** tables in one run.
 - **Command:**  
-  ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 50000]``  
+  ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 1000000]``  
   Use when runs had different lengths or when you care about "same wall-clock" and "same steps". Output: (1) per-race and scalar tables by **min**, then (2) same by **step** (BY STEP section).
 - **With plots:** add ``--plot --output-dir docs/source/_static --prefix exp_<name>_<runs>`` to save JPG comparison graphs (one metric per file, runs as lines). Example: ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_15 --plot --output-dir docs/source/_static --prefix exp_exploration_uni12_uni15``.
 - **Optional:** ``python scripts/analyze_experiment.py <run1> <run2> ...`` for last-value-only comparison (less meaningful when durations differ).
@@ -163,7 +163,7 @@ With explicit log dir:
 python scripts/analyze_experiment_by_relative_time.py --logdir "C:\...\rulka\tensorboard" uni_5 uni_7 --interval 5
 ```
 
-Save the full console output. Use it to fill the RST: for each comparison subsection, report values **at 5, 10, 20, … min** (relative time) **and at 50k, 100k, … steps** (by steps; use ``--step_interval 50000``), and note the **common window** for both (e.g. “common window up to 85 min”).
+Save the full console output. Use it to fill the RST: for each comparison subsection, report values **at 5, 10, 20, … min** (relative time) **and at 1M, 2M, … steps** (by steps; use ``--step_interval 1000000``), and note the **common window** for both (e.g. “common window up to 85 min”).
 
 **Optional: last-value comparison** (only if runs have the same duration or you need step-based numbers):
 
@@ -222,7 +222,7 @@ Run Analysis
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time and by steps:** Metrics are compared (1) at checkpoints 5, 10, 15, 20, … min (only up to the shortest run) and (2) at step checkpoints 50k, 100k, … (only up to the smallest max step). For race times — best so far at that checkpoint; for loss/Q/GPU% — last value at that moment. Tables: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5] [--step_interval 50000]`` (outputs both relative-time and BY STEP tables). The figures below show one metric per graph (runs as lines, by relative time).
+**Methodology — Relative time and by steps:** Metrics are compared (1) at checkpoints 5, 10, 15, 20, … min (only up to the shortest run) and (2) at step checkpoints 1M, 2M, … (only up to the smallest max step). For race times — best so far at that checkpoint; for loss/Q/GPU% — last value at that moment. Tables: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5] [--step_interval 1000000]`` (outputs both relative-time and BY STEP tables). The figures below show one metric per graph (runs as lines, by relative time).
 
 <Map> Map Performance (e.g. common window up to 85 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -291,7 +291,7 @@ Recommendations
 
 **Analysis Tools:**
 
-- By **relative time and by steps**: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5] [--step_interval 50000]`` (``--logdir "<path>"`` if not from project root). Outputs both relative-time and BY STEP tables.
+- By **relative time and by steps**: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [--interval 5] [--step_interval 1000000]`` (``--logdir "<path>"`` if not from project root). Outputs both relative-time and BY STEP tables.
 - By “last value”: ``python scripts/analyze_experiment.py <run1> <run2> ...`` (less meaningful when durations differ).
 - ``scripts/extract_tensorboard_data.py`` — specific metrics (e.g. ``Gradients/norm_before_clip_max``, ``Performance/transitions_learned_per_second``).
 - Key metrics (see ``docs/source/tensorboard_metrics.rst``): Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Gradients/norm_before_clip_max``.
@@ -325,7 +325,7 @@ When you **only update** an existing file (e.g. training_speed.rst), do **not** 
 
 | Purpose | Command |
 |--------|--------|
-| **Compare by relative time and by steps** (primary when durations differ; 2+ runs) | ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 50000]`` — outputs both relative-time tables and BY STEP tables |
+| **Compare by relative time and by steps** (primary when durations differ; 2+ runs) | ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5] [--step_interval 1000000]`` — outputs both relative-time tables and BY STEP tables |
 | **Same + save comparison plots (JPG)** | Add ``--plot --output-dir docs/source/_static --prefix exp_<name>`` to the command above; one metric per graph, runs as lines |
 | **Build comparison plots only** (one metric per graph, runs as lines) | ``python scripts/plot_experiment_comparison.py <run1> <run2> [--prefix exp_<name>] [--output-dir docs/source/_static]`` — optional ``--by-step`` |
 | **Generate plots for all documented experiments** | ``python scripts/generate_experiment_plots.py`` (default output ``docs/source/_static``); ``--experiments exploration ...`` to limit |
@@ -348,7 +348,7 @@ Align with ``docs/source/tensorboard_metrics.rst``. Priority:
 4. **GPU / throughput**: ``Performance/learner_percentage_training`` (>70% target), ``Performance/transitions_learned_per_second``  
 5. **Stability**: ``Gradients/norm_before_clip_max`` — watch for spikes >100  
 
-When comparing, report these **at the same checkpoints** both by relative time (e.g. 20, 40, 60, 70 min) and by steps (e.g. 50k, 100k steps), not only “at last step”.
+When comparing, report these **at the same checkpoints** both by relative time (e.g. 20, 40, 60, 70 min) and by steps (e.g. 1M, 2M steps), not only “at last step”.
 
 ---
 
@@ -364,17 +364,23 @@ When comparing, report these **at the same checkpoints** both by relative time (
 
 5. **One topic = one file:** Batch/speed/collectors → ``training_speed.rst`` only. Do not add ``training_speed_2.rst`` or one file per run for the same topic. New file only for a **new** topic; then add it to the index.
 
-6. **Comparing when durations differ:** Do **not** compare “last value” or “final loss at step N” across runs of different length. Use ``analyze_experiment_by_relative_time.py`` and document metrics **at 5, 10, 20, … min** (relative time) **and at 50k, 100k, … steps** (by steps), and the **common window** for both. State clearly when conclusions are “by relative time”.
+6. **Comparing when durations differ:** Do **not** compare “last value” or “final loss at step N” across runs of different length. Use ``analyze_experiment_by_relative_time.py`` and document metrics **at 5, 10, 20, … min** (relative time) **and at 1M, 2M, … steps** (by steps), and the **common window** for both. State clearly when conclusions are “by relative time”.
 
-7. **Language:** All experiment docs in ``docs/source/experiments/`` must be in **English**.
+7. **Suffix chunks are mandatory:** Treat one run as ``tensorboard/<run>``, ``<run>_2``, ``<run>_3``, ... (continuation chunks). Never analyze only base folder when suffix dirs exist. The primary script already merges them; verify with ``[INFO] ... merging ...`` lines in output.
 
-8. **Unicode in scripts:** If you add or change scripts that print to the console on Windows, avoid characters like ``≈`` or ``—`` in output (cp1252 can fail). Use ``~`` and ``-`` instead.
+8. **Save-state cross-check is mandatory for final best:** For each key run in conclusions, confirm final best from ``save/<run>/accumulated_stats.joblib`` (``alltime_min_ms['A01']`` etc.) and reconcile with TensorBoard-derived values. If numbers differ, explain why (usually suffix chunk omission or overlap window limits).
 
-9. **Comparison plot JPGs:** After running ``generate_experiment_plots.py`` (with TensorBoard logs present), **commit** the new/updated ``docs/source/_static/exp_*.jpg`` files so the built docs show the graphs. TensorBoard and ``save/`` are not committed; the generated plot images are. After **any change to the plotting script** (e.g. robust y-axis, new metrics), regenerate all plots with ``generate_experiment_plots.py`` and commit the updated JPGs.
+9. **Main-run pair check is mandatory:** For claims like “new best”, always run a direct pairwise comparison of the strongest baselines (e.g. ``A01_as20_long_v2`` vs ``A01_as20_long_v3.1``) by both relative time and by-step before writing conclusions.
 
-10. **Embedding plots:** When adding or updating experiment docs, **embed** comparison plots correctly: place each image **right after** the metric subsection it illustrates; add **``:alt:``** to every image with a short caption (metric + runs); add **one intro sentence** at the start of "Detailed TensorBoard Metrics Analysis" that the figures show one metric per graph, runs as lines, by relative time. See "Embedding plots in RST (quality)".
+10. **Language:** All experiment docs in ``docs/source/experiments/`` must be in **English**.
 
-11. **Pretrain experiments:** Use **epoch-based** comparison (not relative wall-clock time). Data source is **Lightning CSV** (and optionally TensorBoard); columns are train_loss, val_loss, train_acc, val_acc, train_acc_class_0..N, val_acc_class_0..N. In docs, report **per-action accuracy with human-readable names** (accel, left+accel, right+accel, coast, left, right, brake, left+brake, right+brake, accel+brake, left+accel+brake, right+accel+brake), not only "class 0, 1, 2". Use ``scripts/analyze_pretrain_bc.py``; it maps class index to these names. If you extend ``extract_tensorboard_data.py`` for other log types (e.g. pretrain TensorBoard), support different tag sets (no Race/..., no RL/avg_Q; use train_loss, val_loss, val_acc, etc.).
+11. **Unicode in scripts:** If you add or change scripts that print to the console on Windows, avoid characters like ``≈`` or ``—`` in output (cp1252 can fail). Use ``~`` and ``-`` instead.
+
+12. **Comparison plot JPGs:** After running ``generate_experiment_plots.py`` (with TensorBoard logs present), **commit** the new/updated ``docs/source/_static/exp_*.jpg`` files so the built docs show the graphs. TensorBoard and ``save/`` are not committed; the generated plot images are. After **any change to the plotting script** (e.g. robust y-axis, new metrics), regenerate all plots with ``generate_experiment_plots.py`` and commit the updated JPGs.
+
+13. **Embedding plots:** When adding or updating experiment docs, **embed** comparison plots correctly: place each image **right after** the metric subsection it illustrates; add **``:alt:``** to every image with a short caption (metric + runs); add **one intro sentence** at the start of "Detailed TensorBoard Metrics Analysis" that the figures show one metric per graph, runs as lines, by relative time. See "Embedding plots in RST (quality)".
+
+14. **Pretrain experiments:** Use **epoch-based** comparison (not relative wall-clock time). Data source is **Lightning CSV** (and optionally TensorBoard); columns are train_loss, val_loss, train_acc, val_acc, train_acc_class_0..N, val_acc_class_0..N. In docs, report **per-action accuracy with human-readable names** (accel, left+accel, right+accel, coast, left, right, brake, left+brake, right+brake, accel+brake, left+accel+brake, right+accel+brake), not only "class 0, 1, 2". Use ``scripts/analyze_pretrain_bc.py``; it maps class index to these names. If you extend ``extract_tensorboard_data.py`` for other log types (e.g. pretrain TensorBoard), support different tag sets (no Race/..., no RL/avg_Q; use train_loss, val_loss, val_acc, etc.).
 
 ---
 

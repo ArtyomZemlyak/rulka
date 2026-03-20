@@ -599,6 +599,59 @@ Experiment: Full IQN BC with V_head trained (v4_multi_offset vs v3_multi_offset)
 
 **General takeaway:** With the *only* change being “we now train V_head too”, v4 improves pretrain metrics across the board. So jointly training V_head in BC is beneficial and does not hurt; prefer v4 for full IQN pretrain.
 
+Experiment: Multi-offset BC fused heads (v5_multi_offset vs v4_multi_offset)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Overview:** This experiment tests a new multi-offset BC variant where we (1) shorten the offset horizon to ``bc_time_offsets_ms: [0, 10, 20, 30, 40]`` (5 heads) instead of v4's 11 heads up to 100 ms, and (2) switch the multi-offset architecture to ``bc_multi_offset_mode: fused`` (shared ``A_head`` producing ``N*n_actions`` outputs). The run keeps the same overall BC target semantics (``bc_target: current_tick``) and uses IQN-style image normalization and the full IQN model (``use_full_iqn: true``).
+
+**Config:** ``config_files/pretrain/bc/pretrain_config_bc_v5_multi_offset.yaml`` (run_name: ``v5_multi_offset``). Key overrides:
+
+- ``bc_time_offsets_ms: [0, 10, 20, 30, 40]``
+- ``bc_offset_weights: [1.0, 1.0, 1.0, 1.0, 1.0]``
+- ``bc_multi_offset_mode: fused``
+- ``full_iqn_random_tau: true``
+
+**Run:**
+
+.. code-block:: bash
+
+  python scripts/pretrain_bc.py --config config_files/pretrain/bc/pretrain_config_bc_v5_multi_offset.yaml
+
+**Analysis:** Compare v5 vs v4 (both by epoch) using Lightning CSV:
+
+.. code-block:: bash
+
+  python scripts/analyze_pretrain_bc.py output/ptretrain/bc/v5_multi_offset output/ptretrain/bc/v4_multi_offset --interval 5
+
+**Results (by epoch; both runs trained 50 epochs):**
+
+- **Best epoch by val_loss:** both are best at **epoch 49**.
+- **Overall accuracy:** ``v5_multi_offset`` improves over v4: ``val_acc=0.9359`` vs ``0.8962``.
+- **Main actions validation accuracy** (mean over accel, left+accel, right+accel, coast, left+accel+brake, right+accel+brake): ``v5_multi_offset`` ``main_actions_val_acc=0.7858`` vs ``v4_multi_offset`` ``0.7908`` (very close).
+- **Loss note:** ``val_loss`` scales with the number of offset heads and the loss weighting, so it is not directly comparable across v5 (5 heads) vs v4 (11 heads). Use ``val_acc`` and per-offset/per-action accuracies for comparison.
+
+**Per-offset validation accuracy (final epoch):**
+
+- **v5_multi_offset** (offsets 0..40 ms): 0 ms 0.9716; 10 ms 0.9496; 20 ms 0.9320; 30 ms 0.9186; 40 ms 0.9077.
+- **v4_multi_offset** (common offsets 0..40 ms): 0 ms 0.9721; 10 ms 0.9479; 20 ms 0.9268; 30 ms 0.9106; 40 ms 0.8964 (v4 also continues to 100 ms with decreasing accuracy).
+
+.. image:: ../../_static/exp_pretrain_bc_v5_multi_offset_per_offset_final_epoch.jpg
+   :alt: Per-offset validation accuracy at final epoch (v5_multi_offset, offsets 0-40 ms)
+
+.. image:: ../../_static/exp_pretrain_bc_v4_multi_offset_per_offset_final_epoch.jpg
+   :alt: Per-offset validation accuracy at final epoch (v4_multi_offset, offsets 0-100 ms)
+
+**Per-action validation accuracy (final epoch, action names):**
+
+- v5 matches v4 on dominant actions like ``accel`` (0.9796 vs 0.9786) and ``left+accel`` / ``right+accel`` (both around 0.962-0.963).
+- v4 is better on ``coast`` (0.8867 vs 0.8594) and ``right+brake`` (0.7805 vs 0.3659).
+- v5 is better on ``left`` (0.8333 vs 0.6667), ``left+brake`` (0.5556 vs 0.3333), and ``accel+brake`` (0.6522 vs 0.6087).
+
+.. image:: ../../_static/exp_pretrain_bc_v5_multi_offset_v4_multi_offset_per_action_accuracy.jpg
+   :alt: Per-action validation accuracy vs epoch (v5_multi_offset vs v4_multi_offset)
+
+**Conclusion:** With fewer offset heads (0-40 ms) and the fused multi-offset architecture, ``v5_multi_offset`` achieves a noticeably higher overall ``val_acc`` while keeping ``main_actions_val_acc`` essentially unchanged vs v4. It trades some performance on ``coast`` and ``right+brake`` for gains on ``left`` / ``left+brake`` / ``accel+brake``.
+
 Configuration Changes (v2 chain)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

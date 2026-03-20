@@ -109,6 +109,13 @@ use_full_iqn: true
 # When use_full_iqn true: true = sample tau ~ U(0,1) per batch; false = fixed tau=0.5.
 full_iqn_random_tau: true
 
+# Multi-offset architecture mode (use_full_iqn + bc_time_offsets_ms with >1 entry):
+#   "separate_heads" — N independent A_head clones (backward-compat, default).
+#   "fused"          — RL-identical architecture: shared A_head (Linear+LeakyReLU)
+#                      + A_head_multi (fused Linear outputting N*n_actions).
+#                      iqn_bc.pt can be loaded 1:1 into RL without key remapping.
+bc_multi_offset_mode: separate_heads
+
 
 # ---------------------------------------------------------------------------
 # Training (common loop parameters)

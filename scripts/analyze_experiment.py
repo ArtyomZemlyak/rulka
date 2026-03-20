@@ -7,31 +7,49 @@ from pathlib import Path
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from typing import Dict, List, Tuple, Optional
 
+# tensorboard_suffix_schedule creates run_2, run_3, ... at step thresholds; treat them as one run.
+SUFFIXES = ["", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9", "_10"]
 
-def get_metric_data(run_path: Path, metric_tag: str) -> List[Tuple[int, float]]:
-    """Extract metric data from TensorBoard event files."""
-    if not run_path.exists():
-        return []
-    
-    try:
-        ea = EventAccumulator(str(run_path))
-        ea.Reload()
-        tags = ea.Tags().get('scalars', [])
-        
-        if metric_tag in tags:
-            scalar_events = ea.Scalars(metric_tag)
-            return [(event.step, event.value) for event in scalar_events]
+
+def discover_run_paths(base_dir: Path, run_name: str) -> List[Path]:
+    """Find all TensorBoard log dirs for a run (run_name, run_name_2, run_name_3, ...)."""
+    paths: List[Path] = []
+    for suf in SUFFIXES:
+        p = base_dir / (run_name + suf)
+        if p.exists():
+            paths.append(p)
+        elif suf == "":
+            break  # base run missing
         else:
-            return []
-    except Exception as e:
-        print(f"Error loading {run_path}: {e}")
-        return []
+            # keep looking, but stop at first missing suffixed dir
+            break
+    return paths
+
+
+def get_metric_data_from_paths(run_paths: List[Path], metric_tag: str) -> List[Tuple[int, float]]:
+    """Extract metric data from multiple TensorBoard run chunks and merge by step."""
+    all_points: List[Tuple[int, float]] = []
+    for run_path in run_paths:
+        if not run_path.exists():
+            continue
+        try:
+            ea = EventAccumulator(str(run_path))
+            ea.Reload()
+            tags = ea.Tags().get('scalars', [])
+            
+            if metric_tag in tags:
+                scalar_events = ea.Scalars(metric_tag)
+                all_points.extend([(event.step, event.value) for event in scalar_events])
+        except Exception as e:
+            print(f"Error loading {run_path}: {e}")
+            continue
+
+    all_points.sort(key=lambda x: x[0])
+    return all_points
 
 
 def analyze_run(run_name: str, base_dir: Path = Path("tensorboard")) -> Dict:
     """Analyze a single run and return metrics."""
-    run_path = base_dir / run_name
-    
     metrics = {
         'hock_best_time': 'alltime_min_ms_hock',
         'a01_best_time': 'alltime_min_ms_A01',
@@ -42,9 +60,13 @@ def analyze_run(run_name: str, base_dir: Path = Path("tensorboard")) -> Dict:
         'race_time_robust_hock': 'Race/eval_race_time_robust_trained_hock',
     }
     
+    run_paths = discover_run_paths(base_dir, run_name)
+    if not run_paths:
+        run_paths = [base_dir / run_name]
+
     results = {}
     for metric_name, metric_tag in metrics.items():
-        data = get_metric_data(run_path, metric_tag)
+        data = get_metric_data_from_paths(run_paths, metric_tag)
         if data:
             results[metric_name] = {
                 'data': data,

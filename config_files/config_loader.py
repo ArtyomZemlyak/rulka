@@ -284,7 +284,7 @@ def load_config(config_path: Path | str) -> ConfigView:
         waypoint_std_40cp=state_norm_data.get("waypoint_std_40cp", []),
     )
 
-    # Compute cross-section values
+    # Compute cross-section values (prev_actions: 4 floats per individual action)
     neural.float_input_dim = (
         27
         + 3 * env.n_zone_centers_in_inputs

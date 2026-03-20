@@ -166,6 +166,19 @@ class BCPretrainConfig(BaseSettings):
         default=False,
         description="When use_full_iqn True: if True sample tau ~ U(0,1) per batch; if False use fixed tau=0.5. Only used when use_full_iqn is True.",
     )
+    # Multi-offset architecture mode (only matters when use_full_iqn + bc_time_offsets_ms has >1 entry):
+    #   "separate_heads" — N independent A_head clones (IQN_BC_MultiOffset). Default; backward-compatible.
+    #   "fused"          — RL-style A_head (shared Linear+LeakyReLU) + A_head_multi (fused Linear outputting
+    #                      N * n_actions). Architecture is identical to RL IQN with n_actions_per_block=N,
+    #                      so iqn_bc.pt can be loaded 1:1 into RL without any key remapping.
+    bc_multi_offset_mode: Literal["separate_heads", "fused"] = Field(
+        default="separate_heads",
+        description=(
+            "Multi-offset architecture when use_full_iqn + n_offsets > 1. "
+            "'separate_heads' = N independent A_head clones (backward-compat); "
+            "'fused' = RL-identical A_head + A_head_multi for direct RL transfer."
+        ),
+    )
     # dense_hidden_dimension, iqn_embedding_dimension loaded from rl_config_path.
     dropout: float = Field(
         default=0.0,

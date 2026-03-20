@@ -15,7 +15,7 @@ class Experience:
                                                 next_state_img is a np.array of shape (1, H, W) and dtype np.uint8
                                                 next_state_float is a np.array of shape (config.float_input_dim, ) and dtype np.float32
     (state_potential and next_state_potential)  are floats, used for reward shaping as per Andrew Ng's paper: https://people.eecs.berkeley.edu/~russell/papers/icml99-shaping.pdf
-    action                                      is an integer representing the action taken for this transition, mapped to config_files/inputs_list.py
+    action                                      is an int (single-action) or np.ndarray of shape (n_actions_per_block,) (multi-action) representing the action(s) for this transition
     terminal_actions                            is an integer representing the number of steps between "state" and race finish in the rollout from which this transition was extracted. If the rollout did not finish (ie: early cutoff), then contains math.inf
     n_steps                                     How many steps were taken between "state" and "next state". Not all transitions contain the same value, as this may depend on exploration policy. Note that in buffer_collate_function, a transition may be reinterpreted as terminal with a lower n_steps, depending on the random horizon that was sampled.
     gammas                                      a numpy array of shape (config.n_steps, ) containing the gamma value if steps = 0, 1, 2, etc...
@@ -44,7 +44,7 @@ class Experience:
         state_img: npt.NDArray,
         state_float: npt.NDArray,
         state_potential: float,
-        action: int,
+        action,  # int or npt.NDArray of shape (N,) for multi-action
         n_steps: int,
         rewards: npt.NDArray,
         next_state_img: npt.NDArray,
