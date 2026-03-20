@@ -47,7 +47,9 @@ EXPERIMENTS = [
     {"name": "pretrain_bc_enc_ah_freeze_resume", "runs": ["A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze", "A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze_resume"], "prefix": "exp_pretrain_bc_enc_ah_freeze_resume"},
     {"name": "reward_shaping", "runs": ["A01_as20_long", "A01_as20_long_engineer_rewards"], "prefix": "exp_reward_shaping"},
     {"name": "reward_shaping_bc_resume_v2_v3", "runs": ["A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2", "A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3"], "prefix": "exp_reward_shaping_bc_resume_v2_v3"},
+    {"name": "reward_shaping_bc_resume_triple", "runs": ["A01_as20_long_full_iqn_bc_3_resume_engineer_rewards", "A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2", "A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3"], "prefix": "exp_reward_shaping_bc_resume_triple"},
     {"name": "iqn_no_image_head", "runs": ["A01_as20_long", "A01_as20_long_no_image"], "prefix": "exp_iqn_no_image_head"},
+    {"name": "global_schedule_speed_v2", "runs": ["A01_as20_long_v2", "A01_as20_long_v2.1", "A01_as20_long_v2.4"], "prefix": "exp_global_schedule_speed_v2"},
 ]
 
 

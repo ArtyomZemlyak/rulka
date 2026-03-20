@@ -38,7 +38,10 @@ def fast_collate_cpu(batch, attr_name):
     buffer = torch.empty(size=shape, dtype=data_type, pin_memory=True).numpy()
     attr_getter = attrgetter(attr_name)
     source = [attr_getter(memory) for memory in batch]
-    buffer[:] = source[:]
+    if elem_array:
+        buffer[:] = np.stack(source)
+    else:
+        buffer[:] = np.array(source)
     return buffer
 
 

@@ -336,6 +336,9 @@ for a in run_dir.iterdir():
     )
 
     q_values = joblib.load(run_dir / run_name / "q_values.joblib")
+    q_values = np.asarray(q_values)
+    if q_values.ndim == 3:
+        q_values = q_values[:, 0, :]  # (T, N, n_actions) -> (T, n_actions) use first head for widget
     video_path = Path(r"D:\video2\widgets") / f"{run_name}.mov"
 
     def foo(frame_id):

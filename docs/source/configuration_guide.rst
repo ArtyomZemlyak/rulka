@@ -86,7 +86,39 @@ Timing Configuration
    
    Calculated as: ``tm_engine_step_per_action × ms_per_tm_engine_step``
    
-   With defaults: 5 × 10ms = 50ms (20 actions/second)
+   With defaults: 5 × 10ms = 50ms (20 actions/second).
+   
+   When **multi-action** is enabled (``rl_action_offsets_ms`` has more than one offset), the rollout uses 10ms per step and this value is 10; one "decision" spans ``ms_per_block`` (see below).
+
+Multi-action (N future actions)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. py:data:: rl_action_offsets_ms
+   :type: list[int]
+   :value: [0]
+
+   **Temporal offsets in milliseconds** for predicting N actions in one forward pass (BC-style).
+   
+   - **Empty or ``[0]``**: Single-action mode (one action per decision, current behavior). ``tm_engine_step_per_action`` controls step period.
+   - **e.g. ``[0, 10, 20, 30, 40]``**: Multi-action mode. The policy outputs N=5 actions applied at 0, 10, 20, 30, 40 ms from the current state. Rollout runs at 10ms step period; one forward pass per block of N steps.
+   
+   All values must be multiples of 10. Typically use consecutive 10ms steps (0, 10, 20, …).
+
+.. py:data:: n_actions_per_block
+   :type: int
+   :value: 1
+
+   **Number of actions per block** (computed from ``rl_action_offsets_ms``).
+   
+   Equals ``len(rl_action_offsets_ms)`` when multi-action is enabled, else 1. One replay transition = one block (state, N actions, sum of rewards over N steps, next state).
+
+.. py:data:: ms_per_block
+   :type: int
+   :value: 50
+
+   **Milliseconds per decision block** (computed).
+   
+   When multi-action: ``n_actions_per_block × 10``. When single-action: same as ``ms_per_action``. Used for reward aggregation and mini-race duration in steps.
 
 Spatial Configuration
 ---------------------
@@ -357,6 +389,8 @@ Contact and Physics
    **Current:** 5 actions. With 50 ms per action, this is 250 ms of action history (~0.25 s).
    
    Changing this value changes ``float_input_dim`` (add or subtract 4 per action); it is computed from config at load time.
+   
+   **Multi-action (N>1):** The state stores the last ``n_prev_actions_in_inputs`` **individual actions** (flattened from blocks). Total action floats = 4 × n_prev_actions_in_inputs, same as single-action. Increase the value to keep the same temporal coverage (e.g. 25 at 10ms = 250ms ≈ 5 at 50ms).
 
 Timeouts
 --------
@@ -1208,6 +1242,15 @@ Epsilon-Boltzmann
    
    - Low (0.01-0.1): Well-calibrated Q-values
    - High (0.5-1.0): Noisy Q-values, need more exploration
+
+.. py:data:: multi_action_exploration
+   :type: str
+   :value: "per_action"
+
+   **How to apply epsilon-greedy when predicting N actions per block** (only when ``n_actions_per_block`` > 1).
+   
+   - **``per_action``** (default): Each of the N actions is chosen independently with probability epsilon for a random action. So the block can mix greedy and random per time step.
+   - **``per_block``**: One draw per block: with probability epsilon the entire block is random (all N actions random), otherwise the entire block is greedy.
 
 Rewards Configuration
 =====================

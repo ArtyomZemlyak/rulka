@@ -8,7 +8,7 @@ In this file, we define:
 import copy
 import math
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -70,10 +70,12 @@ class IQN_Network(torch.nn.Module):
         float_inputs_mean: npt.NDArray,
         float_inputs_std: npt.NDArray,
         use_image_head: bool = True,
+        n_actions_per_block: int = 1,
     ):
         super().__init__()
         self.iqn_embedding_dimension = iqn_embedding_dimension
         self.use_image_head = use_image_head
+        self.n_actions_per_block = n_actions_per_block
         activation_function = torch.nn.LeakyReLU
         if use_image_head:
             img_head_channels = [1, 16, 32, 64, 32]
@@ -98,12 +100,21 @@ class IQN_Network(torch.nn.Module):
         )
 
         dense_input_dimension = (conv_head_output_dim if use_image_head else 0) + float_hidden_dim
+        a_head_hidden = dense_hidden_dimension // 2
 
-        self.A_head = torch.nn.Sequential(
-            torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
-            activation_function(inplace=True),
-            torch.nn.Linear(dense_hidden_dimension // 2, n_actions),
-        )
+        if n_actions_per_block <= 1:
+            self.A_head = torch.nn.Sequential(
+                torch.nn.Linear(dense_input_dimension, a_head_hidden),
+                activation_function(inplace=True),
+                torch.nn.Linear(a_head_hidden, n_actions),
+            )
+            self.A_head_multi = None
+        else:
+            self.A_head = torch.nn.Sequential(
+                torch.nn.Linear(dense_input_dimension, a_head_hidden),
+                activation_function(inplace=True),
+            )
+            self.A_head_multi = torch.nn.Linear(a_head_hidden, n_actions_per_block * n_actions)
         self.V_head = torch.nn.Sequential(
             torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
             activation_function(inplace=True),
@@ -121,7 +132,8 @@ class IQN_Network(torch.nn.Module):
     def initialize_weights(self):
         lrelu_neg_slope = 1e-2
         activation_gain = torch.nn.init.calculate_gain("leaky_relu", lrelu_neg_slope)
-        modules_to_init = [self.float_feature_extractor, self.A_head[:-1], self.V_head[:-1]]
+        a_head_first = self.A_head[:-1] if self.A_head_multi is None else self.A_head
+        modules_to_init = [self.float_feature_extractor, a_head_first, self.V_head[:-1]]
         if self.img_head is not None:
             modules_to_init.insert(0, self.img_head)
         for module in modules_to_init:
@@ -131,8 +143,11 @@ class IQN_Network(torch.nn.Module):
         utilities.init_orthogonal(
             self.iqn_fc[0], np.sqrt(2) * activation_gain
         )  # Since cosine has a variance of 1/2, and we would like to exit iqn_fc with a variance of 1, we need a weight variance double that of what a normal leaky relu would need
-        for module in [self.A_head[-1], self.V_head[-1]]:
-            utilities.init_orthogonal(module)
+        if self.A_head_multi is None:
+            utilities.init_orthogonal(self.A_head[-1])
+        else:
+            utilities.init_orthogonal(self.A_head_multi)
+        utilities.init_orthogonal(self.V_head[-1])
 
     def forward(
         self, img: torch.Tensor, float_inputs: torch.Tensor, num_quantiles: int, tau: Optional[torch.Tensor] = None
@@ -190,11 +205,15 @@ class IQN_Network(torch.nn.Module):
         # (batch_size*num_quantiles, dense_input_dimension)
         concat = concat * quantile_net
 
-        A = self.A_head(concat)  # (batch_size*num_quantiles, n_actions)
         V = self.V_head(concat)  # (batch_size*num_quantiles, 1)
-
-        Q = V + A - A.mean(dim=-1).unsqueeze(-1)
-
+        if self.A_head_multi is None:
+            A = self.A_head(concat)  # (batch_size*num_quantiles, n_actions)
+            Q = V + A - A.mean(dim=-1).unsqueeze(-1)
+            return Q, tau
+        # Multi-action: shared first layer + single fused Linear for all N heads
+        a_hidden = self.A_head(concat)  # (batch_size*num_quantiles, a_head_hidden)
+        A = self.A_head_multi(a_hidden).view(-1, self.n_actions_per_block, self.n_actions)  # (B, N, n_actions)
+        Q = V.unsqueeze(1) + A - A.mean(dim=-1, keepdim=True)  # (B, N, n_actions)
         return Q, tau
 
     def to(self, *args, **kwargs):
@@ -294,6 +313,7 @@ class Trainer:
             grad_norm_before_clip: a float (before clipping)
             priority_update: None or (indices, priorities) tuple for Phase C
         """
+        cfg = get_config()
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -307,79 +327,95 @@ class Trainer:
                     next_state_float_tensor,
                     gammas_terminal,
                 ) = batch
-                if get_config().prio_alpha > 0:
+                if cfg.prio_alpha > 0:
                     IS_weights = torch.from_numpy(batch_info["_weight"]).to("cuda", non_blocking=True)
 
-                rewards = rewards.unsqueeze(-1).repeat(
-                    [self.iqn_n, 1]
-                )  # (batch_size*iqn_n, 1)
+                n_ab = self.online_network.n_actions_per_block
+                rewards = rewards.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
                 gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
-                actions = actions.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
-                #
-                #   Use target_network to evaluate the action chosen, per quantile.
-                #
+                # actions: (batch_size, N) with N=n_actions_per_block (N>=1)
+                actions = actions.repeat([self.iqn_n, 1])  # (batch_size*iqn_n, N)
+
                 q__stpo__target__quantiles_tau2, tau2 = self.target_network(
                     next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
-                )  # (batch_size*iqn_n, n_actions)
-                #
-                #   Use online network to choose an action for next state.
-                #   This action is chosen AFTER reduction to the mean, and repeated to all quantiles
-                #
-                if get_config().use_ddqn:
-                    a__tpo__online__reduced_repeated = (
-                        self.online_network(
-                            next_state_img_tensor,
-                            next_state_float_tensor,
-                            self.iqn_n,
-                            tau=None,
-                        )[0]
-                        .reshape([self.iqn_n, self.batch_size, self.online_network.n_actions])
-                        .mean(dim=0)
-                        .argmax(dim=1, keepdim=True)
-                        .repeat([self.iqn_n, 1])
-                    )  # (iqn_n * batch_size, 1)
-                    #
-                    #   Build IQN target on tau2 quantiles
-                    #
-                    outputs_target_tau2 = rewards + gammas_terminal * q__stpo__target__quantiles_tau2.gather(
-                        1, a__tpo__online__reduced_repeated
-                    )  # (batch_size*iqn_n, 1)
-                else:
-                    outputs_target_tau2 = (
-                        rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
-                    )  # (batch_size*iqn_n, 1)
+                )
+                # q__stpo: (batch*iqn_n, n_actions) when N==1, else (batch*iqn_n, N, n_actions)
 
-                #
-                #   This is our target
-                #
+                if n_ab <= 1:
+                    if cfg.use_ddqn:
+                        a__tpo__online__reduced_repeated = (
+                            self.online_network(
+                                next_state_img_tensor,
+                                next_state_float_tensor,
+                                self.iqn_n,
+                                tau=None,
+                            )[0]
+                            .reshape([self.iqn_n, self.batch_size, self.online_network.n_actions])
+                            .mean(dim=0)
+                            .argmax(dim=1, keepdim=True)
+                            .repeat([self.iqn_n, 1])
+                        )
+                        outputs_target_tau2 = rewards + gammas_terminal * q__stpo__target__quantiles_tau2.gather(
+                            1, a__tpo__online__reduced_repeated
+                        )
+                    else:
+                        outputs_target_tau2 = (
+                            rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
+                        )
+                else:
+                    # Multi-action: factorized Q. Target = R + gamma * sum_i max_a Q_i(s')[a]
+                    if cfg.use_ddqn:
+                        q_online_next, _ = self.online_network(
+                            next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
+                        )
+                        q_on_next = q_online_next.reshape(
+                            [self.iqn_n, self.batch_size, n_ab, self.online_network.n_actions]
+                        ).mean(dim=0)
+                        a_next = q_on_next.argmax(dim=2)  # (batch_size, N)
+                        a_next_repeated = a_next.repeat([self.iqn_n, 1])  # (batch*iqn_n, N)
+                        target_gather = torch.gather(
+                            q__stpo__target__quantiles_tau2, 2, a_next_repeated.unsqueeze(-1)
+                        ).sum(dim=1)  # (batch*iqn_n, 1)
+                        outputs_target_tau2 = rewards + gammas_terminal * target_gather
+                    else:
+                        target_sum = q__stpo__target__quantiles_tau2.max(dim=2)[0].sum(dim=1, keepdim=True)
+                        outputs_target_tau2 = rewards + gammas_terminal * target_sum
+
                 outputs_target_tau2 = outputs_target_tau2.reshape([self.iqn_n, self.batch_size, 1]).transpose(
                     0, 1
                 )  # (batch_size, iqn_n, 1)
 
             q__st__online__quantiles_tau3, tau3 = self.online_network(
                 state_img_tensor, state_float_tensor, self.iqn_n, tau=None
-            )  # (batch_size*iqn_n,n_actions)
-            outputs_tau3 = (
-                q__st__online__quantiles_tau3.gather(1, actions).reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
-            )  # (batch_size, iqn_n, 1)
+            )
+            if n_ab <= 1:
+                outputs_tau3 = (
+                    q__st__online__quantiles_tau3.gather(1, actions).reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
+                )
+            else:
+                # Factorized Q: sum_i Q_i(s)[a_i] — single vectorized gather
+                current_q = torch.gather(
+                    q__st__online__quantiles_tau3, 2, actions.unsqueeze(-1)
+                ).sum(dim=1)  # (batch*iqn_n, 1)
+                outputs_tau3 = current_q.reshape([self.iqn_n, self.batch_size, 1]).transpose(0, 1)
 
-            loss = iqn_loss(outputs_target_tau2, outputs_tau3, tau3, get_config().iqn_n, get_config().batch_size)
+            loss = iqn_loss(outputs_target_tau2, outputs_tau3, tau3, cfg.iqn_n, cfg.batch_size)
 
             target_self_loss = torch.sqrt(
                 iqn_loss(
-                    outputs_target_tau2.detach(), outputs_target_tau2.detach(), tau2.detach(), get_config().iqn_n, get_config().batch_size
+                    outputs_target_tau2.detach(), outputs_target_tau2.detach(), tau2.detach(), cfg.iqn_n, cfg.batch_size
                 )
             )
 
             self.typical_self_loss = 0.99 * self.typical_self_loss + 0.01 * target_self_loss.mean()
 
-            correction_clamped = target_self_loss.clamp(min=self.typical_self_loss / get_config().target_self_loss_clamp_ratio)
+            correction_clamped = target_self_loss.clamp(min=self.typical_self_loss / cfg.target_self_loss_clamp_ratio)
 
             self.typical_clamped_self_loss = 0.99 * self.typical_clamped_self_loss + 0.01 * correction_clamped.mean()
 
             loss *= self.typical_clamped_self_loss / correction_clamped
 
-            total_loss = torch.sum(IS_weights * loss if get_config().prio_alpha > 0 else loss)
+            total_loss = torch.sum(IS_weights * loss if cfg.prio_alpha > 0 else loss)
 
             if do_learn:
                 self.scaler.scale(total_loss).backward()
@@ -394,9 +430,9 @@ class Trainer:
                 
                 # Now clip gradients
                 grad_norm = (
-                    torch.nn.utils.clip_grad_norm_(self.online_network.parameters(), get_config().clip_grad_norm).detach().cpu().item()
+                    torch.nn.utils.clip_grad_norm_(self.online_network.parameters(), cfg.clip_grad_norm).detach().cpu().item()
                 )
-                torch.nn.utils.clip_grad_value_(self.online_network.parameters(), get_config().clip_grad_value)
+                torch.nn.utils.clip_grad_value_(self.online_network.parameters(), cfg.clip_grad_value)
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -408,8 +444,8 @@ class Trainer:
 
             # Compute priority update data (CPU tensors) but don't write to buffer yet
             priority_update = None
-            if get_config().prio_alpha > 0:
-                mask_update_priority = torch.lt(state_float_tensor[:, 0], get_config().min_horizon_to_update_priority_actions).detach().cpu()
+            if cfg.prio_alpha > 0:
+                mask_update_priority = torch.lt(state_float_tensor[:, 0], cfg.min_horizon_to_update_priority_actions).detach().cpu()
                 priority_indices = batch_info["index"][mask_update_priority]
                 priority_values = (
                     (outputs_tau3.mean(axis=1) - outputs_target_tau2.mean(axis=1))
@@ -477,7 +513,7 @@ class Inferer:
             tau:                a torch.Tensor of shape (iqn_k,  1)
 
         Returns:
-            q_values:           a numpy array of shape (iqn_k, 1)
+            q_values: when n_actions_per_block==1, shape (iqn_k, n_actions); when N>1, shape (iqn_k, N, n_actions).
         """
         with torch.no_grad():
             state_img_tensor = (
@@ -492,7 +528,7 @@ class Inferer:
                     state_img_tensor,
                     state_float_tensor,
                     self.iqn_k,
-                    tau=tau,  # torch.linspace(0.05, 0.95, self.iqn_k, device="cuda")[:, None],
+                    tau=tau,
                 )[0]
                 .cpu()
                 .numpy()
@@ -500,43 +536,66 @@ class Inferer:
             )
             return q_values
 
-    def get_exploration_action(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray) -> Tuple[int, bool, float, npt.NDArray]:
+    def get_exploration_action(
+        self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray
+    ) -> Tuple[Union[int, npt.NDArray], bool, float, npt.NDArray]:
         """
-        Selects an action according to the exploration strategy.
-        Implements epsilon-greedy exploration, as well as Boltzmann exploration, quantiles values are averaged.
-        Configuration is done with self.epsilon (float), self.epsilon_boltzmann (float), self.tau_epsilon_boltzmann (float), and self.is_explo (bool).
-
-        Args:
-            img_inputs_uint8:   a numpy array of shape (1, H, W) and dtype np.uint8
-            float_inputs:       a numpy array of shape (float_input_dim, ) and dtype np.float32
-
-        Returns:
-            action_chosen_idx:  an int indicating which exploration action is sampled
-            is_greedy:          a bool indicating whether this action would have been chosen under a greedy policy
-            V(state):           a float giving the value of the greedy action
-            q_values:           a numpy array giving the q_values for all actions
+        Selects an action (or block of N actions) according to the exploration strategy.
+        When n_actions_per_block==1 returns (action_idx: int, ...). When N>1 returns (actions: np.ndarray shape (N,), ...).
+        Exploration: multi_action_exploration "per_action" (each of N with prob epsilon random) or "per_block" (one draw for whole block).
         """
+        n_actions_per_block = self.inference_network.n_actions_per_block
+        q_raw = self.infer_network(img_inputs_uint8, float_inputs)  # (iqn_k, n_actions) or (iqn_k, N, n_actions)
+        q_values = q_raw.mean(axis=0)  # (n_actions,) or (N, n_actions)
+        n_actions = self.inference_network.n_actions
 
-        q_values = self.infer_network(img_inputs_uint8, float_inputs).mean(axis=0)
-        r = random.random()
+        if n_actions_per_block <= 1:
+            r = random.random()
+            if self.is_explo and r < self.epsilon:
+                get_argmax_on = np.random.randn(*q_values.shape)
+            elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
+                get_argmax_on = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
+            else:
+                get_argmax_on = q_values
+            action_chosen_idx = int(np.argmax(get_argmax_on))
+            greedy_action_idx = int(np.argmax(q_values))
+            return (
+                action_chosen_idx,
+                action_chosen_idx == greedy_action_idx,
+                float(np.max(q_values)),
+                q_values,
+            )
 
-        if self.is_explo and r < self.epsilon:
-            # Choose a random action
-            get_argmax_on = np.random.randn(*q_values.shape)
-        elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
-            get_argmax_on = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
+        # Multi-action: q_values shape (N, n_actions) — vectorized exploration
+        greedy_actions = np.argmax(q_values, axis=1)  # (N,)
+        multi_mode = get_config().multi_action_exploration
+
+        if multi_mode == "per_block":
+            r = random.random()
+            if self.is_explo and r < self.epsilon:
+                chosen = np.random.randint(0, n_actions, size=n_actions_per_block)
+            elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
+                perturbed = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
+                chosen = np.argmax(perturbed, axis=1)
+            else:
+                chosen = greedy_actions.copy()
         else:
-            get_argmax_on = q_values
+            rs = np.random.random(n_actions_per_block)
+            random_mask = self.is_explo & (rs < self.epsilon)
+            boltz_mask = self.is_explo & ~random_mask & (rs < self.epsilon + self.epsilon_boltzmann)
+            greedy_mask = ~random_mask & ~boltz_mask
 
-        action_chosen_idx = np.argmax(get_argmax_on)
-        greedy_action_idx = np.argmax(q_values)
+            chosen = greedy_actions.copy()
+            if random_mask.any():
+                chosen[random_mask] = np.random.randint(0, n_actions, size=int(random_mask.sum()))
+            if boltz_mask.any():
+                perturbed = q_values[boltz_mask] + self.tau_epsilon_boltzmann * np.random.randn(int(boltz_mask.sum()), n_actions)
+                chosen[boltz_mask] = np.argmax(perturbed, axis=1)
 
-        return (
-            action_chosen_idx,
-            action_chosen_idx == greedy_action_idx,
-            np.max(q_values),
-            q_values,
-        )
+        actions_arr = chosen.astype(np.int64)
+        is_greedy = bool(np.all(actions_arr == greedy_actions))
+        value = float(np.sum(np.max(q_values, axis=1)))
+        return (actions_arr, is_greedy, value, q_values)
 
 
 def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Network, IQN_Network]:
@@ -567,6 +626,7 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
         float_inputs_mean=get_config().float_inputs_mean,
         float_inputs_std=get_config().float_inputs_std,
         use_image_head=use_image_head,
+        n_actions_per_block=get_config().n_actions_per_block,
     )
     if jit:
         # torch.compile; multi-process stability is handled by warmup in main process + collector warmup under game_spawning_lock (see train.py, collector_process.py).

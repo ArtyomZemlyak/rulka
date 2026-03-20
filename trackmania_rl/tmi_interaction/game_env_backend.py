@@ -574,7 +574,8 @@ class GameEnvBackend:
                         if gim.latest_map_path_requested == -1:
                             gim.iface.execute_command("toggle_console")
                         gim.request_speed(1)
-                        gim.iface.set_on_step_period(gim.run_steps_per_action * 10)
+                        period_ms = 10 if get_config().n_actions_per_block > 1 else gim.run_steps_per_action * 10
+                        gim.iface.set_on_step_period(period_ms)
                         gim.iface.execute_command(f"set countdown_speed {gim.running_speed}")
                         gim.iface.execute_command(f"set autologin {get_config().username}")
                         gim.iface.execute_command("set unfocused_fps_limit false")
@@ -959,7 +960,7 @@ class GameEnvBackend:
                             if not this_rollout_is_finished:
                                 if len(rollout_results["current_zone_idx"]) == len(rollout_results["frames"]) + 1:
                                     rollout_results["current_zone_idx"].pop(-1)
-                                    end_race_stats["race_finished"] = True
+                                end_race_stats["race_finished"] = True
                                 end_race_stats["race_time"] = simulation_state.race_time
                                 rollout_results["race_time"] = simulation_state.race_time
                                 end_race_stats["race_time_for_ratio"] = simulation_state.race_time

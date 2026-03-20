@@ -1036,17 +1036,18 @@ def _save_rollout_frames(
 
         inp_idx = min(i, len(inputs_per_step) - 1) if inputs_per_step else 0
         action_raw = rollout_results["actions"][i] if i < len(rollout_results["actions"]) else None
+        if action_raw is not None and hasattr(action_raw, "__len__") and not isinstance(action_raw, (int, float)):
+            action_raw = int(np.atleast_1d(action_raw).flat[0])
+        elif action_raw is not None and isinstance(action_raw, float) and np.isnan(action_raw):
+            action_raw = None
+        elif action_raw is not None:
+            action_raw = int(action_raw)
         entry = {
             "file": fname,
             "step": frame_count,
             "time_ms": time_ms,
             "inputs": inputs_per_step[inp_idx] if inputs_per_step else {},
-            "action_idx": (
-                int(action_raw)
-                if action_raw is not None
-                and not (isinstance(action_raw, float) and np.isnan(action_raw))
-                else None
-            ),
+            "action_idx": action_raw,
             "capture_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         }
         manifest_entries.append(entry)

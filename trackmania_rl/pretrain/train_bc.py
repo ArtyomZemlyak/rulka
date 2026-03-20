@@ -138,6 +138,8 @@ def train_bc(cfg) -> Path:
 
     if cfg.use_full_iqn:
         from trackmania_rl.pretrain.models import build_iqn_for_bc, IQN_BC_MultiOffset
+        n_offsets = len(cfg.bc_time_offsets_ms)
+        use_fused = n_offsets > 1 and getattr(cfg, "bc_multi_offset_mode", "separate_heads") == "fused"
         iqn = build_iqn_for_bc(
             image_size=image_size,
             float_inputs_dim=float_dim,
@@ -147,12 +149,16 @@ def train_bc(cfg) -> Path:
             iqn_embedding_dimension=iqn_embedding_dimension,
             float_inputs_mean=rl_cfg.float_inputs_mean.tolist(),
             float_inputs_std=rl_cfg.float_inputs_std.tolist(),
+            n_actions_per_block=n_offsets if use_fused else 1,
         )
-        n_offsets = len(cfg.bc_time_offsets_ms)
-        if n_offsets > 1:
+        if n_offsets > 1 and not use_fused:
             model = IQN_BC_MultiOffset(iqn, n_offsets)
         else:
             model = iqn
+        if use_fused:
+            log.info(
+                "BC fused multi-offset: IQN with n_actions_per_block=%d (RL-identical architecture)", n_offsets
+            )
     else:
         model = build_bc_network(
             enc_dim=enc_dim,
@@ -173,6 +179,7 @@ def train_bc(cfg) -> Path:
 
     # Load full BC model from a previous run (fine-tune) or only encoder (init)
     bc_resume_dir = Path(cfg.bc_resume_run_dir) if getattr(cfg, "bc_resume_run_dir", None) else None
+    is_fused = cfg.use_full_iqn and len(cfg.bc_time_offsets_ms) > 1 and getattr(cfg, "bc_multi_offset_mode", "separate_heads") == "fused"
     if bc_resume_dir and bc_resume_dir.exists() and cfg.use_full_iqn:
         # Prefer Lightning .ckpt (has full state including all A_heads); fallback to iqn_bc.pt
         ckpt_dir = bc_resume_dir / "checkpoints"
@@ -198,38 +205,46 @@ def train_bc(cfg) -> Path:
             if not iqn_pt.exists():
                 raise FileNotFoundError(f"bc_resume_run_dir {bc_resume_dir} has no checkpoints/*.ckpt nor iqn_bc.pt")
             state_dict = torch.load(iqn_pt, map_location="cpu", weights_only=True)
-            # iqn_bc.pt uses A_head.* and optionally A_head_offset_N.*; model has A_heads.0.*, A_heads.1.*, ...
-            remapped = {}
-            prefix_ah = "A_head_offset_"
-            for k, v in state_dict.items():
-                if k.startswith("A_head.") and not k.startswith(prefix_ah):
-                    remapped["A_heads.0." + k[7:]] = v
-                elif k.startswith(prefix_ah):
-                    rest_after = k[len(prefix_ah) :]
-                    dot = rest_after.index(".")
-                    idx, rest = rest_after[:dot], rest_after[dot + 1 :]
-                    remapped[f"A_heads.{idx}.{rest}"] = v
-                else:
-                    remapped[k] = v
-            model.load_state_dict(remapped, strict=False)
-            missing = set(model.state_dict().keys()) - set(remapped.keys())
-            # If checkpoint had only A_head (old run with merge_all_heads=False), copy A_heads.0 to other heads
-            head0_prefix = "A_heads.0."
-            to_fill = [k for k in missing if k.startswith("A_heads.") and not k.startswith(head0_prefix)]
-            if to_fill and hasattr(model, "A_heads") and isinstance(model.A_heads, nn.ModuleList):
-                state = model.state_dict()
-                for key in to_fill:
-                    rest = key.split(".", 2)[-1]
-                    src_key = head0_prefix + rest
-                    if src_key in state:
-                        state[key].copy_(state[src_key])
-                model.load_state_dict(state, strict=False)
-                n_heads_filled = len(set(k.split(".", 2)[1] for k in to_fill))
-                log.info("bc_resume: copied A_heads.0 to %d missing offset heads (iqn_bc.pt had single head)", n_heads_filled)
-                missing = missing - set(to_fill)
-            if missing:
-                log.warning("bc_resume: keys not in checkpoint (left as init): %s", sorted(missing)[:10])
-            log.info("Loaded full BC model from %s for fine-tuning", iqn_pt)
+            if is_fused:
+                # Fused mode: iqn_bc.pt has A_head.* + A_head_multi.* keys matching IQN_Network directly.
+                # Also handle loading from a separate_heads iqn_bc.pt (A_head.* = offset 0 full head).
+                model.load_state_dict(state_dict, strict=False)
+                missing = set(model.state_dict().keys()) - set(state_dict.keys())
+                if missing:
+                    log.warning("bc_resume (fused, iqn_bc.pt): keys not in checkpoint: %s", sorted(missing)[:10])
+                log.info("Loaded fused IQN from %s for fine-tuning", iqn_pt)
+            else:
+                # separate_heads: iqn_bc.pt uses A_head.* and optionally A_head_offset_N.*; model has A_heads.0.*, A_heads.1.*, ...
+                remapped = {}
+                prefix_ah = "A_head_offset_"
+                for k, v in state_dict.items():
+                    if k.startswith("A_head.") and not k.startswith(prefix_ah):
+                        remapped["A_heads.0." + k[7:]] = v
+                    elif k.startswith(prefix_ah):
+                        rest_after = k[len(prefix_ah) :]
+                        dot = rest_after.index(".")
+                        idx, rest = rest_after[:dot], rest_after[dot + 1 :]
+                        remapped[f"A_heads.{idx}.{rest}"] = v
+                    else:
+                        remapped[k] = v
+                model.load_state_dict(remapped, strict=False)
+                missing = set(model.state_dict().keys()) - set(remapped.keys())
+                head0_prefix = "A_heads.0."
+                to_fill = [k for k in missing if k.startswith("A_heads.") and not k.startswith(head0_prefix)]
+                if to_fill and hasattr(model, "A_heads") and isinstance(model.A_heads, nn.ModuleList):
+                    state = model.state_dict()
+                    for key in to_fill:
+                        rest = key.split(".", 2)[-1]
+                        src_key = head0_prefix + rest
+                        if src_key in state:
+                            state[key].copy_(state[src_key])
+                    model.load_state_dict(state, strict=False)
+                    n_heads_filled = len(set(k.split(".", 2)[1] for k in to_fill))
+                    log.info("bc_resume: copied A_heads.0 to %d missing offset heads (iqn_bc.pt had single head)", n_heads_filled)
+                    missing = missing - set(to_fill)
+                if missing:
+                    log.warning("bc_resume: keys not in checkpoint (left as init): %s", sorted(missing)[:10])
+                log.info("Loaded full BC model from %s for fine-tuning", iqn_pt)
     elif cfg.encoder_init_path and Path(cfg.encoder_init_path).exists():
         if cfg.use_full_iqn:
             from trackmania_rl.pretrain.export import average_first_layer_to_1ch
@@ -376,11 +391,18 @@ def train_bc(cfg) -> Path:
         meta["iqn_embedding_dimension"] = iqn_embedding_dimension
         full_iqn_path = run_dir / "iqn_bc.pt"
         n_offsets = len(cfg.bc_time_offsets_ms)
-        if n_offsets > 1 and hasattr(model, "state_dict_for_iqn_transfer"):
+        if is_fused:
+            # Fused mode: plain IQN_Network state dict with A_head.* + A_head_multi.* —
+            # keys match RL IQN directly, no remapping needed at injection time.
+            torch.save(model.state_dict(), full_iqn_path)
+            meta["bc_multi_offset_mode"] = "fused"
+            meta["n_actions_per_block"] = n_offsets
+        elif n_offsets > 1 and hasattr(model, "state_dict_for_iqn_transfer"):
             merge_all = getattr(cfg, "merge_actions_head", False)
             torch.save(model.state_dict_for_iqn_transfer(merge_all_heads=merge_all), full_iqn_path)
             if merge_all:
                 meta["merge_actions_head"] = True
+            meta["bc_multi_offset_mode"] = "separate_heads"
         else:
             torch.save(model.state_dict(), full_iqn_path)
         meta["full_iqn_file"] = "iqn_bc.pt"

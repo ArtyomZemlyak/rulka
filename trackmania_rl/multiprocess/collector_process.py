@@ -38,10 +38,14 @@ def collector_process_fn(
 
     set_random_seed(process_number)
 
+    # Multi-action: 10ms step period, so run_steps_per_action=1; else use config
+    run_steps_per_action = (
+        1 if config.n_actions_per_block > 1 else config.tm_engine_step_per_action
+    )
     tmi = game_instance_manager.GameInstanceManager(
         game_spawning_lock=game_spawning_lock,
         running_speed=config.running_speed,
-        run_steps_per_action=config.tm_engine_step_per_action,
+        run_steps_per_action=run_steps_per_action,
         max_overall_duration_ms=config.cutoff_rollout_if_race_not_finished_within_duration_ms,
         max_minirace_duration_ms=config.cutoff_rollout_if_no_vcp_passed_within_duration_ms,
         tmi_port=tmi_port,

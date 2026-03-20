@@ -36,6 +36,18 @@ from trackmania_rl.buffer_utilities import make_buffers, resize_buffers
 from trackmania_rl.map_reference_times import reference_times
 
 
+def _mean_action_gap_from_rollout(q_values):
+    """Compute mean (over states) of (max_a Q(s,a) - Q(s,a)) for logging. Supports single (T, n_actions) and multi-action (T, N, n_actions)."""
+    q = np.array(q_values, dtype=np.float64)
+    if q.size == 0:
+        return 0.0
+    if q.ndim == 3:
+        q = q.mean(axis=1)  # (n_blocks, n_actions) — average over N heads for gap metric
+    max_q = q.max(axis=-1, keepdims=True)
+    gap = -(q - max_q).mean()
+    return float(gap)
+
+
 def _get_frozen_param_prefixes():
     """Return parameter name prefixes to freeze (e.g. 'img_head.') from config _freeze flags."""
     cfg = get_config()
@@ -444,7 +456,7 @@ def learner_process_fn(
                 f"race_time_ratio_{map_name}": end_race_stats["race_time_for_ratio"] / (rollout_duration * 1000),
                 f"explo_race_time_{map_status}_{map_name}" if is_explo else f"eval_race_time_{map_status}_{map_name}": end_race_stats["race_time"] / 1000,
                 f"explo_race_finished_{map_status}_{map_name}" if is_explo else f"eval_race_finished_{map_status}_{map_name}": end_race_stats["race_finished"],
-                f"mean_action_gap_{map_name}": -(np.array(rollout_results["q_values"]) - np.array(rollout_results["q_values"]).max(axis=1, initial=None).reshape(-1, 1)).mean(),
+                f"mean_action_gap_{map_name}": _mean_action_gap_from_rollout(rollout_results["q_values"]),
                 f"single_zone_reached_{map_status}_{map_name}": rollout_results["furthest_zone_idx"],
                 "instrumentation__answer_normal_step": end_race_stats["instrumentation__answer_normal_step"],
                 "instrumentation__answer_action_step": end_race_stats["instrumentation__answer_action_step"],
@@ -459,7 +471,8 @@ def learner_process_fn(
             }
 
             if not is_explo:
-                race_stats_to_write[f"avg_Q_{map_status}_{map_name}"] = np.mean(rollout_results["q_values"])
+                qv = np.array(rollout_results["q_values"])
+                race_stats_to_write[f"avg_Q_{map_status}_{map_name}"] = float(np.mean(qv))
 
             if end_race_stats["race_finished"]:
                 race_stats_to_write[f"{'explo' if is_explo else 'eval'}_race_time_finished_{map_status}_{map_name}"] = (
@@ -584,18 +597,20 @@ def learner_process_fn(
 
             with torch.no_grad():
                 if not get_config().pretrain_actions_head_freeze:
-                    online_network.A_head[2].weight = utilities.linear_combination(
-                        online_network.A_head[2].weight, untrained_iqn_network.A_head[2].weight, get_config().last_layer_reset_factor,
+                    a_last = online_network.A_head_multi if online_network.A_head_multi is not None else online_network.A_head[-1]
+                    a_last_untrained = untrained_iqn_network.A_head_multi if untrained_iqn_network.A_head_multi is not None else untrained_iqn_network.A_head[-1]
+                    a_last.weight = utilities.linear_combination(
+                        a_last.weight, a_last_untrained.weight, get_config().last_layer_reset_factor,
                     )
-                    online_network.A_head[2].bias = utilities.linear_combination(
-                        online_network.A_head[2].bias, untrained_iqn_network.A_head[2].bias, get_config().last_layer_reset_factor,
+                    a_last.bias = utilities.linear_combination(
+                        a_last.bias, a_last_untrained.bias, get_config().last_layer_reset_factor,
                     )
                 if not get_config().pretrain_V_head_freeze:
-                    online_network.V_head[2].weight = utilities.linear_combination(
-                        online_network.V_head[2].weight, untrained_iqn_network.V_head[2].weight, get_config().last_layer_reset_factor,
+                    online_network.V_head[-1].weight = utilities.linear_combination(
+                        online_network.V_head[-1].weight, untrained_iqn_network.V_head[-1].weight, get_config().last_layer_reset_factor,
                     )
-                    online_network.V_head[2].bias = utilities.linear_combination(
-                        online_network.V_head[2].bias, untrained_iqn_network.V_head[2].bias, get_config().last_layer_reset_factor,
+                    online_network.V_head[-1].bias = utilities.linear_combination(
+                        online_network.V_head[-1].bias, untrained_iqn_network.V_head[-1].bias, get_config().last_layer_reset_factor,
                     )
 
         # -------------------------------------------------------------
@@ -816,6 +831,8 @@ def learner_process_fn(
             tau = torch.linspace(0.05, 0.95, get_config().iqn_k)[:, None].to("cuda")
             if last_rollout_results is not None:
                 per_quantile_output = inferer.infer_network(last_rollout_results["frames"][0], last_rollout_results["state_float"][0], tau)
+                if per_quantile_output.ndim == 3:
+                    per_quantile_output = per_quantile_output[:, 0, :]  # (iqn_k, n_actions) use first head for legacy metrics
             # IQN-specific metrics: quantile spread per action
                 for i, std in enumerate(list(per_quantile_output.std(axis=0))):
                     step_stats[f"IQN/quantile_std_action_{i}"] = std
