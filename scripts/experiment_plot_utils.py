@@ -5,6 +5,7 @@ One graph per metric; multiple runs as lines. Saves compressed JPG files.
 Y-axis:
 - **Best-time metrics** (race best, scalar best time): scale from **min(time)** to **mean(time) + 1s**
   so the initial 300s spike is off-scale and the improvement (e.g. down to 30s) is readable.
+- **Mean race time** (per-race events, all episodes): robust percentile scaling (often 80-200s+ when DNFs dominate).
 - **Other metrics** (loss, Q, finish rate): robust scaling (percentiles).
 """
 
@@ -134,6 +135,28 @@ def plot_comparison(
         plt.grid(True, alpha=0.3)
         save_fig(f"{_tag_to_slug(tag)}_best")
 
+    # ---- By time: race mean (all episodes; includes DNF-style times) ----
+    for tag, run_series in by_time.get("race_mean", {}).items():
+        if not run_series:
+            continue
+        if not any(points for points in run_series.values()):
+            continue
+        plt.figure()
+        for run, points in run_series.items():
+            if not points:
+                continue
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            plt.plot(xs, ys, label=run, marker="o", markersize=3)
+        y_lo, y_hi = _robust_ylim(run_series)
+        plt.ylim(y_lo, y_hi)
+        plt.xlabel("Time (min from run start)")
+        plt.ylabel("Mean race time (s)")
+        plt.title(f"Mean race time by relative time — {_tag_to_slug(tag)}")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        save_fig(f"{_tag_to_slug(tag)}_mean")
+
     # ---- By time: race finish rate ----
     for tag, run_series in by_time["race_rate"].items():
         if not run_series:
@@ -205,6 +228,29 @@ def plot_comparison(
             plt.legend()
             plt.grid(True, alpha=0.3)
             fname = _safe_filename(f"{step_prefix}_{_tag_to_slug(tag)}_best") + ".jpg"
+            path = output_dir / fname
+            plt.savefig(path, format="jpg", pil_kwargs={"quality": jpg_quality})
+            plt.close()
+            saved.append(path)
+
+        for tag, run_series in by_step_data.get("race_mean", {}).items():
+            if not run_series:
+                continue
+            plt.figure()
+            for run, points in run_series.items():
+                if not points:
+                    continue
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                plt.plot(xs, ys, label=run, marker="o", markersize=3)
+            y_lo, y_hi = _robust_ylim(run_series)
+            plt.ylim(y_lo, y_hi)
+            plt.xlabel("Training step")
+            plt.ylabel("Mean race time (s)")
+            plt.title(f"Mean race time by step — {_tag_to_slug(tag)}")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            fname = _safe_filename(f"{step_prefix}_{_tag_to_slug(tag)}_mean") + ".jpg"
             path = output_dir / fname
             plt.savefig(path, format="jpg", pil_kwargs={"quality": jpg_quality})
             plt.close()

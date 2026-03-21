@@ -367,7 +367,7 @@ def compute_comparison_data(
 ) -> Dict[str, Any]:
     """Load runs and compute structured data for tables and plots.
     Returns dict with: run_names, durations, checkpoints, step_checkpoints,
-    by_time (race_best, race_rate, scalar), by_step (same keys).
+    by_time (race_best, race_mean, race_rate, scalar), by_step (same keys).
     Series format: metric_id -> run_name -> [(x, y), ...] where x is min or step.
 
     If use_all_scalars is True, loads every scalar tag present in any run (except race tags).
@@ -415,6 +415,7 @@ def compute_comparison_data(
 
     # by_time: series for plotting (one metric per key, runs as lines)
     by_time_race_best: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
+    by_time_race_mean: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
     by_time_race_rate: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
     by_time_scalar: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
 
@@ -424,11 +425,13 @@ def compute_comparison_data(
             continue
         finished_tag = _race_time_to_finished_tag(tag)
         by_time_race_best[tag] = {}
+        by_time_race_mean[tag] = {}
         by_time_race_rate[tag] = {}
         for run in runs_with_tag:
             events = race_time[run][tag]
             fin_events = race_finished[run].get(finished_tag, []) if finished_tag else []
             best_series = []
+            mean_series = []
             rate_series = []
             for t in checkpoints:
                 finished_steps: Optional[Set[int]] = None
@@ -438,10 +441,13 @@ def compute_comparison_data(
                 fin_stat = finish_stats_at_checkpoint(events, fin_events, float(t)) if fin_events else None
                 if st is not None:
                     best_series.append((float(t), st[0]))
+                    mean_series.append((float(t), st[1]))
                 if fin_stat is not None:
                     rate_series.append((float(t), fin_stat[0] * 100.0))
             if best_series:
                 by_time_race_best[tag][run] = best_series
+            if mean_series:
+                by_time_race_mean[tag][run] = mean_series
             if rate_series:
                 by_time_race_rate[tag][run] = rate_series
     all_scalar_tags: Set[str] = set()
@@ -483,6 +489,7 @@ def compute_comparison_data(
         step_checkpoints = [int(common_max_step)]
 
     by_step_race_best: Dict[str, Dict[str, List[Tuple[int, float]]]] = {}
+    by_step_race_mean: Dict[str, Dict[str, List[Tuple[int, float]]]] = {}
     by_step_race_rate: Dict[str, Dict[str, List[Tuple[int, float]]]] = {}
     by_step_scalar: Dict[str, Dict[str, List[Tuple[int, float]]]] = {}
 
@@ -492,11 +499,13 @@ def compute_comparison_data(
             continue
         finished_tag = _race_time_to_finished_tag(tag)
         by_step_race_best[tag] = {}
+        by_step_race_mean[tag] = {}
         by_step_race_rate[tag] = {}
         for run in runs_with_tag:
             events = race_time[run][tag]
             fin_events = race_finished[run].get(finished_tag, []) if finished_tag else []
             best_series = []
+            mean_series = []
             rate_series = []
             for S in step_checkpoints:
                 finished_steps = set(s for r, s, v in fin_events if s <= S and v >= 0.5) if fin_events else None
@@ -504,10 +513,13 @@ def compute_comparison_data(
                 fin_stat = finish_stats_at_step(events, fin_events, S) if fin_events else None
                 if st is not None:
                     best_series.append((S, st[0]))
+                    mean_series.append((S, st[1]))
                 if fin_stat is not None:
                     rate_series.append((S, fin_stat[0] * 100.0))
             if best_series:
                 by_step_race_best[tag][run] = best_series
+            if mean_series:
+                by_step_race_mean[tag][run] = mean_series
             if rate_series:
                 by_step_race_rate[tag][run] = rate_series
     for tag in sorted(all_scalar_tags):
@@ -538,11 +550,13 @@ def compute_comparison_data(
         "race_finished": race_finished,
         "by_time": {
             "race_best": by_time_race_best,
+            "race_mean": by_time_race_mean,
             "race_rate": by_time_race_rate,
             "scalar": by_time_scalar,
         },
         "by_step": {
             "race_best": by_step_race_best,
+            "race_mean": by_step_race_mean,
             "race_rate": by_step_race_rate,
             "scalar": by_step_scalar,
         },
