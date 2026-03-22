@@ -834,9 +834,9 @@ Other Metrics
     **Description**: Cumulative training time in hours.
     
     **Interpretation**:
-    - Total wall-clock time spent training
-    - Useful for estimating training duration
-    - Includes all overhead (not just GPU time)
+    - Increases only while the learner training loop is running (not calendar time across restarts)
+    - Useful for estimating training duration and aligning analysis with console ``Training hours``
+    - Includes overhead while the loop runs (not just GPU kernel time)
     
     **What to watch for**:
     - Should increase steadily
@@ -865,6 +865,28 @@ Other Metrics
     **What to watch for**:
     - Useful for quick overview
     - Shows new records with ** markers
+
+Merged log folders and time axes (analysis scripts)
+---------------------------------------------------
+
+Training is often split across several TensorBoard directories (suffix schedule: ``run``, ``run_2``, …).
+Analysis tools merge them using a **single** time origin: the earliest ``wall_time`` in any of those
+directories. The resulting **relative wall minutes** are therefore **calendar time from that first
+event**, including nights and idle periods when the learner was not running. That axis is **not**
+the same as "how many hours the network trained."
+
+For curves and checkpoints that should track **actual training progress**, use either:
+
+- The scalar **``cumul_training_hours``** (also stored in ``accumulated_stats.joblib`` under the same
+  key), e.g. ``python scripts/analyze_experiment_by_relative_time.py ... --time-axis cumul_training_hours``; or
+- **BY STEP** tables (checkpoints in environment steps), which are unaffected by wall-clock gaps.
+
+Final bests and step-based summaries taken from the end of a run remain meaningful; what goes wrong
+is only the **interpretation of "at X wall minutes"** when the timeline spans long pauses or merged
+chunks.
+
+To see whether wall span and ``cumul_training_hours`` disagree for a run, use
+``python scripts/audit_tensorboard_training_timeline.py [--runs RUN …]``.
 
 Tips for Using TensorBoard
 --------------------------

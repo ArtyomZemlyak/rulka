@@ -24,7 +24,7 @@ Stages for the first variant:
 Results
 -------
 
-**Important:** Run durations differed (A01_as20_long ~495 min, A01_as20_long_vis_pretrained ~275 min, A01_as20_long_vis_bc_pretrained ~262 min, A01_as20_long_vis_bc_ah_pretrained ~244 min). All findings below are by **relative time** (minutes from run start) and by **steps** (training step checkpoints). Comparing by "last value" is invalid. Common window for all four runs: **up to 244 min** (shortest = bc_ah).
+**Important (time axis):** Numeric **minute** checkpoints in the sections below are **TensorBoard wall-clock** minutes on merged logs (5-minute grid, ``--time-axis wall_minutes``), as in the original write-up. **Cumulative training hours** for the main quartet (audited): baseline **~8.2 h**, vis_pretrained **~4.6 h**, bc_pretrained **~4.4 h**, bc_ah **~4.1 h** — wall span and training time are **close** (ratio ~1), so the old minute tables are still **roughly** comparable to training progress. **Exceptions:** ``full_iqn_bc`` and ``full_iqn_bc_2`` have **wall ≫ training** (see :doc:`experiments/time_axis_conventions`); narrative that uses “~1020 min” or “~770 min” there is **calendar TB time**, not hours the learner trained. Use **BY STEP** or **cumul_training_hours** for those. Comparing by “last value” across different run lengths is invalid. Common **wall** window for the first four runs: **up to ~244 min** (shortest = bc_ah).
 
 **Key Findings:**
 
@@ -45,23 +45,23 @@ Results
 Run Analysis
 ------------
 
-- **A01_as20_long** (baseline): No pretrain. ``pretrain_encoder_path: null``. IQN from random weights. **~495 min**, 3 TensorBoard log dirs merged.
-- **A01_as20_long_vis_pretrained**: Visual pretrain only. ``pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"``. **~275 min**, 2 log dirs merged.
-- **A01_as20_long_vis_bc_pretrained**: Vis pretrain then BC pretrain then RL. ``pretrain_encoder_path: "output/ptretrain/bc/v1.1/encoder.pt"``. BC encoder from ``config_files/pretrain/bc/pretrain_config_bc.yaml`` (encoder_init_path: vis v1, bc_mode: backbone, 50 epochs, action prediction from image). **~262 min**, 2 log dirs merged.
-- **A01_as20_long_vis_bc_ah_pretrained**: RL with **encoder + A_head** from **v2_multi_offset_ahead_dropout_inner**. ``pretrain_encoder_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/encoder.pt"``, ``pretrain_actions_head_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/actions_head.pt"``. BC run: ``config_files/pretrain/bc/pretrain_config_bc_v2_multi_offset_ahead_dropout_inner.yaml`` — vis v2 backbone, multi-offset ``bc_time_offsets_ms: [-10, 0, 10, 100]``, ``use_actions_head: true``, dropout 0.2 on features, action_head_dropout 0.1; val_acc 0.597, val_loss 1.971 (best A_head variant). **~244 min**, 2 log dirs merged.
-- **A01_as20_long_vis_bc_ah_pretrained_enc_freeze**: Same pretrain sources as bc_ah, but **encoder frozen** during RL: ``pretrain_encoder_freeze: true``. A_head, float_feature_extractor, iqn_fc, V_head trainable. **~158 min**, 2 log dirs merged.
-- **A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze**: Same pretrain, but **both encoder and A_head frozen** during RL: ``pretrain_encoder_freeze: true``, ``pretrain_actions_head_freeze: true``. Only float_feature_extractor, iqn_fc, V_head trainable. **~228 min**, 2 log dirs merged.
-- **A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze_resume**: Resumed from enc_ah_freeze weights; **encoder and A_head unfrozen**, lower lr (5e-5 at start, 1e-4 from 500k) and lower epsilon (0.1 at start vs 1.0). All parts trainable. **~259 min**, 2 log dirs merged.
-- **A01_as20_long_full_iqn_bc**: **Full IQN** from BC run v3_multi_offset. ``pretrain_bc_heads_path: "output/ptretrain/bc/v3_multi_offset"``. **~192 min**, 2 log dirs. See "Experiment: Full IQN from BC (full_iqn_bc)".
-- **A01_as20_long_full_iqn_bc_2**: Same setup, **separate run** (run_name set to _2). **~1020 min**, 2 TensorBoard log dirs merged. See "Runs full_iqn_bc_2 and full_iqn_bc_3 (separate runs)".
-- **A01_as20_long_full_iqn_bc_3**: Same setup, **separate run** (run_name set to _3). **~1166 min**, 5 TensorBoard log dirs merged. See "Runs full_iqn_bc_2 and full_iqn_bc_3 (separate runs)" and "Why run _3 showed almost no improvement over long time".
+- **A01_as20_long** (baseline): No pretrain. **Cumulative training ~8.18 h**; TB wall span **~486 min**; 3 dirs merged (ratio ~1).
+- **A01_as20_long_vis_pretrained**: **~4.59 h** training; wall **~270 min**; 2 dirs.
+- **A01_as20_long_vis_bc_pretrained**: **~4.42 h** training; wall **~260 min**; 2 dirs.
+- **A01_as20_long_vis_bc_ah_pretrained** (bc_ah): **~4.09 h** training; wall **~240 min**; 2 dirs. Pretrain paths as before (v2_multi_offset_ahead_dropout_inner BC).
+- **A01_as20_long_vis_bc_ah_pretrained_enc_freeze**: **~2.67 h** training; wall **~155 min**; 2 dirs.
+- **A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze**: **~3.84 h** training; wall **~225 min**; 2 dirs.
+- **A01_as20_long_vis_bc_ah_pretrained_enc_ah_freeze_resume**: **~4.34 h** training; wall **~255 min**; 2 dirs.
+- **A01_as20_long_full_iqn_bc**: **~3.25 h** cumulative training; TB wall span **~1310 min** (**wall ≫ training**, ratio **~6.7×**). The old “~192 min” line matched **training** time (~195 min), **not** the TB wall span. 3 TB dirs. See "Experiment: Full IQN from BC (full_iqn_bc)".
+- **A01_as20_long_full_iqn_bc_2**: **~4.09 h** training; wall **~1018 min** (**~4.2×**). 2 dirs. Earlier text used “~1020 min” as if it were training length — **wrong**.
+- **A01_as20_long_full_iqn_bc_3**: **~19.45 h** training; wall **~1162 min** (ratio **~1.0**; **~1166 min wall ≈ 19.4 h** so magnitude similar to training). 5 dirs.
 - **A01_as20_long_full_iqn_bc_3_best_ref**: Full IQN from BC (v3_multi_offset) with **reference line from the best human-driven run** (``A01_0.5m_cl_best.npy``) in ``map_cycle``. **~265 min**, 2 TensorBoard log dirs merged. See "Experiment: Full IQN from BC with human best reference line (best_ref)".
 - **A01_as20_long_full_iqn_bc_3_4explo**: Same full IQN from BC (v3_multi_offset) with **exploration repeat 4** instead of 64 in ``map_cycle`` (fewer exploration episodes per cycle). **~337 min**, 2 TensorBoard log dirs merged. See "Experiment: Full IQN from BC with 4 exploration episodes (4explo)".
 
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time and by steps:** Metrics are compared (1) at checkpoints 5, 10, 15, 20, … min (only up to the shortest run; when including bc_ah, use the common window of all four runs) and (2) at step checkpoints 50k, 100k, … (only up to the smallest max step). The figures below show one metric per graph (runs as lines, by relative time). To generate plots including bc_ah, use the four-run command in Analysis Tools and regenerate with ``--experiments pretrain_bc``.
+**Methodology — Wall-minute tables vs training hours:** Main quartet + freeze sections use the historical **5, 10, … wall-minute** grid (``--time-axis wall_minutes --interval 5``). For **full_iqn_bc / _2 / _3**, reinterpret long “minute” narratives as **TB wall** time or switch to **BY STEP** / ``cumul_training_hours``. Figures from ``generate_experiment_plots.py`` use default **auto** (training hours on X when logged). Step checkpoints: 50k, 100k, … as before.
 
 A01 Map Performance (common window up to 244 min for all four runs)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -224,30 +224,29 @@ Runs full_iqn_bc_2 and full_iqn_bc_3 (separate runs)
 
 **A01_as20_long_full_iqn_bc**, **A01_as20_long_full_iqn_bc_2**, and **A01_as20_long_full_iqn_bc_3** are **three separate runs** (same config, run_name overridden to base, _2, _3). Each has its own ``save/`` dir and its own TensorBoard log dir(s); within each run, ``tensorboard_suffix_schedule`` may split logs into _2, _3, … by step. Below we do **not** consider the first run (already documented); we analyze **run _2** and **run _3** in full.
 
-**Run A01_as20_long_full_iqn_bc_2** (~1020 min, 2 TB dirs merged)
+**Run A01_as20_long_full_iqn_bc_2** (**~4.1 h** cumulative training over **~1018 min** TB wall span, 2 dirs — **~4×** inflation)
 
-- **Best A01:** **24.510s** by ~30–40 min; then **flat** for the whole run (no further best-time improvement).
-- **Eval (trained_A01):** Mean ~25.29s, rate ~68% from ~50 min until **~770 min**. At **~770 min** a **collapse**: eval mean jumps (25.29 → 26.49s), finish rate drops (68% → 29%), Training/loss spikes (~57 → 37306), RL/avg_Q spikes (399). Over the next ~240 min the run **partially recovers** (mean 26.20s, rate 48% by 1010 min; loss ~70), but never back to pre-collapse level. Best time stays 24.51s throughout.
-- **By steps:** At 2M steps best 24.70s; at 8M steps best 24.51s. So best was reached well before the collapse.
-- **Conclusion (run _2):** Early convergence to 24.51s; then a **major instability** around 770 min (coincides with switch to second TB log dir), with large loss/Q spike and drop in eval performance, then partial recovery. Best time unaffected; long tail did not help.
+- **Best A01:** **24.510s** early in training; then flat (no further best-time improvement).
+- **Eval collapse (wall-clock axis):** Mean ~25.29s, rate ~68% from ~50 min wall until **~770 min wall**. At **~770 min wall** (~**3.1 h** cumulative training if scaled linearly — use ``cumul_training_hours`` in TensorBoard for exact alignment) a **collapse**: mean jumps, rate drops, loss/Q spike. The “770 min” figure is **not** “770 minutes of training.”
+- **By steps:** Best 24.51s by ~8M steps — well before the wall-time collapse.
+- **Conclusion (run _2):** Instability coincides with **suffix log / process boundary**; interpret long-horizon behavior on **steps** or **cumul_training_hours**, not raw wall minutes.
 
-**Run A01_as20_long_full_iqn_bc_3** (~1166 min, 5 TB dirs merged)
+**Run A01_as20_long_full_iqn_bc_3** (**~19.5 h** training, **~1162 min** wall, ratio **~1**)
 
-- **Best A01:** Improves from 29.58s (30 min) → 25.04s (110 min) → 24.80s (130 min) → 24.50s (410 min) → 24.49s (650 min) → **24.48s** (910 min). So there *is* improvement over the run, but **after ~410 min** gains are **tiny**: 24.50s at 410 min, then only 24.49s by 650 min and 24.48s by 910 min (~20 ms total over ~500 min).
-- **Eval mean and rate:** Mean improves (26.22s → 25.79s), rate 62% → 69%. Policy becomes slightly more consistent; best time barely moves in the long tail.
-- **By steps:** 5M steps → 25.04s; 15M → 24.51s; 30M → 24.49s; 45M → 24.48s. Same picture: most gain in the first ~15M steps, then plateau.
-- **Loss:** High at start (BC init), then 50–70; no large spikes like in run _2.
+- **Best A01 (wall-minute narrative preserved):** Same progression as before: large gains early, **~20 ms** improvement from ~410 min wall to ~910 min wall in the long tail.
+- **By steps:** Dominant gains in the first ~15M steps; then plateau — unchanged conclusion.
+- **Loss:** No collapse like _2.
 
 Why run _3 showed almost no improvement over long time
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. **Plateau at 24.50s.** Best time 24.50s is reached by ~410 min (~20M steps). For the next **~750 min** (25M–45M steps) the gain is only **20 ms** (24.50 → 24.48). So the run did not "fail" — it **plateaued**; further training with the current schedule adds almost nothing.
+1. **Plateau at 24.50s** by ~20M steps; long tail adds ~20 ms best time — still valid on **step** axis.
 
-2. **Learning rate schedule.** LR is 1e-3 (0–10M), 5e-5 (10M–30M), 1e-5 (30M+). In the long tail (20M–45M steps) LR is 5e-5 or 1e-5. With such low LR, updates are small; breaking the 24.50s plateau would likely need a different schedule (e.g. less aggressive decay or a small LR bump after a plateau).
+2. **LR schedule** argument unchanged.
 
-3. **No collapse in _3.** Unlike run _2, run _3 has no big loss/eval collapse; mean time and finish rate improve slowly. The "no improvement" is **flat best time**, not a crash.
+3. **No collapse in _3** — unchanged.
 
-4. **Recommendations.** (1) **Early stopping:** stop when best time is stable for 60–90 min (e.g. after ~400–500 min for this setup). (2) **Run _2 collapse:** investigate cause of the ~770 min instability (e.g. TB writer switch, env or learner restart); if reproducible, add safeguards or avoid very long runs without checkpoint/restart handling. (3) For **run _3**, treat 24.48s as the ceiling for this setup/schedule; longer runs are not worth the compute unless LR or schedule is changed.
+4. **Recommendations.** (1) Early-stop on **step** or **cumul_training_hours** stability. (2) **Run _2:** treat collapse as **wall ~770 min** / **~3 h training** region — investigate restart/suffix boundary. (3) **Run _3:** 24.48s ceiling conclusion unchanged.
 
 **Reproduce:**
 

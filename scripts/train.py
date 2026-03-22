@@ -182,6 +182,11 @@ if __name__ == "__main__":
     )
     with shared_network_lock:
         uncompiled_shared_network.share_memory()
+    # Snapshot of shared-memory tensors for cross-process weight sync.
+    # Parametrized nn.Modules can't be pickled (Windows spawn), but this
+    # plain dict of shared-memory tensors can. Tensors share storage with
+    # the module's parameters, so learner writes are visible to collectors.
+    shared_state_dict = uncompiled_shared_network.state_dict()
 
     # --- Compilation Warmup (Windows Stability) ---
     # Populate the torch.compile cache in the main process before spawning workers.
@@ -214,7 +219,7 @@ if __name__ == "__main__":
             args=(
                 config_path,
                 rollout_queue,
-                uncompiled_shared_network,
+                shared_state_dict,
                 shared_network_lock,
                 game_spawning_lock,
                 shared_steps,

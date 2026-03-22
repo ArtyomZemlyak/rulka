@@ -13,7 +13,7 @@ We compared epsilon schedules: **uni_12** (default: epsilon 0.1 at 300k steps, 0
 Results
 -------
 
-**Important:** Findings are by **relative time** (minutes from run start). Common window up to 55 min (uni_12 ended at 55 min; uni_15 ran ~160 min); metrics are compared at the same checkpoints (5, 10, …, 55 min).
+**Important:** Findings are by **aligned time checkpoints** (default ``analyze_experiment_by_relative_time.py`` uses cumulative training hours when logged; for these short runs, ~same as minutes from start). Common window up to 55 min (uni_12 ended at 55 min; uni_15 ran ~160 min); metrics are compared at the same checkpoints (5, 10, …, 55 min). See :doc:`experiments/index`.
 
 **Data source:** Numbers from ``scripts/analyze_experiment_by_relative_time.py`` (per-race tables: **Hock** = long track ~55–70 s, **A01** = short track ~24–25 s). Reproduce: ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_15 --interval 5`` (``--logdir "<path>"`` if needed).
 

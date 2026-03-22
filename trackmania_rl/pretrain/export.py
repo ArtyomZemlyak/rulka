@@ -204,7 +204,21 @@ def validate_encoder_compatibility(
     encoder = build_encoder_from_meta(meta)
     encoder.load_state_dict(state_dict, strict=True)
     encoder.eval()
-    expected_dim = calculate_conv_output_dim(image_size, image_size)
+    from trackmania_rl.agents.iqn import _build_img_head
+    try:
+        from config_files.config_loader import get_config
+        cfg = get_config()
+        ref_head = _build_img_head(
+            use_impala_cnn=cfg.use_impala_cnn,
+            impala_model_size=cfg.impala_model_size,
+            use_spectral_norm=cfg.use_spectral_norm,
+            use_adaptive_maxpool=cfg.use_adaptive_maxpool,
+            adaptive_maxpool_size=cfg.adaptive_maxpool_size,
+        )
+    except RuntimeError:
+        from trackmania_rl.pretrain.models import build_iqn_encoder
+        ref_head = build_iqn_encoder(in_channels=1, image_size=image_size)
+    expected_dim = calculate_conv_output_dim(ref_head, image_size, image_size)
     with torch.no_grad():
         test_out = encoder(torch.zeros(1, in_channels, image_size, image_size))
     actual_dim = test_out.shape[1]
@@ -268,6 +282,16 @@ def inject_encoder_into_iqn(
     bool
         *True* if injection was performed, *False* if skipped (weights already exist).
     """
+    from config_files.config_loader import get_config
+    cfg = get_config()
+    if cfg.use_impala_cnn:
+        raise ValueError(
+            "Pretrained encoder injection is not supported with use_impala_cnn=True. "
+            "The pretrained encoder uses the default 4-layer CNN which is incompatible "
+            "with the IMPALA-CNN architecture. Disable use_impala_cnn or retrain the "
+            "encoder with a matching architecture."
+        )
+
     w1 = save_dir / "weights1.torch"
     if w1.exists() and not overwrite:
         log.info(

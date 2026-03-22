@@ -13,7 +13,7 @@ We compared five runs from the A01_as20_long_v2 series. **global_schedule_speed*
 Results
 -------
 
-**Important:** If run durations differed, all findings should be interpreted **by relative time** (minutes from run start). Use ``scripts/analyze_experiment_by_relative_time.py`` to get per-run durations and metric tables.
+**Important:** If run durations differed, interpret **by-time** tables using the script’s time axis (default **auto** → **cumulative training hours** when logged, not raw wall minutes across merged TB chunks). Use ``scripts/analyze_experiment_by_relative_time.py`` and optionally ``scripts/audit_tensorboard_training_timeline.py``; see :doc:`experiments/index`.
 
 **Key findings:**
 
@@ -39,20 +39,20 @@ TensorBoard logs: ``tensorboard\A01_as20_long_v2``, ``tensorboard\A01_as20_long_
 
 ::
 
-   python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v2.1 A01_as20_long_v2.2 A01_as20_long_v2.3 A01_as20_long_v2.4 --interval 5 --step_interval 1000000 --logdir tensorboard
+   python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v2.1 A01_as20_long_v2.2 A01_as20_long_v2.3 A01_as20_long_v2.4 --interval-training-hours 0.25 --step_interval 1000000 --logdir tensorboard
 
-Use ``--plot --output-dir docs/source/_static --prefix exp_global_schedule_speed_v2`` to generate comparison plots. Run durations are printed by the script (e.g. ``~X min (relative time)`` per run).
+Use ``--plot --output-dir docs/source/_static --prefix exp_global_schedule_speed_v2`` to generate comparison plots. The script prints per-run duration in **hours** (cumulative training) or **minutes** (wall), depending on the axis chosen.
 
 Detailed TensorBoard Metrics Analysis
 -------------------------------------
 
-**Methodology — Relative time and by steps:** Metrics at checkpoints 5, 10, 15, … min (only up to the shortest run) and at step checkpoints (e.g. 50k, 100k, …). Race times from per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars (loss, Q, GPU %) = last value at that moment. The figures below show one metric per graph (runs as lines, by relative time).
+**Methodology — By time and by steps:** Prefer cumulative-training-hour checkpoints (``--time-axis auto``) or BY STEP tables. Race times from per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars (loss, Q, GPU %) = last value at that checkpoint. The figures below use the same default as ``generate_experiment_plots.py`` (training hours on X when the scalar exists).
 
-Fill the subsections below from the script output (by relative time and by steps). Example command:
+**Runs v2 / v2.1 / v2.4:** v2 and v2.1 show **wall ≫ training** (~2.4–2.7×); v2.4 is ~1× (short run). See :doc:`experiments/time_axis_conventions` audit table. Fill subsections from script output (**cumul_training_hours** or BY STEP). Example command:
 
 ::
 
-   python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v2.4 --interval 10 --step_interval 1000000 --logdir tensorboard
+   python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v2.4 --interval-training-hours 0.25 --step_interval 1000000 --logdir tensorboard
 
 A01 (per-race eval_race_time_trained_A01)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

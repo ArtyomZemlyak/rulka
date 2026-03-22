@@ -596,21 +596,39 @@ def learner_process_fn(
             )
 
             with torch.no_grad():
+                from trackmania_rl.agents.iqn import FactorizedNoisyLinear
+
+                def _reset_last_layer(layer, layer_untrained, factor):
+                    """Reset a layer (nn.Linear or FactorizedNoisyLinear) toward untrained."""
+                    if isinstance(layer, FactorizedNoisyLinear):
+                        layer.weight_mu = utilities.linear_combination(
+                            layer.weight_mu, layer_untrained.weight_mu, factor,
+                        )
+                        layer.bias_mu = utilities.linear_combination(
+                            layer.bias_mu, layer_untrained.bias_mu, factor,
+                        )
+                        layer.weight_sigma = utilities.linear_combination(
+                            layer.weight_sigma, layer_untrained.weight_sigma, factor,
+                        )
+                        layer.bias_sigma = utilities.linear_combination(
+                            layer.bias_sigma, layer_untrained.bias_sigma, factor,
+                        )
+                    else:
+                        layer.weight = utilities.linear_combination(
+                            layer.weight, layer_untrained.weight, factor,
+                        )
+                        layer.bias = utilities.linear_combination(
+                            layer.bias, layer_untrained.bias, factor,
+                        )
+
                 if not get_config().pretrain_actions_head_freeze:
                     a_last = online_network.A_head_multi if online_network.A_head_multi is not None else online_network.A_head[-1]
                     a_last_untrained = untrained_iqn_network.A_head_multi if untrained_iqn_network.A_head_multi is not None else untrained_iqn_network.A_head[-1]
-                    a_last.weight = utilities.linear_combination(
-                        a_last.weight, a_last_untrained.weight, get_config().last_layer_reset_factor,
-                    )
-                    a_last.bias = utilities.linear_combination(
-                        a_last.bias, a_last_untrained.bias, get_config().last_layer_reset_factor,
-                    )
+                    _reset_last_layer(a_last, a_last_untrained, get_config().last_layer_reset_factor)
                 if not get_config().pretrain_V_head_freeze:
-                    online_network.V_head[-1].weight = utilities.linear_combination(
-                        online_network.V_head[-1].weight, untrained_iqn_network.V_head[-1].weight, get_config().last_layer_reset_factor,
-                    )
-                    online_network.V_head[-1].bias = utilities.linear_combination(
-                        online_network.V_head[-1].bias, untrained_iqn_network.V_head[-1].bias, get_config().last_layer_reset_factor,
+                    _reset_last_layer(
+                        online_network.V_head[-1], untrained_iqn_network.V_head[-1],
+                        get_config().last_layer_reset_factor,
                     )
 
         # -------------------------------------------------------------
@@ -656,6 +674,10 @@ def learner_process_fn(
                     # Phase A: sample under lock (~1ms)
                     with buffer_lock:
                         batch, batch_info = trainer.sample_batch(ingest_state["buffer"])
+                    # NoisyNets: fresh noise per gradient step (matches BTR behaviour)
+                    if get_config().use_noisy_linear:
+                        online_network.reset_noise()
+                        target_network.reset_noise()
                     # Phase B: GPU compute — NO lock (~5-15ms)
                     loss, grad_norm, grad_norm_before_clip, priority_update = trainer.train_on_data(batch, batch_info, do_learn=True)
                     # Phase C: priority update under lock (~0.5ms)

@@ -6,7 +6,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-(No changes yet.)
+### Analysis
+- ``analyze_experiment_by_relative_time.py``: ``--time-axis auto`` (default) uses ``cumul_training_hours`` when all runs log it, else wall minutes; explicit ``cumul_training_hours`` / ``wall_minutes`` still available.
+- ``audit_tensorboard_training_timeline.py``: compares merged TB wall span vs ``cumul_training_hours`` per run (detect misleading wall-axis docs).
+- ``generate_experiment_plots.py``: default ``--time-axis auto`` tries cumulative training hours and falls back to wall minutes if ``cumul_training_hours`` is missing from any run; regenerated ``docs/source/_static/exp_*.jpg`` accordingly.
+- Experiment docs: time-axis methodology; new ``docs/source/experiments/time_axis_conventions.rst`` audit table (wall vs ``cumul_training_hours``); ``multi_action_prediction.rst`` recomputed training-hour checkpoints for v2 vs v3.1_bc; ``pretrain_bc.rst`` run lengths corrected for full_iqn_bc / _2 / _3 and collapse narrative clarified (wall vs active training).
 
 ## [1.6.0] - 2026-03-20
 

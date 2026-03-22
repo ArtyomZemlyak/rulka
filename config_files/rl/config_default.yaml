@@ -24,7 +24,7 @@ environment:
   game_camera_number: 2
   sync_virtual_and_real_checkpoints: true
   # Multi-action: e.g. [0, 10, 20, 30, 40] for N=5 actions per block (10ms each). Omit or [0] = single action.
-  rl_action_offsets_ms: [0, 10, 20, 30, 40]
+  # rl_action_offsets_ms: [0, 10, 20, 30, 40]
 
 neural_network:
   w_downsized: 64
@@ -51,7 +51,7 @@ neural_network:
   use_iqn_image_head: true
 
 training:
-  run_name: "A01_as20_long_v3.1_pretrained_bc"
+  run_name: "A01_as20_long_v4_btr"
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -100,8 +100,8 @@ training:
   # BC full IQN state from BC run with use_full_iqn (iqn_bc.pt).
   # Path: BC run directory containing iqn_bc.pt, or path to iqn_bc.pt.
   # Loads img_head, float_feature_extractor, iqn_fc, A_head, V_head. Applied after encoder injection on fresh run.
-  # pretrain_bc_heads_path: null
-  pretrain_bc_heads_path: "output/ptretrain/bc/v5_multi_offset"
+  pretrain_bc_heads_path: null
+  # pretrain_bc_heads_path: "output/ptretrain/bc/v5_multi_offset"
 
   # Piecewise: load only float_feature_extractor or A_head from BC run (use_floats+save_float_head / use_actions_head+save_actions_head).
   # Path: BC run directory (with float_head.pt / actions_head.pt) or path to the .pt file. Requires existing checkpoints (e.g. after encoder injection).
@@ -162,6 +162,34 @@ rewards:
   engineered_kamikaze_reward_schedule: [[0, 0.0]]
   engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
   final_speed_reward_as_if_duration_s: 2
+
+# BTR (Beyond The Rainbow) — all features OFF by default for backward compatibility.
+# Enable individually to integrate BTR recipe components.
+# Reference: https://arxiv.org/abs/2411.03820
+btr:
+  # Munchausen IQN: soft-policy targets (replaces hard-max / DDQN target)
+  use_munchausen: true
+  munchausen_alpha: 0.9          # scaling of log-policy bonus (paper default: 0.9)
+  munchausen_entropy_tau: 0.03   # softmax temperature for log-policy (paper default: 0.03)
+  munchausen_lo: -1.0            # clamp lower bound for log-policy term
+
+  # IMPALA-CNN: 3-block residual encoder replacing the 4-layer CNN
+  use_impala_cnn: true
+  impala_model_size: 2           # channel multiplier (paper default: 2)
+
+  # Adaptive MaxPooling: replaces Flatten after conv, produces fixed spatial output
+  use_adaptive_maxpool: true
+  adaptive_maxpool_size: 6       # output spatial size (paper default: 6x6)
+
+  # Spectral Normalization on conv layers
+  use_spectral_norm: true
+
+  # Layer Normalization on dense layers (V/A heads, float extractor)
+  use_layer_norm: true
+
+  # NoisyNets: factorized noisy linear in V/A heads (state-dependent exploration)
+  use_noisy_linear: true
+  noisy_sigma0: 0.5              # initial noise scale (paper default: 0.5)
 
 map_cycle:
   entries:

@@ -8,54 +8,171 @@ In this file, we define:
 import copy
 import math
 import random
+from math import sqrt
 from typing import Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
 import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+from torch.nn import init
 from torchrl.data import ReplayBuffer
 
 from config_files.config_loader import get_config
 from trackmania_rl import utilities
 
 
-def calculate_conv_output_dim(height: int, width: int) -> int:
+# ---------------------------------------------------------------------------
+#  BTR building blocks
+# ---------------------------------------------------------------------------
+
+
+class FactorizedNoisyLinear(nn.Module):
+    """Factorized Gaussian noise layer (NoisyNet, Fortunato et al. 2018)."""
+
+    def __init__(self, in_features: int, out_features: int, sigma_0: float = 0.5) -> None:
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.sigma_0 = sigma_0
+
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.register_buffer("weight_epsilon", torch.empty(out_features, in_features))
+
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer("bias_epsilon", torch.empty(out_features))
+
+        self.reset_parameters()
+        self.reset_noise()
+        self.disable_noise()
+
+    @torch.no_grad()
+    def reset_parameters(self) -> None:
+        scale = 1.0 / sqrt(self.in_features)
+        init.uniform_(self.weight_mu, -scale, scale)
+        init.uniform_(self.bias_mu, -scale, scale)
+        init.constant_(self.weight_sigma, self.sigma_0 * scale)
+        init.constant_(self.bias_sigma, self.sigma_0 * scale)
+
+    @torch.no_grad()
+    def _factored_noise(self, size: int) -> Tensor:
+        x = torch.randn(size, device=self.weight_mu.device)
+        return x.sign().mul_(x.abs().sqrt_())
+
+    @torch.no_grad()
+    def reset_noise(self) -> None:
+        eps_in = self._factored_noise(self.in_features)
+        eps_out = self._factored_noise(self.out_features)
+        self.weight_epsilon.copy_(eps_out.outer(eps_in))
+        self.bias_epsilon.copy_(eps_out)
+
+    @torch.no_grad()
+    def disable_noise(self) -> None:
+        self.weight_epsilon.zero_()
+        self.bias_epsilon.zero_()
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Use matmul instead of F.linear: torch.compile(max-autotune) can produce
+        # wrong weight gradients for F.linear when out_features==1 (e.g. [512] vs [1, 512]),
+        # and the bug can show up only under autocast / after recompilation.
+        w = self.weight_mu + self.weight_sigma * self.weight_epsilon
+        b = self.bias_mu + self.bias_sigma * self.bias_epsilon
+        return x.matmul(w.T) + b
+
+
+class MatmulLinear(nn.Linear):
+    """Like nn.Linear but forward uses matmul, not F.linear.
+
+    torch.compile(max-autotune + autocast) can mis-compile F.linear backward when
+    out_features==1 (weight shape [1, in]); same class of bug as FactorizedNoisyLinear.
     """
-    Dynamically calculate the output dimension of the CNN head based on input image dimensions.
-    
-    This function creates a temporary CNN head with the same architecture as IQN_Network
-    and computes the output size by running a forward pass with a dummy input.
-    
-    The function works on CPU to avoid CUDA dependencies during configuration loading.
-    
-    Args:
-        height: Input image height in pixels
-        width: Input image width in pixels
-        
-    Returns:
-        Output dimension after Flatten() (channels × final_height × final_width)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x.matmul(self.weight.T) + self.bias
+
+
+class ImpalaCNNResidual(nn.Module):
+    """Single residual block used inside each IMPALA CNN stage."""
+
+    def __init__(self, depth: int, norm_func, activation_cls=nn.ReLU):
+        super().__init__()
+        self.activation = activation_cls()
+        self.conv_0 = norm_func(nn.Conv2d(depth, depth, kernel_size=3, stride=1, padding=1))
+        self.conv_1 = norm_func(nn.Conv2d(depth, depth, kernel_size=3, stride=1, padding=1))
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_ = self.conv_0(self.activation(x))
+        x_ = self.conv_1(self.activation(x_))
+        return x + x_
+
+
+class ImpalaCNNBlock(nn.Module):
+    """One IMPALA stage: conv -> maxpool -> 2x residual."""
+
+    def __init__(self, depth_in: int, depth_out: int, norm_func, activation_cls=nn.ReLU):
+        super().__init__()
+        self.conv = norm_func(nn.Conv2d(depth_in, depth_out, kernel_size=3, stride=1, padding=1))
+        self.max_pool = nn.MaxPool2d(3, 2, padding=1)
+        self.residual_0 = ImpalaCNNResidual(depth_out, norm_func, activation_cls)
+        self.residual_1 = ImpalaCNNResidual(depth_out, norm_func, activation_cls)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.conv(x)
+        x = self.max_pool(x)
+        x = self.residual_0(x)
+        x = self.residual_1(x)
+        return x
+
+
+def calculate_conv_output_dim(img_head: nn.Module, height: int, width: int) -> int:
+    """Return the flattened output dimension of *img_head* given (1, 1, H, W) input.
+
+    Works on CPU so it can be called at config-load time without CUDA.
     """
-    # Create the same CNN architecture as in IQN_Network
-    img_head_channels = [1, 16, 32, 64, 32]
-    activation_function = torch.nn.LeakyReLU
-    img_head = torch.nn.Sequential(
-        torch.nn.Conv2d(in_channels=img_head_channels[0], out_channels=img_head_channels[1], kernel_size=(4, 4), stride=2),
-        activation_function(inplace=True),
-        torch.nn.Conv2d(in_channels=img_head_channels[1], out_channels=img_head_channels[2], kernel_size=(4, 4), stride=2),
-        activation_function(inplace=True),
-        torch.nn.Conv2d(in_channels=img_head_channels[2], out_channels=img_head_channels[3], kernel_size=(3, 3), stride=2),
-        activation_function(inplace=True),
-        torch.nn.Conv2d(in_channels=img_head_channels[3], out_channels=img_head_channels[4], kernel_size=(3, 3), stride=1),
-        activation_function(inplace=True),
-        torch.nn.Flatten(),
-    )
-    
-    # Create dummy input and run forward pass on CPU (no CUDA dependency)
-    dummy_input = torch.zeros(1, 1, height, width)
+    dummy = torch.zeros(1, 1, height, width)
     with torch.no_grad():
-        output = img_head(dummy_input)
-    
-    return output.shape[1]  # Return the flattened dimension
+        out = img_head(dummy)
+    return out.shape[1]
+
+
+def _build_img_head(
+    *,
+    use_impala_cnn: bool,
+    impala_model_size: int,
+    use_spectral_norm: bool,
+    use_adaptive_maxpool: bool,
+    adaptive_maxpool_size: int,
+) -> nn.Sequential:
+    """Build the image encoder (CNN) based on config flags. Returns an nn.Sequential ending with Flatten."""
+    identity = lambda m: m  # noqa: E731
+    norm_func = torch.nn.utils.spectral_norm if use_spectral_norm else identity
+
+    if use_impala_cnn:
+        s = impala_model_size
+        layers: list[nn.Module] = [
+            ImpalaCNNBlock(1, 16 * s, norm_func),
+            ImpalaCNNBlock(16 * s, 32 * s, norm_func),
+            ImpalaCNNBlock(32 * s, 32 * s, norm_func),
+            nn.ReLU(inplace=True),
+        ]
+    else:
+        ch = [1, 16, 32, 64, 32]
+        act = nn.LeakyReLU
+        layers = [
+            norm_func(nn.Conv2d(ch[0], ch[1], kernel_size=4, stride=2)), act(inplace=True),
+            norm_func(nn.Conv2d(ch[1], ch[2], kernel_size=4, stride=2)), act(inplace=True),
+            norm_func(nn.Conv2d(ch[2], ch[3], kernel_size=3, stride=2)), act(inplace=True),
+            norm_func(nn.Conv2d(ch[3], ch[4], kernel_size=3, stride=1)), act(inplace=True),
+        ]
+
+    if use_adaptive_maxpool:
+        layers.append(nn.AdaptiveMaxPool2d((adaptive_maxpool_size, adaptive_maxpool_size)))
+
+    layers.append(nn.Flatten())
+    return nn.Sequential(*layers)
 
 
 class IQN_Network(torch.nn.Module):
@@ -71,149 +188,208 @@ class IQN_Network(torch.nn.Module):
         float_inputs_std: npt.NDArray,
         use_image_head: bool = True,
         n_actions_per_block: int = 1,
+        # BTR flags
+        use_impala_cnn: bool = False,
+        impala_model_size: int = 2,
+        use_adaptive_maxpool: bool = False,
+        adaptive_maxpool_size: int = 6,
+        use_spectral_norm: bool = False,
+        use_layer_norm: bool = False,
+        use_noisy_linear: bool = False,
+        noisy_sigma0: float = 0.5,
     ):
         super().__init__()
         self.iqn_embedding_dimension = iqn_embedding_dimension
         self.use_image_head = use_image_head
         self.n_actions_per_block = n_actions_per_block
+        self.use_noisy_linear = use_noisy_linear
         activation_function = torch.nn.LeakyReLU
+
+        # --- linear layer factory (NoisyLinear vs plain Linear) ---
+        def _linear(in_f: int, out_f: int) -> nn.Module:
+            if use_noisy_linear:
+                return FactorizedNoisyLinear(in_f, out_f, sigma_0=noisy_sigma0)
+            return nn.Linear(in_f, out_f)
+
+        # --- Image head ---
         if use_image_head:
-            img_head_channels = [1, 16, 32, 64, 32]
-            self.img_head = torch.nn.Sequential(
-                torch.nn.Conv2d(in_channels=img_head_channels[0], out_channels=img_head_channels[1], kernel_size=(4, 4), stride=2),
-                activation_function(inplace=True),
-                torch.nn.Conv2d(in_channels=img_head_channels[1], out_channels=img_head_channels[2], kernel_size=(4, 4), stride=2),
-                activation_function(inplace=True),
-                torch.nn.Conv2d(in_channels=img_head_channels[2], out_channels=img_head_channels[3], kernel_size=(3, 3), stride=2),
-                activation_function(inplace=True),
-                torch.nn.Conv2d(in_channels=img_head_channels[3], out_channels=img_head_channels[4], kernel_size=(3, 3), stride=1),
-                activation_function(inplace=True),
-                torch.nn.Flatten(),
+            self.img_head = _build_img_head(
+                use_impala_cnn=use_impala_cnn,
+                impala_model_size=impala_model_size,
+                use_spectral_norm=use_spectral_norm,
+                use_adaptive_maxpool=use_adaptive_maxpool,
+                adaptive_maxpool_size=adaptive_maxpool_size,
             )
         else:
             self.img_head = None
-        self.float_feature_extractor = torch.nn.Sequential(
-            torch.nn.Linear(float_inputs_dim, float_hidden_dim),
-            activation_function(inplace=True),
-            torch.nn.Linear(float_hidden_dim, float_hidden_dim),
-            activation_function(inplace=True),
-        )
+
+        # --- Float feature extractor ---
+        if use_layer_norm:
+            self.float_feature_extractor = nn.Sequential(
+                nn.Linear(float_inputs_dim, float_hidden_dim),
+                nn.LayerNorm(float_hidden_dim),
+                activation_function(inplace=True),
+                nn.Linear(float_hidden_dim, float_hidden_dim),
+                nn.LayerNorm(float_hidden_dim),
+                activation_function(inplace=True),
+            )
+        else:
+            self.float_feature_extractor = nn.Sequential(
+                nn.Linear(float_inputs_dim, float_hidden_dim),
+                activation_function(inplace=True),
+                nn.Linear(float_hidden_dim, float_hidden_dim),
+                activation_function(inplace=True),
+            )
 
         dense_input_dimension = (conv_head_output_dim if use_image_head else 0) + float_hidden_dim
         a_head_hidden = dense_hidden_dimension // 2
 
+        # --- Dueling A head ---
         if n_actions_per_block <= 1:
-            self.A_head = torch.nn.Sequential(
-                torch.nn.Linear(dense_input_dimension, a_head_hidden),
-                activation_function(inplace=True),
-                torch.nn.Linear(a_head_hidden, n_actions),
-            )
+            if use_layer_norm:
+                self.A_head = nn.Sequential(
+                    _linear(dense_input_dimension, a_head_hidden),
+                    nn.LayerNorm(a_head_hidden),
+                    activation_function(inplace=True),
+                    _linear(a_head_hidden, n_actions),
+                )
+            else:
+                self.A_head = nn.Sequential(
+                    _linear(dense_input_dimension, a_head_hidden),
+                    activation_function(inplace=True),
+                    _linear(a_head_hidden, n_actions),
+                )
             self.A_head_multi = None
         else:
-            self.A_head = torch.nn.Sequential(
-                torch.nn.Linear(dense_input_dimension, a_head_hidden),
+            if use_layer_norm:
+                self.A_head = nn.Sequential(
+                    _linear(dense_input_dimension, a_head_hidden),
+                    nn.LayerNorm(a_head_hidden),
+                    activation_function(inplace=True),
+                )
+            else:
+                self.A_head = nn.Sequential(
+                    _linear(dense_input_dimension, a_head_hidden),
+                    activation_function(inplace=True),
+                )
+            self.A_head_multi = _linear(a_head_hidden, n_actions_per_block * n_actions)
+
+        # --- Dueling V head ---
+        # Last layer MatmulLinear: out_features=1 + plain nn.Linear uses F.linear internally,
+        # which still breaks torch.compile backward (same [512] vs [1,512] gradient bug).
+        if use_layer_norm:
+            self.V_head = nn.Sequential(
+                _linear(dense_input_dimension, dense_hidden_dimension // 2),
+                nn.LayerNorm(dense_hidden_dimension // 2),
                 activation_function(inplace=True),
+                MatmulLinear(dense_hidden_dimension // 2, 1),
             )
-            self.A_head_multi = torch.nn.Linear(a_head_hidden, n_actions_per_block * n_actions)
-        self.V_head = torch.nn.Sequential(
-            torch.nn.Linear(dense_input_dimension, dense_hidden_dimension // 2),
-            activation_function(inplace=True),
-            torch.nn.Linear(dense_hidden_dimension // 2, 1),
+        else:
+            self.V_head = nn.Sequential(
+                _linear(dense_input_dimension, dense_hidden_dimension // 2),
+                activation_function(inplace=True),
+                MatmulLinear(dense_hidden_dimension // 2, 1),
+            )
+
+        # --- IQN cosine embedding ---
+        self.iqn_fc = nn.Sequential(
+            nn.Linear(iqn_embedding_dimension, dense_input_dimension),
+            nn.LeakyReLU(inplace=True),
         )
-        self.iqn_fc = torch.nn.Sequential(torch.nn.Linear(iqn_embedding_dimension, dense_input_dimension), torch.nn.LeakyReLU(inplace=True))
+
         self.initialize_weights()
 
         self.n_actions = n_actions
 
-        # States are not normalized when the method forward() is called. Normalization is done as the first step of the forward() method.
         self.float_inputs_mean = torch.tensor(float_inputs_mean, dtype=torch.float32).to("cuda")
         self.float_inputs_std = torch.tensor(float_inputs_std, dtype=torch.float32).to("cuda")
 
     def initialize_weights(self):
         lrelu_neg_slope = 1e-2
         activation_gain = torch.nn.init.calculate_gain("leaky_relu", lrelu_neg_slope)
+
+        def _should_init(m: nn.Module) -> bool:
+            if isinstance(m, FactorizedNoisyLinear):
+                return False
+            return isinstance(m, (nn.Conv2d, nn.Linear))
+
+        def _orthogonal_init(m: nn.Module, gain: float):
+            """Orthogonal init that targets weight_orig when spectral_norm hook is active."""
+            w = m.weight_orig if hasattr(m, "weight_orig") else m.weight
+            torch.nn.init.orthogonal_(w, gain=gain)
+            torch.nn.init.zeros_(m.bias)
+
         a_head_first = self.A_head[:-1] if self.A_head_multi is None else self.A_head
         modules_to_init = [self.float_feature_extractor, a_head_first, self.V_head[:-1]]
         if self.img_head is not None:
             modules_to_init.insert(0, self.img_head)
         for module in modules_to_init:
-            for m in module:
-                if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Linear):
-                    utilities.init_orthogonal(m, activation_gain)
+            for m in module.modules():
+                if _should_init(m):
+                    _orthogonal_init(m, activation_gain)
+
         utilities.init_orthogonal(
             self.iqn_fc[0], np.sqrt(2) * activation_gain
-        )  # Since cosine has a variance of 1/2, and we would like to exit iqn_fc with a variance of 1, we need a weight variance double that of what a normal leaky relu would need
+        )
+
+        # Last layer(s) of A/V heads -- output layers get gain=1
+        def _init_last(layer: nn.Module):
+            if isinstance(layer, FactorizedNoisyLinear):
+                return  # already initialized
+            utilities.init_orthogonal(layer)
+
         if self.A_head_multi is None:
-            utilities.init_orthogonal(self.A_head[-1])
+            _init_last(self.A_head[-1])
         else:
-            utilities.init_orthogonal(self.A_head_multi)
-        utilities.init_orthogonal(self.V_head[-1])
+            _init_last(self.A_head_multi)
+        _init_last(self.V_head[-1])
+
+    # --- NoisyNet helpers ---
+
+    def reset_noise(self) -> None:
+        for m in self.modules():
+            if isinstance(m, FactorizedNoisyLinear):
+                m.reset_noise()
+
+    def disable_noise(self) -> None:
+        for m in self.modules():
+            if isinstance(m, FactorizedNoisyLinear):
+                m.disable_noise()
+
+    # --- Forward pass ---
 
     def forward(
         self, img: torch.Tensor, float_inputs: torch.Tensor, num_quantiles: int, tau: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        This method implements the forward pass through the IQN neural network.
-
-        The neural network is structured with two input heads:
-            - one for images, with Conv2D layers
-            - one for float features with Dense layers
-
-        The embedding extracted by these two input heads are concatenated, mixed (Hadamard product) with an embedding for IQN quantiles.
-
-        A dueling network architecture (https://arxiv.org/abs/1511.06581) is implemented, two output heads predict:
-            - the value of a (state, quantile) pair
-            - the advantage of a (state, action, quantile) triplet
-
-        The Value and Advantage heads are combined to return the Q values directly.
-
-        Args:
-            img: a torch.Tensor of shape (batch_size, 1, H, W) and type float16 or float32, depending on context.
-            float_inputs: a torch.Tensor of shape (batch_size, float_input_dim) and type float16 or float32, depending on context.
-            num_quantiles: the number of quantiles, defined as N or N' in the IQN paper (https://arxiv.org/pdf/1806.06923).
-            tau: if not None, a torch.Tensor of shape (batch_size * num_quantiles) the specifies the exact quantiles for which the neural network should return Q values
-                 if None, the method will sample tau randomly in num_quantiles regularly spaced segments, and symmetrically around 0.5.
-
-        Returns:
-            Q: a torch.Tensor of shape (batch_size * num_quantiles, 1) representing the Q values for a given (state, quantile) combination
-            tau: a torch.Tensor of shape (batch_size * num_quantiles, 1) representing the quantiles used to make each prediction
-        """
         batch_size = img.shape[0]
         float_outputs = self.float_feature_extractor((float_inputs - self.float_inputs_mean) / self.float_inputs_std)
         if self.img_head is not None:
             img_outputs = self.img_head(img)
-            concat = torch.cat((img_outputs, float_outputs), 1)  # (batch_size, dense_input_dimension)
+            concat = torch.cat((img_outputs, float_outputs), 1)
         else:
-            concat = float_outputs  # (batch_size, dense_input_dimension)
+            concat = float_outputs
         if tau is None:
             tau = (
                 torch.arange(num_quantiles // 2, device="cuda", dtype=torch.float32).repeat_interleave(batch_size).unsqueeze(1)
                 + torch.rand(size=(batch_size * num_quantiles // 2, 1), device="cuda", dtype=torch.float32)
-            ) / num_quantiles  # (batch_size * num_quantiles // 2, 1) (random numbers)
-            tau = torch.cat((tau, 1 - tau), dim=0)  # ensure that tau are sampled symmetrically
+            ) / num_quantiles
+            tau = torch.cat((tau, 1 - tau), dim=0)
         quantile_net = torch.cos(
             torch.arange(1, self.iqn_embedding_dimension + 1, 1, device="cuda") * math.pi * tau
-        )  # (batch_size*num_quantiles, 1)
-        quantile_net = quantile_net.expand(
-            [-1, self.iqn_embedding_dimension]
-        )  # (batch_size*num_quantiles, iqn_embedding_dimension) (still random numbers)
-        # (8 or 32 initial random numbers, expanded with cos to iqn_embedding_dimension)
-        # (batch_size*num_quantiles, dense_input_dimension)
+        )
+        quantile_net = quantile_net.expand([-1, self.iqn_embedding_dimension])
         quantile_net = self.iqn_fc(quantile_net)
-        # (batch_size*num_quantiles, dense_input_dimension)
         concat = concat.repeat(num_quantiles, 1)
-        # (batch_size*num_quantiles, dense_input_dimension)
         concat = concat * quantile_net
 
-        V = self.V_head(concat)  # (batch_size*num_quantiles, 1)
+        V = self.V_head(concat)
         if self.A_head_multi is None:
-            A = self.A_head(concat)  # (batch_size*num_quantiles, n_actions)
+            A = self.A_head(concat)
             Q = V + A - A.mean(dim=-1).unsqueeze(-1)
             return Q, tau
-        # Multi-action: shared first layer + single fused Linear for all N heads
-        a_hidden = self.A_head(concat)  # (batch_size*num_quantiles, a_head_hidden)
-        A = self.A_head_multi(a_hidden).view(-1, self.n_actions_per_block, self.n_actions)  # (B, N, n_actions)
-        Q = V.unsqueeze(1) + A - A.mean(dim=-1, keepdim=True)  # (B, N, n_actions)
+        a_hidden = self.A_head(concat)
+        A = self.A_head_multi(a_hidden).view(-1, self.n_actions_per_block, self.n_actions)
+        Q = V.unsqueeze(1) + A - A.mean(dim=-1, keepdim=True)
         return Q, tau
 
     def to(self, *args, **kwargs):
@@ -331,55 +507,130 @@ class Trainer:
                     IS_weights = torch.from_numpy(batch_info["_weight"]).to("cuda", non_blocking=True)
 
                 n_ab = self.online_network.n_actions_per_block
+                n_act = self.online_network.n_actions
+                # Keep original (batch_size,) actions for Munchausen before repeat
+                actions_orig = actions.clone()  # (batch_size, N) or (batch_size, 1)
                 rewards = rewards.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
                 gammas_terminal = gammas_terminal.unsqueeze(-1).repeat([self.iqn_n, 1])  # (batch_size*iqn_n, 1)
-                # actions: (batch_size, N) with N=n_actions_per_block (N>=1)
                 actions = actions.repeat([self.iqn_n, 1])  # (batch_size*iqn_n, N)
 
                 q__stpo__target__quantiles_tau2, tau2 = self.target_network(
                     next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
                 )
-                # q__stpo: (batch*iqn_n, n_actions) when N==1, else (batch*iqn_n, N, n_actions)
 
-                if n_ab <= 1:
-                    if cfg.use_ddqn:
-                        a__tpo__online__reduced_repeated = (
-                            self.online_network(
-                                next_state_img_tensor,
-                                next_state_float_tensor,
-                                self.iqn_n,
-                                tau=None,
-                            )[0]
-                            .reshape([self.iqn_n, self.batch_size, self.online_network.n_actions])
-                            .mean(dim=0)
-                            .argmax(dim=1, keepdim=True)
-                            .repeat([self.iqn_n, 1])
-                        )
-                        outputs_target_tau2 = rewards + gammas_terminal * q__stpo__target__quantiles_tau2.gather(
-                            1, a__tpo__online__reduced_repeated
-                        )
-                    else:
-                        outputs_target_tau2 = (
-                            rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
-                        )
-                else:
-                    # Multi-action: factorized Q. Target = R + gamma * sum_i max_a Q_i(s')[a]
-                    if cfg.use_ddqn:
-                        q_online_next, _ = self.online_network(
-                            next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
-                        )
-                        q_on_next = q_online_next.reshape(
-                            [self.iqn_n, self.batch_size, n_ab, self.online_network.n_actions]
+                if cfg.use_munchausen:
+                    # --- Munchausen IQN targets ---
+                    m_tau = cfg.munchausen_entropy_tau
+                    m_alpha = cfg.munchausen_alpha
+                    m_lo = cfg.munchausen_lo
+
+                    if n_ab <= 1:
+                        # q_next: (iqn_n*batch, n_actions) -> mean over quantiles -> (batch, n_actions)
+                        q_next_mean = q__stpo__target__quantiles_tau2.reshape(
+                            self.iqn_n, self.batch_size, n_act
                         ).mean(dim=0)
-                        a_next = q_on_next.argmax(dim=2)  # (batch_size, N)
-                        a_next_repeated = a_next.repeat([self.iqn_n, 1])  # (batch*iqn_n, N)
-                        target_gather = torch.gather(
-                            q__stpo__target__quantiles_tau2, 2, a_next_repeated.unsqueeze(-1)
-                        ).sum(dim=1)  # (batch*iqn_n, 1)
-                        outputs_target_tau2 = rewards + gammas_terminal * target_gather
+
+                        # Soft policy over next actions: log π = log softmax(Q/τ)
+                        q_next_centered = q_next_mean - q_next_mean.max(1, keepdim=True)[0]
+                        logsum_next = torch.logsumexp(q_next_centered / m_tau, dim=1, keepdim=True)
+                        log_pi_next = q_next_centered / m_tau - logsum_next  # (batch, n_actions)
+                        pi_next = F.softmax(q_next_mean / m_tau, dim=1)  # (batch, n_actions)
+
+                        # Soft V(s') per quantile: Σ_a π(a) * (Q(a) - τ * log π(a))
+                        q_next_per_quant = q__stpo__target__quantiles_tau2.reshape(
+                            self.iqn_n, self.batch_size, n_act
+                        )  # (iqn_n, batch, n_actions)
+                        v_next = (pi_next.unsqueeze(0) * (q_next_per_quant - m_tau * log_pi_next.unsqueeze(0))).sum(dim=2)
+                        v_next = v_next.reshape(self.iqn_n * self.batch_size, 1)  # (iqn_n*batch, 1)
+
+                        # Munchausen bonus: α * τ * clamp(log π(a_t | s_t), lo, 0)
+                        q_cur, _ = self.target_network(
+                            state_img_tensor, state_float_tensor, self.iqn_n, tau=None
+                        )
+                        q_cur_mean = q_cur.reshape(self.iqn_n, self.batch_size, n_act).mean(dim=0)
+                        q_cur_centered = q_cur_mean - q_cur_mean.max(1, keepdim=True)[0]
+                        logsum_cur = torch.logsumexp(q_cur_centered / m_tau, dim=1, keepdim=True)
+                        log_pi_cur = q_cur_centered / m_tau - logsum_cur
+                        munch_bonus = m_alpha * m_tau * torch.clamp(
+                            log_pi_cur.gather(1, actions_orig), min=m_lo, max=0
+                        )  # (batch, 1)
+                        munch_bonus = munch_bonus.repeat(self.iqn_n, 1)  # (iqn_n*batch, 1)
+
+                        outputs_target_tau2 = (rewards + munch_bonus) + gammas_terminal * v_next
                     else:
-                        target_sum = q__stpo__target__quantiles_tau2.max(dim=2)[0].sum(dim=1, keepdim=True)
-                        outputs_target_tau2 = rewards + gammas_terminal * target_sum
+                        # Multi-action Munchausen: per-head soft policy, sum over heads
+                        # q_next: (iqn_n*batch, N, n_actions)
+                        q_next_mean = q__stpo__target__quantiles_tau2.reshape(
+                            self.iqn_n, self.batch_size, n_ab, n_act
+                        ).mean(dim=0)  # (batch, N, n_actions)
+
+                        q_next_centered = q_next_mean - q_next_mean.max(2, keepdim=True)[0]
+                        logsum_next = torch.logsumexp(q_next_centered / m_tau, dim=2, keepdim=True)
+                        log_pi_next = q_next_centered / m_tau - logsum_next  # actual log π
+                        pi_next = F.softmax(q_next_mean / m_tau, dim=2)  # (batch, N, n_actions)
+
+                        q_next_per_quant = q__stpo__target__quantiles_tau2.reshape(
+                            self.iqn_n, self.batch_size, n_ab, n_act
+                        )
+                        v_next_per_head = (
+                            pi_next.unsqueeze(0) * (q_next_per_quant - m_tau * log_pi_next.unsqueeze(0))
+                        ).sum(dim=3)  # (iqn_n, batch, N)
+                        v_next = v_next_per_head.sum(dim=2).reshape(self.iqn_n * self.batch_size, 1)
+
+                        q_cur, _ = self.target_network(
+                            state_img_tensor, state_float_tensor, self.iqn_n, tau=None
+                        )
+                        q_cur_mean = q_cur.reshape(self.iqn_n, self.batch_size, n_ab, n_act).mean(dim=0)
+                        q_cur_centered = q_cur_mean - q_cur_mean.max(2, keepdim=True)[0]
+                        logsum_cur = torch.logsumexp(q_cur_centered / m_tau, dim=2, keepdim=True)
+                        log_pi_cur = q_cur_centered / m_tau - logsum_cur  # actual log π
+                        munch_per_head = m_alpha * m_tau * torch.clamp(
+                            torch.gather(log_pi_cur, 2, actions_orig.unsqueeze(-1)),
+                            min=m_lo, max=0,
+                        ).sum(dim=1)  # (batch, 1)
+                        munch_bonus = munch_per_head.repeat(self.iqn_n, 1)
+
+                        outputs_target_tau2 = (rewards + munch_bonus) + gammas_terminal * v_next
+                else:
+                    # --- Standard DDQN / max targets ---
+                    if n_ab <= 1:
+                        if cfg.use_ddqn:
+                            a__tpo__online__reduced_repeated = (
+                                self.online_network(
+                                    next_state_img_tensor,
+                                    next_state_float_tensor,
+                                    self.iqn_n,
+                                    tau=None,
+                                )[0]
+                                .reshape([self.iqn_n, self.batch_size, n_act])
+                                .mean(dim=0)
+                                .argmax(dim=1, keepdim=True)
+                                .repeat([self.iqn_n, 1])
+                            )
+                            outputs_target_tau2 = rewards + gammas_terminal * q__stpo__target__quantiles_tau2.gather(
+                                1, a__tpo__online__reduced_repeated
+                            )
+                        else:
+                            outputs_target_tau2 = (
+                                rewards + gammas_terminal * q__stpo__target__quantiles_tau2.max(dim=1, keepdim=True)[0]
+                            )
+                    else:
+                        if cfg.use_ddqn:
+                            q_online_next, _ = self.online_network(
+                                next_state_img_tensor, next_state_float_tensor, self.iqn_n, tau=None
+                            )
+                            q_on_next = q_online_next.reshape(
+                                [self.iqn_n, self.batch_size, n_ab, n_act]
+                            ).mean(dim=0)
+                            a_next = q_on_next.argmax(dim=2)
+                            a_next_repeated = a_next.repeat([self.iqn_n, 1])
+                            target_gather = torch.gather(
+                                q__stpo__target__quantiles_tau2, 2, a_next_repeated.unsqueeze(-1)
+                            ).sum(dim=1)
+                            outputs_target_tau2 = rewards + gammas_terminal * target_gather
+                        else:
+                            target_sum = q__stpo__target__quantiles_tau2.max(dim=2)[0].sum(dim=1, keepdim=True)
+                            outputs_target_tau2 = rewards + gammas_terminal * target_sum
 
                 outputs_target_tau2 = outputs_target_tau2.reshape([self.iqn_n, self.batch_size, 1]).transpose(
                     0, 1
@@ -493,6 +744,7 @@ class Inferer:
         "epsilon_boltzmann",
         "tau_epsilon_boltzmann",
         "is_explo",
+        "use_noisy_linear",
     )
 
     def __init__(self, inference_network, iqn_k, tau_epsilon_boltzmann):
@@ -502,6 +754,7 @@ class Inferer:
         self.epsilon_boltzmann = None
         self.tau_epsilon_boltzmann = tau_epsilon_boltzmann
         self.is_explo = None
+        self.use_noisy_linear = inference_network.use_noisy_linear
 
     def infer_network(self, img_inputs_uint8: npt.NDArray, float_inputs: npt.NDArray, tau=None) -> npt.NDArray:
         """
@@ -541,22 +794,37 @@ class Inferer:
     ) -> Tuple[Union[int, npt.NDArray], bool, float, npt.NDArray]:
         """
         Selects an action (or block of N actions) according to the exploration strategy.
-        When n_actions_per_block==1 returns (action_idx: int, ...). When N>1 returns (actions: np.ndarray shape (N,), ...).
-        Exploration: multi_action_exploration "per_action" (each of N with prob epsilon random) or "per_block" (one draw for whole block).
+
+        When use_noisy_linear is enabled, NoisyNets provides state-dependent exploration:
+        noise is active during explo (reset_noise called externally per step) and
+        disabled during eval. Epsilon-greedy / Boltzmann perturbation is skipped.
+
+        When use_noisy_linear is disabled, the existing epsilon-greedy + Boltzmann is used.
         """
+        # NoisyNets: set noise state before inference
+        if self.use_noisy_linear:
+            if self.is_explo:
+                self.inference_network.reset_noise()
+            else:
+                self.inference_network.disable_noise()
+
         n_actions_per_block = self.inference_network.n_actions_per_block
-        q_raw = self.infer_network(img_inputs_uint8, float_inputs)  # (iqn_k, n_actions) or (iqn_k, N, n_actions)
-        q_values = q_raw.mean(axis=0)  # (n_actions,) or (N, n_actions)
+        q_raw = self.infer_network(img_inputs_uint8, float_inputs)
+        q_values = q_raw.mean(axis=0)
         n_actions = self.inference_network.n_actions
 
         if n_actions_per_block <= 1:
-            r = random.random()
-            if self.is_explo and r < self.epsilon:
-                get_argmax_on = np.random.randn(*q_values.shape)
-            elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
-                get_argmax_on = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
-            else:
+            if self.use_noisy_linear:
+                # NoisyNets exploration: noise is already baked into Q-values
                 get_argmax_on = q_values
+            else:
+                r = random.random()
+                if self.is_explo and r < self.epsilon:
+                    get_argmax_on = np.random.randn(*q_values.shape)
+                elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
+                    get_argmax_on = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
+                else:
+                    get_argmax_on = q_values
             action_chosen_idx = int(np.argmax(get_argmax_on))
             greedy_action_idx = int(np.argmax(q_values))
             return (
@@ -566,31 +834,33 @@ class Inferer:
                 q_values,
             )
 
-        # Multi-action: q_values shape (N, n_actions) — vectorized exploration
-        greedy_actions = np.argmax(q_values, axis=1)  # (N,)
-        multi_mode = get_config().multi_action_exploration
+        # Multi-action
+        greedy_actions = np.argmax(q_values, axis=1)
 
-        if multi_mode == "per_block":
-            r = random.random()
-            if self.is_explo and r < self.epsilon:
-                chosen = np.random.randint(0, n_actions, size=n_actions_per_block)
-            elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
-                perturbed = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
-                chosen = np.argmax(perturbed, axis=1)
-            else:
-                chosen = greedy_actions.copy()
-        else:
-            rs = np.random.random(n_actions_per_block)
-            random_mask = self.is_explo & (rs < self.epsilon)
-            boltz_mask = self.is_explo & ~random_mask & (rs < self.epsilon + self.epsilon_boltzmann)
-            greedy_mask = ~random_mask & ~boltz_mask
-
+        if self.use_noisy_linear:
             chosen = greedy_actions.copy()
-            if random_mask.any():
-                chosen[random_mask] = np.random.randint(0, n_actions, size=int(random_mask.sum()))
-            if boltz_mask.any():
-                perturbed = q_values[boltz_mask] + self.tau_epsilon_boltzmann * np.random.randn(int(boltz_mask.sum()), n_actions)
-                chosen[boltz_mask] = np.argmax(perturbed, axis=1)
+        else:
+            multi_mode = get_config().multi_action_exploration
+            if multi_mode == "per_block":
+                r = random.random()
+                if self.is_explo and r < self.epsilon:
+                    chosen = np.random.randint(0, n_actions, size=n_actions_per_block)
+                elif self.is_explo and r < self.epsilon + self.epsilon_boltzmann:
+                    perturbed = q_values + self.tau_epsilon_boltzmann * np.random.randn(*q_values.shape)
+                    chosen = np.argmax(perturbed, axis=1)
+                else:
+                    chosen = greedy_actions.copy()
+            else:
+                rs = np.random.random(n_actions_per_block)
+                random_mask = self.is_explo & (rs < self.epsilon)
+                boltz_mask = self.is_explo & ~random_mask & (rs < self.epsilon + self.epsilon_boltzmann)
+
+                chosen = greedy_actions.copy()
+                if random_mask.any():
+                    chosen[random_mask] = np.random.randint(0, n_actions, size=int(random_mask.sum()))
+                if boltz_mask.any():
+                    perturbed = q_values[boltz_mask] + self.tau_epsilon_boltzmann * np.random.randn(int(boltz_mask.sum()), n_actions)
+                    chosen[boltz_mask] = np.argmax(perturbed, axis=1)
 
         actions_arr = chosen.astype(np.int64)
         is_greedy = bool(np.all(actions_arr == greedy_actions))
@@ -608,25 +878,45 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
     Args:
         jit: a boolean indicating whether compilation should be used
     """
-    use_image_head = get_config().use_iqn_image_head
-    # When image head is disabled, conv_head_output_dim is 0; otherwise compute from image size
-    conv_head_output_dim = (
-        calculate_conv_output_dim(get_config().H_downsized, get_config().W_downsized)
-        if use_image_head
-        else 0
+    cfg = get_config()
+    use_image_head = cfg.use_iqn_image_head
+
+    # BTR flags
+    btr_kwargs = dict(
+        use_impala_cnn=cfg.use_impala_cnn,
+        impala_model_size=cfg.impala_model_size,
+        use_adaptive_maxpool=cfg.use_adaptive_maxpool,
+        adaptive_maxpool_size=cfg.adaptive_maxpool_size,
+        use_spectral_norm=cfg.use_spectral_norm,
+        use_layer_norm=cfg.use_layer_norm,
+        use_noisy_linear=cfg.use_noisy_linear,
+        noisy_sigma0=cfg.noisy_sigma0,
     )
 
+    if use_image_head:
+        tmp_head = _build_img_head(
+            use_impala_cnn=cfg.use_impala_cnn,
+            impala_model_size=cfg.impala_model_size,
+            use_spectral_norm=cfg.use_spectral_norm,
+            use_adaptive_maxpool=cfg.use_adaptive_maxpool,
+            adaptive_maxpool_size=cfg.adaptive_maxpool_size,
+        )
+        conv_head_output_dim = calculate_conv_output_dim(tmp_head, cfg.H_downsized, cfg.W_downsized)
+    else:
+        conv_head_output_dim = 0
+
     uncompiled_model = IQN_Network(
-        float_inputs_dim=get_config().float_input_dim,
-        float_hidden_dim=get_config().float_hidden_dim,
+        float_inputs_dim=cfg.float_input_dim,
+        float_hidden_dim=cfg.float_hidden_dim,
         conv_head_output_dim=conv_head_output_dim,
-        dense_hidden_dimension=get_config().dense_hidden_dimension,
-        iqn_embedding_dimension=get_config().iqn_embedding_dimension,
-        n_actions=len(get_config().inputs),
-        float_inputs_mean=get_config().float_inputs_mean,
-        float_inputs_std=get_config().float_inputs_std,
+        dense_hidden_dimension=cfg.dense_hidden_dimension,
+        iqn_embedding_dimension=cfg.iqn_embedding_dimension,
+        n_actions=len(cfg.inputs),
+        float_inputs_mean=cfg.float_inputs_mean,
+        float_inputs_std=cfg.float_inputs_std,
         use_image_head=use_image_head,
-        n_actions_per_block=get_config().n_actions_per_block,
+        n_actions_per_block=cfg.n_actions_per_block,
+        **btr_kwargs,
     )
     if jit:
         # torch.compile; multi-process stability is handled by warmup in main process + collector warmup under game_spawning_lock (see train.py, collector_process.py).

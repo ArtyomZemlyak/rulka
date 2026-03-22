@@ -20,7 +20,7 @@ from trackmania_rl.utilities import set_random_seed
 def collector_process_fn(
     config_path: Path,
     rollout_queue,
-    uncompiled_shared_network,
+    shared_state_dict: dict,
     shared_network_lock,
     game_spawning_lock,
     shared_steps: mp.Value,
@@ -68,9 +68,8 @@ def collector_process_fn(
     inferer = iqn.Inferer(inference_network, config.iqn_k, config.tau_epsilon_boltzmann)
 
     def update_network():
-        # Update weights of the inference network
         with shared_network_lock:
-            uncompiled_inference_network.load_state_dict(uncompiled_shared_network.state_dict())
+            uncompiled_inference_network.load_state_dict(shared_state_dict)
 
     # ========================================================
     # Training loop

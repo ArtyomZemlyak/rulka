@@ -11,7 +11,7 @@ This page documents experiments on **IQN model variants**: **use_ddqn** (Double 
 - **uni_17** → **uni_19**: **W_downsized / H_downsized** (128 → 64) and **iqn_embedding_dimension** (128 → 64). Same: use_ddqn True, batch/speed/map. "Downsized model" comparison.
 - **uni_17** → **uni_20**: only **W_downsized / H_downsized** (128 → 64). Same: iqn_embedding_dimension 128, use_ddqn True, batch/speed/map. **Isolates image-size effect** (embedding kept at 128).
 
-So: uni_12 (baseline) → +DDQN → uni_16 → +embedding 128 → uni_17 → +image 256×256 → uni_18; also uni_17 → 64×64 + embedding 64 → uni_19; uni_17 → 64×64 (embedding 128) → uni_20. Each experiment below compares one pair; metrics are by **relative time** (and the analysis script also outputs **by steps** for equal gradient-update comparison).
+So: uni_12 (baseline) → +DDQN → uni_16 → +embedding 128 → uni_17 → +image 256×256 → uni_18; also uni_17 → 64×64 + embedding 64 → uni_19; uni_17 → 64×64 (embedding 128) → uni_20. Each experiment below compares one pair; metrics use **aligned time checkpoints** from ``analyze_experiment_by_relative_time.py`` (default **auto** → cumulative training hours when logged; for these short ``uni_*`` runs that is usually close to wall minutes) and **by steps** for equal gradient-update comparison. See :doc:`../index`.
 
 -------------------------------------------------------------------------------
 Experiment 1: Double DQN (use_ddqn)

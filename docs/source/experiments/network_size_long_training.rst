@@ -22,7 +22,7 @@ We compared **A01_as20_big_long** (single map A01, larger CNN + IQN) with **A01_
 Results
 -------
 
-**Important:** Run durations differ (A01_as20_big_long ~561 min, A01_as20_long ~495 min, uni_20 ~120 min, uni_20_long ~824 min). All findings below are by **relative time** over the common 120 min window (and by steps when comparing equal gradient updates).
+**Important:** Audited wall spans: A01_as20_big_long **~561 min** wall / **~9.4 h** training; A01_as20_long **~486 min** / **~8.2 h**; uni_20_long **~822 min** / **~15.9 h** — ratios ~1 for these (suffix merges, little idle inflation). **v2-style** long runs (e.g. ``A01_as20_long_v2``) are **not** in this comparison; those can be **>2×** wall vs training (:doc:`experiments/time_axis_conventions`). Below: historical **120-minute wall** window + BY STEP; regenerate with ``--time-axis cumul_training_hours`` if you need training-time checkpoints.
 
 **Key findings (at 120 min, common window):**
 

@@ -22,7 +22,7 @@ We compared **uni_20** (baseline, two maps, from scratch ~120 min), **uni_20_lon
 Results
 -------
 
-**Important:** Run durations differ (uni_20 ~120 min, uni_20_long ~824 min, A01_as20_long variable). All findings below are by **relative time** over the common window (and by steps when comparing equal gradient updates). In the common 120 min window: uni_20 trains from scratch (cold start); uni_20_long trains from checkpoint (warm start); A01_as20_long trains from scratch on A01 only.
+**Important:** Run durations differ on the **TB wall** axis (uni_20 ~120 min, uni_20_long ~822 min wall, A01_as20_long ~486 min wall — audited). **Cumulative training** (e.g. uni_20_long **~15.9 h**, A01_as20_long **~8.2 h**) matches wall span ~1:1 for these runs; see :doc:`experiments/time_axis_conventions`. Findings below use the historical **wall-minute** grid unless you regenerate with ``cumul_training_hours``. In the common 120 min **wall** window: uni_20 cold start; uni_20_long warm start; A01_as20_long A01-only scratch.
 
 **Key Findings (uni_20 vs uni_20_long, at 120 min):**
 

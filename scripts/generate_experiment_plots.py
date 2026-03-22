@@ -2,9 +2,14 @@
 Generate comparison plots for all experiments documented in docs/source/experiments/.
 Saves JPG files to docs/source/_static with predictable names for embedding in .rst.
 
+By default each experiment tries **cumul_training_hours** on the X axis (matches learner
+console "Training hours"; excludes downtime between restarts). If any run lacks that TensorBoard
+scalar, falls back to **wall_minutes** (minutes from first TB event; includes calendar gaps).
+
 Usage:
   python scripts/generate_experiment_plots.py [--logdir tensorboard] [--output-dir docs/source/_static]
   python scripts/generate_experiment_plots.py --experiments exploration temporal_mini_race_duration
+  python scripts/generate_experiment_plots.py --time-axis wall_minutes   # force wall clock only
 """
 
 import argparse
@@ -17,8 +22,61 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from analyze_experiment_by_relative_time import compute_comparison_data
+from analyze_experiment_by_relative_time import CUMUL_TRAINING_HOURS_TAG, compute_comparison_data
 from experiment_plot_utils import plot_comparison
+
+
+def _load_comparison_data(
+    runs: list,
+    base_dir: Path,
+    *,
+    interval_min: int,
+    step_interval: int,
+    time_axis_mode: str,
+    interval_training_hours: float,
+):
+    """Returns (data, axis_used) where axis_used is 'cumul_training_hours' or 'wall_minutes'."""
+    if time_axis_mode == "wall_minutes":
+        data = compute_comparison_data(
+            runs,
+            base_dir=base_dir,
+            interval_min=interval_min,
+            step_interval=step_interval,
+            time_axis="wall_minutes",
+        )
+        return data, "wall_minutes"
+    if time_axis_mode == "cumul_training_hours":
+        data = compute_comparison_data(
+            runs,
+            base_dir=base_dir,
+            interval_min=interval_min,
+            step_interval=step_interval,
+            time_axis="cumul_training_hours",
+            interval_training_hours=interval_training_hours,
+        )
+        return data, "cumul_training_hours"
+    # auto: prefer cumulative training hours, fall back to wall clock
+    try:
+        data = compute_comparison_data(
+            runs,
+            base_dir=base_dir,
+            interval_min=interval_min,
+            step_interval=step_interval,
+            time_axis="cumul_training_hours",
+            interval_training_hours=interval_training_hours,
+        )
+        return data, "cumul_training_hours"
+    except ValueError as err:
+        if CUMUL_TRAINING_HOURS_TAG in str(err):
+            data = compute_comparison_data(
+                runs,
+                base_dir=base_dir,
+                interval_min=interval_min,
+                step_interval=step_interval,
+                time_axis="wall_minutes",
+            )
+            return data, "wall_minutes"
+        raise
 
 
 # Experiment name -> {runs, prefix} for documented experiments
@@ -50,6 +108,11 @@ EXPERIMENTS = [
     {"name": "reward_shaping_bc_resume_triple", "runs": ["A01_as20_long_full_iqn_bc_3_resume_engineer_rewards", "A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v2", "A01_as20_long_full_iqn_bc_3_resume_engineer_rewards_v3"], "prefix": "exp_reward_shaping_bc_resume_triple"},
     {"name": "iqn_no_image_head", "runs": ["A01_as20_long", "A01_as20_long_no_image"], "prefix": "exp_iqn_no_image_head"},
     {"name": "global_schedule_speed_v2", "runs": ["A01_as20_long_v2", "A01_as20_long_v2.1", "A01_as20_long_v2.4"], "prefix": "exp_global_schedule_speed_v2"},
+    {
+        "name": "multi_offset_v2_vs_v31bc_pretrained",
+        "runs": ["A01_as20_long_v2", "A01_as20_long_v3.1_pretrained_bc"],
+        "prefix": "exp_multi_offset_v2_vs_v31bc_pretrained",
+    },
 ]
 
 
@@ -58,8 +121,20 @@ def main() -> None:
     p.add_argument("--logdir", type=Path, default=Path("tensorboard"))
     p.add_argument("--output-dir", type=Path, default=_PROJECT_ROOT / "docs" / "source" / "_static")
     p.add_argument("--experiments", nargs="*", default=None, help="Experiment names to run (default: all)")
-    p.add_argument("--interval", type=int, default=5)
+    p.add_argument("--interval", type=int, default=5, help="Wall-clock checkpoint spacing (minutes) when using wall_minutes axis")
     p.add_argument("--step_interval", type=int, default=50000)
+    p.add_argument(
+        "--time-axis",
+        choices=("auto", "wall_minutes", "cumul_training_hours"),
+        default="auto",
+        help="auto: try cumul_training_hours, fall back to wall_minutes if scalar missing",
+    )
+    p.add_argument(
+        "--interval-training-hours",
+        type=float,
+        default=0.5,
+        help="X-axis step when using cumul_training_hours",
+    )
     p.add_argument("--by-step", action="store_true", help="Also generate by-step plots")
     p.add_argument("--quality", type=int, default=85)
     args = p.parse_args()
@@ -81,11 +156,13 @@ def main() -> None:
         prefix = exp["prefix"]
         print(f"Generating plots for {exp['name']} ({' '.join(runs)})...")
         try:
-            data = compute_comparison_data(
+            data, axis_used = _load_comparison_data(
                 runs,
-                base_dir=base_dir,
+                base_dir,
                 interval_min=args.interval,
                 step_interval=args.step_interval,
+                time_axis_mode=args.time_axis,
+                interval_training_hours=args.interval_training_hours,
             )
             saved = plot_comparison(
                 data,
@@ -95,7 +172,7 @@ def main() -> None:
                 jpg_quality=args.quality,
             )
             total_saved += len(saved)
-            print(f"  Saved {len(saved)} file(s)")
+            print(f"  Saved {len(saved)} file(s) (X axis: {axis_used})")
         except Exception as e:
             print(f"  Skipped: {e}")
     print(f"Total: {total_saved} plot(s) in {output_dir}")

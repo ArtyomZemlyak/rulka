@@ -150,6 +150,14 @@ def train_bc(cfg) -> Path:
             float_inputs_mean=rl_cfg.float_inputs_mean.tolist(),
             float_inputs_std=rl_cfg.float_inputs_std.tolist(),
             n_actions_per_block=n_offsets if use_fused else 1,
+            use_impala_cnn=rl_cfg.use_impala_cnn,
+            impala_model_size=rl_cfg.impala_model_size,
+            use_adaptive_maxpool=rl_cfg.use_adaptive_maxpool,
+            adaptive_maxpool_size=rl_cfg.adaptive_maxpool_size,
+            use_spectral_norm=rl_cfg.use_spectral_norm,
+            use_layer_norm=rl_cfg.use_layer_norm,
+            use_noisy_linear=rl_cfg.use_noisy_linear,
+            noisy_sigma0=rl_cfg.noisy_sigma0,
         )
         if n_offsets > 1 and not use_fused:
             model = IQN_BC_MultiOffset(iqn, n_offsets)

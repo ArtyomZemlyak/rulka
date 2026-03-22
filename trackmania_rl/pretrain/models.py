@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
-from trackmania_rl.agents.iqn import IQN_Network, calculate_conv_output_dim
+from trackmania_rl.agents.iqn import IQN_Network, calculate_conv_output_dim, _build_img_head
 
 
 def build_iqn_encoder(in_channels: int = 1, image_size: int = 64) -> nn.Sequential:
@@ -133,7 +133,8 @@ def build_encoder_from_meta(meta: dict) -> nn.Sequential:
 
 def get_enc_dim(in_channels: int, image_size: int) -> int:
     """Return the output dimension of an IQN-compatible encoder."""
-    return calculate_conv_output_dim(image_size, image_size)
+    encoder = build_iqn_encoder(in_channels=in_channels, image_size=image_size)
+    return calculate_conv_output_dim(encoder, image_size, image_size)
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +293,21 @@ def build_iqn_for_bc(
     float_inputs_mean: Optional[list[float]] = None,
     float_inputs_std: Optional[list[float]] = None,
     n_actions_per_block: int = 1,
+    *,
+    use_impala_cnn: bool = False,
+    impala_model_size: int = 2,
+    use_adaptive_maxpool: bool = False,
+    adaptive_maxpool_size: int = 6,
+    use_spectral_norm: bool = False,
+    use_layer_norm: bool = False,
+    use_noisy_linear: bool = False,
+    noisy_sigma0: float = 0.5,
 ) -> IQN_Network:
     """Build full IQN_Network for BC training (use_full_iqn).
 
     Architecture matches RL IQN so that the full state_dict can be loaded into
     the RL agent. Forward in BC uses num_quantiles=1 and tau either random or 0.5.
+    BTR kwargs must match the RL config for 1:1 transfer.
 
     Parameters
     ----------
@@ -313,7 +324,14 @@ def build_iqn_for_bc(
         Number of actions per block for multi-action prediction (fused mode).
         1 = single action (default); >1 = RL-identical A_head + A_head_multi.
     """
-    conv_head_output_dim = calculate_conv_output_dim(image_size, image_size)
+    tmp_head = _build_img_head(
+        use_impala_cnn=use_impala_cnn,
+        impala_model_size=impala_model_size,
+        use_spectral_norm=use_spectral_norm,
+        use_adaptive_maxpool=use_adaptive_maxpool,
+        adaptive_maxpool_size=adaptive_maxpool_size,
+    )
+    conv_head_output_dim = calculate_conv_output_dim(tmp_head, image_size, image_size)
     mean_arr = np.array(float_inputs_mean, dtype=np.float32) if float_inputs_mean else np.zeros(float_inputs_dim, dtype=np.float32)
     std_arr = np.array(float_inputs_std, dtype=np.float32) if float_inputs_std else np.ones(float_inputs_dim, dtype=np.float32)
     if len(mean_arr) != float_inputs_dim or len(std_arr) != float_inputs_dim:
@@ -331,6 +349,14 @@ def build_iqn_for_bc(
         float_inputs_mean=mean_arr,
         float_inputs_std=std_arr,
         n_actions_per_block=n_actions_per_block,
+        use_impala_cnn=use_impala_cnn,
+        impala_model_size=impala_model_size,
+        use_adaptive_maxpool=use_adaptive_maxpool,
+        adaptive_maxpool_size=adaptive_maxpool_size,
+        use_spectral_norm=use_spectral_norm,
+        use_layer_norm=use_layer_norm,
+        use_noisy_linear=use_noisy_linear,
+        noisy_sigma0=noisy_sigma0,
     )
 
 

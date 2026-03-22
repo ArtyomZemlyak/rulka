@@ -103,6 +103,13 @@ def plot_comparison(
     run_names = data["run_names"]
     by_time = data["by_time"]
     by_step_data = data.get("by_step")
+    time_axis = data.get("time_axis", "wall_minutes")
+    if time_axis == "cumul_training_hours":
+        x_label_time = "Cumulative training hours (excl. downtime between runs)"
+        title_time = "cumulative training hours"
+    else:
+        x_label_time = "Wall time from first TensorBoard event (min)"
+        title_time = "relative wall time (min)"
     saved: List[Path] = []
 
     def save_fig(name: str) -> None:
@@ -128,9 +135,9 @@ def plot_comparison(
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
         y_lo, y_hi = _time_axis_ylim(run_series)
         plt.ylim(y_lo, y_hi)
-        plt.xlabel("Time (min from run start)")
+        plt.xlabel(x_label_time)
         plt.ylabel("Best race time (s)")
-        plt.title(f"Best race time by relative time — {_tag_to_slug(tag)}")
+        plt.title(f"Best race time by {title_time} — {_tag_to_slug(tag)}")
         plt.legend()
         plt.grid(True, alpha=0.3)
         save_fig(f"{_tag_to_slug(tag)}_best")
@@ -150,9 +157,9 @@ def plot_comparison(
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
         y_lo, y_hi = _robust_ylim(run_series)
         plt.ylim(y_lo, y_hi)
-        plt.xlabel("Time (min from run start)")
+        plt.xlabel(x_label_time)
         plt.ylabel("Mean race time (s)")
-        plt.title(f"Mean race time by relative time — {_tag_to_slug(tag)}")
+        plt.title(f"Mean race time by {title_time} — {_tag_to_slug(tag)}")
         plt.legend()
         plt.grid(True, alpha=0.3)
         save_fig(f"{_tag_to_slug(tag)}_mean")
@@ -172,9 +179,9 @@ def plot_comparison(
             plt.plot(xs, ys, label=run, marker="o", markersize=3)
         y_lo, y_hi = _robust_ylim(run_series)
         plt.ylim(max(0, y_lo), min(100, y_hi))  # clamp to 0–100%
-        plt.xlabel("Time (min from run start)")
+        plt.xlabel(x_label_time)
         plt.ylabel("Finish rate (%)")
-        plt.title(f"Finish rate by relative time — {_tag_to_slug(tag)}")
+        plt.title(f"Finish rate by {title_time} — {_tag_to_slug(tag)}")
         plt.legend()
         plt.grid(True, alpha=0.3)
         save_fig(f"{_tag_to_slug(tag)}_rate")
@@ -193,7 +200,7 @@ def plot_comparison(
         is_time_metric = "time" in key and ("ms" in key or "best" in key)
         y_lo, y_hi = _time_axis_ylim(run_series) if is_time_metric else _robust_ylim(run_series)
         plt.ylim(y_lo, y_hi)
-        plt.xlabel("Time (min from run start)")
+        plt.xlabel(x_label_time)
         if key == "training_pct":
             plt.ylabel("Learner % training")
         elif key == "avg_q":
@@ -202,7 +209,7 @@ def plot_comparison(
             plt.ylabel("Best time (s)")
         else:
             plt.ylabel(key)
-        plt.title(f"{key} by relative time")
+        plt.title(f"{key} by {title_time}")
         plt.legend()
         plt.grid(True, alpha=0.3)
         save_fig(key)

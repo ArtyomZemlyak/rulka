@@ -1,28 +1,38 @@
 """
-Compare TensorBoard metrics by RELATIVE TIME (minutes from run start).
-Use this when runs had different durations — comparing "last value" is meaningless.
-Samples at 5, 10, 15, 20, ... min up to the shortest run in each comparison.
+Compare TensorBoard metrics along a time axis, plus BY STEP tables.
 
-Race times (preferred, more info and dynamics):
-  - Uses Race/eval_race_time_* and Race/explo_race_time_* (per-race events).
-  - All race events use ONE run-wide t0 (min wall_time across race tags) so rel_min is comparable.
-  - At each checkpoint T min: best = min of all race times with rel_min <= T, mean, std, finish rate, first finish.
-  - Time<->finished matching still uses step (same rollout = same step) for which races finished.
+**Default (``--time-axis auto``):** uses **cumulative training hours** when every run logs the scalar;
+otherwise **wall-clock minutes** from the first TensorBoard event (calendar time in the log, including gaps).
 
-Scalar metrics (alltime_min_ms_*, loss, Q, etc.): last or best value at each checkpoint.
+**Wall-clock mode:** ``--time-axis wall_minutes`` — X = minutes from the first merged TB event.
 
-Also prints BY STEP: same tables keyed by training step (e.g. 50k, 100k, 150k) so you can compare
-runs at equal numbers of gradient updates / transitions, not only at equal wall-clock time.
+**Cumulative training hours mode:** ``--time-axis cumul_training_hours`` uses the scalar
+``cumul_training_hours`` (logged every 5 min while the learner runs). This matches the
+console "Training hours" counter: it does **not** grow while the process is down, so restarts
+do not inject fake "elapsed" time. Requires that scalar in TensorBoard (Rulka learner logs it).
+
+Race times (preferred):
+  - Per-race Race/eval_race_time_* and Race/explo_race_time_*.
+  - Each event is mapped to X via wall minutes OR via cumul_training_hours at that event's step.
+  - At each checkpoint: best / mean / std, finish rate, first finish (same X semantics).
+
+Scalar metrics: last or best value at each checkpoint (same X axis).
+
+BY STEP: unchanged (training step checkpoints) — best for equal compute regardless of calendar time.
 
 Usage:
-  python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 [--logdir tensorboard] [--interval 5] [--step_interval 50000]
-  python scripts/analyze_experiment_by_relative_time.py uni_12 uni_13 uni_14 --interval 5   # 3+ runs supported
+  python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 [--interval 5] [--step_interval 50000]
+  python scripts/analyze_experiment_by_relative_time.py RUN1 RUN2 --time-axis cumul_training_hours --interval-training-hours 0.5
+
+Default ``--time-axis`` is **auto**: use cumulative training hours when all runs log ``cumul_training_hours``,
+otherwise wall minutes (see module docstring).
 """
 
 from pathlib import Path
+import math
+import sys
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from typing import Any, Dict, List, Optional, Set, Tuple
-import math
 
 METRICS = {
     'hock_best_time_ms': 'alltime_min_ms_hock',   # best time so far (5-min scalar; use race events for richer view)
@@ -31,6 +41,9 @@ METRICS = {
     'avg_q': 'RL/avg_Q_trained_A01',
     'training_pct': 'Performance/learner_percentage_training',  # 0..1
 }
+
+# Logged from learner step_stats (accumulated_stats); same as console "Training hours"
+CUMUL_TRAINING_HOURS_TAG = "cumul_training_hours"
 
 # tensorboard_suffix_schedule creates run_2, run_3, ... at step thresholds; we merge all
 SUFFIXES = ["", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9", "_10"]
@@ -214,6 +227,65 @@ def load_race_events_from_paths(
     return time_events, finished_events
 
 
+def load_cumul_training_hours_step_series(run_paths: List[Path]) -> List[Tuple[int, float]]:
+    """Merged (step, cumul_training_hours) from all TB chunks, sorted by step; last wins on duplicate step."""
+    rows: List[Tuple[int, float]] = []
+    for run_path in run_paths:
+        if not run_path.exists():
+            continue
+        try:
+            ea = EventAccumulator(str(run_path))
+            ea.Reload()
+            if CUMUL_TRAINING_HOURS_TAG not in ea.Tags().get("scalars", []):
+                continue
+            for e in ea.Scalars(CUMUL_TRAINING_HOURS_TAG):
+                rows.append((int(e.step), float(e.value)))
+        except Exception as ex:
+            print(f"Error loading {CUMUL_TRAINING_HOURS_TAG} from {run_path}: {ex}")
+    rows.sort(key=lambda x: x[0])
+    out: List[Tuple[int, float]] = []
+    for step, val in rows:
+        if out and out[-1][0] == step:
+            out[-1] = (step, val)
+        else:
+            out.append((step, val))
+    return out
+
+
+def hours_at_step(step_hours: List[Tuple[int, float]], step: int) -> float:
+    """Cumulative training hours at or before ``step`` (last logged value); 0 if before first sample."""
+    if not step_hours:
+        return 0.0
+    if step < step_hours[0][0]:
+        return 0.0
+    lo, hi = 0, len(step_hours) - 1
+    best = step_hours[0][1]
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        sm, hm = step_hours[mid]
+        if sm <= step:
+            best = hm
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def _remap_first_coord_to_training_hours(
+    events: List[Tuple[float, int, float]],
+    step_hours: List[Tuple[int, float]],
+) -> List[Tuple[float, int, float]]:
+    return [(hours_at_step(step_hours, s), s, v) for (_, s, v) in events]
+
+
+def _remap_run_dict_to_training_hours(
+    d: Dict[str, List[Tuple[float, int, float]]],
+    step_hours: List[Tuple[int, float]],
+) -> None:
+    for k in list(d.keys()):
+        d[k] = _remap_first_coord_to_training_hours(d[k], step_hours)
+
+
 def race_stats_at_checkpoint(
     events: List[Tuple[float, int, float]],
     target_min: float,
@@ -364,11 +436,18 @@ def compute_comparison_data(
     step_interval: int = 50000,
     use_all_scalars: bool = False,
     extra_scalar_tags: Optional[List[str]] = None,
+    time_axis: str = "wall_minutes",
+    interval_training_hours: float = 0.5,
 ) -> Dict[str, Any]:
     """Load runs and compute structured data for tables and plots.
     Returns dict with: run_names, durations, checkpoints, step_checkpoints,
     by_time (race_best, race_mean, race_rate, scalar), by_step (same keys).
-    Series format: metric_id -> run_name -> [(x, y), ...] where x is min or step.
+    Series format: metric_id -> run_name -> [(x, y), ...] where x is minutes, training hours, or step.
+
+    time_axis:
+      - ``wall_minutes``: first tensor in tuple is minutes from first TB event (includes downtime between sessions).
+      - ``cumul_training_hours``: first coord is ``cumul_training_hours`` at that point's training step
+        (matches console "Training hours"; pauses between restarts are excluded).
 
     If use_all_scalars is True, loads every scalar tag present in any run (except race tags).
     extra_scalar_tags: additional TensorBoard tag names to load and plot.
@@ -384,30 +463,81 @@ def compute_comparison_data(
     if extra_scalar_tags:
         tags_to_load = list(set(tags_to_load) | set(extra_scalar_tags))
 
+    if time_axis not in ("wall_minutes", "cumul_training_hours"):
+        raise ValueError(f"time_axis must be 'wall_minutes' or 'cumul_training_hours', got {time_axis!r}")
+    if time_axis == "cumul_training_hours":
+        tags_to_load = list(set(tags_to_load) | {CUMUL_TRAINING_HOURS_TAG})
+
     cache: Dict[str, Dict[str, List[Tuple[float, int, float]]]] = {}
     race_time: Dict[str, Dict[str, List[Tuple[float, int, float]]]] = {}
     race_finished: Dict[str, Dict[str, List[Tuple[float, int, float]]]] = {}
+    multi_chunk_runs: List[str] = []
     for name in run_names:
         paths = discover_run_paths(base_dir, name)
         if not paths:
             paths = [base_dir / name]
         if len(paths) > 1:
             print(f"[INFO] {name}: merging {len(paths)} log dirs ({', '.join(p.name for p in paths)})")
+            multi_chunk_runs.append(name)
         cache[name] = load_run_metrics_from_paths(paths, tags_to_load=tags_to_load)
         race_time[name], race_finished[name] = load_race_events_from_paths(paths)
 
+    if time_axis == "wall_minutes" and multi_chunk_runs:
+        print(
+            "[WARN] Wall-clock axis: X is minutes from the earliest TensorBoard wall_time in the "
+            "merged run(s). Calendar gaps between log folders/sessions are included and can dwarf "
+            "actual training time. Affected runs: "
+            + ", ".join(multi_chunk_runs)
+            + ". Prefer --time-axis cumul_training_hours (or BY STEP tables) for learning curves.",
+            file=sys.stderr,
+        )
+
+    hours_series_by_run: Dict[str, List[Tuple[int, float]]] = {}
+    if time_axis == "cumul_training_hours":
+        for name in run_names:
+            paths = discover_run_paths(base_dir, name)
+            if not paths:
+                paths = [base_dir / name]
+            sh = load_cumul_training_hours_step_series(paths)
+            if not sh:
+                raise ValueError(
+                    f"{name!r}: no TensorBoard scalar {CUMUL_TRAINING_HOURS_TAG}; "
+                    "use time_axis wall_minutes or upgrade learner logging."
+                )
+            hours_series_by_run[name] = sh
+            _remap_run_dict_to_training_hours(race_time[name], sh)
+            _remap_run_dict_to_training_hours(race_finished[name], sh)
+            for tag in list(cache[name].keys()):
+                cache[name][tag] = _remap_first_coord_to_training_hours(cache[name][tag], sh)
+
     durations: Dict[str, float] = {}
     for name in run_names:
-        d = 0.0
-        for data in cache.get(name, {}).values():
-            if data:
-                d = max(d, max(r for r, _, _ in data))
-        durations[name] = d
+        if time_axis == "cumul_training_hours":
+            sh = hours_series_by_run[name]
+            durations[name] = sh[-1][1] if sh else 0.0
+        else:
+            d = 0.0
+            for data in cache.get(name, {}).values():
+                if data:
+                    d = max(d, max(r for r, _, _ in data))
+            durations[name] = d
 
-    common_max_min = min(durations.values()) if durations else 0
-    checkpoints = list(range(interval_min, int(common_max_min) + 1, interval_min))
-    if not checkpoints and common_max_min > 0:
-        checkpoints = [int(common_max_min)]
+    common_max_min = min(durations.values()) if durations else 0.0
+    if time_axis == "cumul_training_hours":
+        ih = float(interval_training_hours)
+        if ih <= 0:
+            raise ValueError("interval_training_hours must be positive")
+        checkpoints: List[float] = []
+        t = ih
+        while t <= common_max_min + 1e-9:
+            checkpoints.append(round(t, 4))
+            t += ih
+        if not checkpoints and common_max_min > 0:
+            checkpoints = [round(float(common_max_min), 4)]
+    else:
+        checkpoints = list(range(interval_min, int(common_max_min) + 1, interval_min))
+        if not checkpoints and common_max_min > 0:
+            checkpoints = [int(common_max_min)]
 
     all_race_tags: Set[str] = set()
     for name in run_names:
@@ -543,6 +673,8 @@ def compute_comparison_data(
         "durations": durations,
         "checkpoints": checkpoints,
         "step_checkpoints": step_checkpoints,
+        "time_axis": time_axis,
+        "interval_training_hours": interval_training_hours,
         "all_race_tags": sorted(all_race_tags),
         "all_scalar_tags": sorted(all_scalar_tags),
         "cache": cache,
@@ -569,6 +701,7 @@ def _print_tables(data: Dict[str, Any]) -> None:
     durations = data["durations"]
     checkpoints = data["checkpoints"]
     step_checkpoints = data["step_checkpoints"]
+    time_axis = data.get("time_axis", "wall_minutes")
     all_race_tags = data["all_race_tags"]
     cache = data["cache"]
     race_time = data["race_time"]
@@ -576,12 +709,25 @@ def _print_tables(data: Dict[str, Any]) -> None:
     all_scalar_tags = data.get("all_scalar_tags") or sorted(
         set().union(*(set(cache.get(n, {}).keys()) for n in run_names))
     )
+    x_label = "cumul_training_h" if time_axis == "cumul_training_hours" else "min"
+    first_finish_note = (
+        "first finish (cumul training h)"
+        if time_axis == "cumul_training_hours"
+        else "first finish min"
+    )
 
     for name in run_names:
         print(f"Loaded {name} ({len(cache[name])} scalar metrics, {len(race_time[name])} race-time tags)")
     for name in run_names:
-        print(f"{name}: duration ~{durations[name]:.0f} min (relative time)")
-    print(f"\nCheckpoints (min from run start): {checkpoints}")
+        if time_axis == "cumul_training_hours":
+            print(f"{name}: duration ~{durations[name]:.2f} h (cumulative training hours, excl. process downtime)")
+        else:
+            print(f"{name}: duration ~{durations[name]:.0f} min (wall clock from first TensorBoard event)")
+    if time_axis == "cumul_training_hours":
+        ih = data.get("interval_training_hours", 0.5)
+        print(f"\nCheckpoints (cumulative training hours, step every {ih} h): {checkpoints}")
+    else:
+        print(f"\nCheckpoints (min from first TensorBoard event): {checkpoints}")
     print("=" * 80)
 
     for tag in all_race_tags:
@@ -589,21 +735,24 @@ def _print_tables(data: Dict[str, Any]) -> None:
         if not runs_with_tag:
             continue
         finished_tag = _race_time_to_finished_tag(tag)
-        print(f"\n{tag} (from per-race events: best / mean / std / best_fin; finish rate; first finish min)")
+        print(
+            f"\n{tag} (from per-race events: best / mean / std / best_fin; finish rate; {first_finish_note})"
+        )
         print("-" * 80)
-        parts = ["min"]
+        parts = [x_label]
         for n in runs_with_tag:
             parts.extend([f"{n}_best", f"{n}_mean", f"{n}_std", f"{n}_best_fin", f"{n}_rate", f"{n}_first"])
         print("\t".join(parts))
         for t in checkpoints:
-            row = [str(t)]
+            row = [f"{t:g}" if isinstance(t, float) else str(t)]
             for name in runs_with_tag:
                 events = race_time[name][tag]
                 fin_events = race_finished[name].get(finished_tag, []) if finished_tag else []
-                finished_steps = set(s for r, s, v in fin_events if r <= float(t) and v >= 0.5) if fin_events else None
-                st_all = race_stats_at_checkpoint(events, float(t), only_finished_steps=None)
-                st_fin = race_stats_at_checkpoint(events, float(t), only_finished_steps=finished_steps) if finished_steps else None
-                fin_stat = finish_stats_at_checkpoint(events, fin_events, float(t)) if fin_events else None
+                tc = float(t)
+                finished_steps = set(s for r, s, v in fin_events if r <= tc and v >= 0.5) if fin_events else None
+                st_all = race_stats_at_checkpoint(events, tc, only_finished_steps=None)
+                st_fin = race_stats_at_checkpoint(events, tc, only_finished_steps=finished_steps) if finished_steps else None
+                fin_stat = finish_stats_at_checkpoint(events, fin_events, tc) if fin_events else None
                 if st_all is not None:
                     row.extend([f"{st_all[0]:.3f}s", f"{st_all[1]:.2f}s", f"{st_all[2]:.2f}s"])
                 else:
@@ -614,7 +763,7 @@ def _print_tables(data: Dict[str, Any]) -> None:
                     row.append("-")
                 if fin_stat is not None:
                     row.append(f"{fin_stat[0]*100:.0f}%")
-                    row.append(f"{fin_stat[2]:.1f}" if fin_stat[2] is not None else "-")
+                    row.append(f"{fin_stat[2]:.2f}" if fin_stat[2] is not None else "-")
                 else:
                     row.extend(["-", "-"])
             print("\t".join(row))
@@ -627,9 +776,9 @@ def _print_tables(data: Dict[str, Any]) -> None:
         kind = _scalar_tag_kind(tag)
         print(f"\n{tag}")
         print("-" * 60)
-        print("min\t" + "\t".join(run_names))
+        print(f"{x_label}\t" + "\t".join(run_names))
         for t in checkpoints:
-            cells = [str(t)]
+            cells = [f"{t:g}" if isinstance(t, float) else str(t)]
             for name in run_names:
                 d = cache.get(name, {}).get(tag, [])
                 v = value_at_minutes(d, float(t), kind)
@@ -728,16 +877,53 @@ def compare_by_relative_time(
     plot_prefix: str = "",
     use_all_scalars: bool = False,
     extra_scalar_tags: Optional[List[str]] = None,
+    time_axis: str = "auto",
+    interval_training_hours: float = 0.5,
 ) -> Dict[str, Any]:
-    """Compare runs by relative time; print tables; optionally save comparison plots as JPG."""
-    data = compute_comparison_data(
-        run_names,
-        base_dir,
-        interval_min=interval_min,
-        step_interval=step_interval,
-        use_all_scalars=use_all_scalars,
-        extra_scalar_tags=extra_scalar_tags,
-    )
+    """Compare runs by wall minutes, cumulative training hours, or auto; print tables; optional plots."""
+    resolved_axis = time_axis
+    if time_axis == "auto":
+        try:
+            data = compute_comparison_data(
+                run_names,
+                base_dir,
+                interval_min=interval_min,
+                step_interval=step_interval,
+                use_all_scalars=use_all_scalars,
+                extra_scalar_tags=extra_scalar_tags,
+                time_axis="cumul_training_hours",
+                interval_training_hours=interval_training_hours,
+            )
+            resolved_axis = "cumul_training_hours"
+        except ValueError as err:
+            if CUMUL_TRAINING_HOURS_TAG not in str(err):
+                raise
+            data = compute_comparison_data(
+                run_names,
+                base_dir,
+                interval_min=interval_min,
+                step_interval=step_interval,
+                use_all_scalars=use_all_scalars,
+                extra_scalar_tags=extra_scalar_tags,
+                time_axis="wall_minutes",
+                interval_training_hours=interval_training_hours,
+            )
+            resolved_axis = "wall_minutes"
+        print(
+            f"[INFO] --time-axis auto: using {resolved_axis!r} for this comparison.",
+            file=sys.stderr,
+        )
+    else:
+        data = compute_comparison_data(
+            run_names,
+            base_dir,
+            interval_min=interval_min,
+            step_interval=step_interval,
+            use_all_scalars=use_all_scalars,
+            extra_scalar_tags=extra_scalar_tags,
+            time_axis=time_axis,
+            interval_training_hours=interval_training_hours,
+        )
     _print_tables(data)
     if plot_output_dir is not None and plot_output_dir != Path(""):
         import sys
@@ -751,9 +937,23 @@ def compare_by_relative_time(
 
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="Compare metrics by relative time and by training step")
+    import sys
+
+    p = argparse.ArgumentParser(description="Compare metrics by wall time, training hours, or by training step")
     p.add_argument("--logdir", type=Path, default=Path("tensorboard"))
-    p.add_argument("--interval", type=int, default=5, help="Checkpoint interval in minutes (relative time)")
+    p.add_argument(
+        "--time-axis",
+        choices=("auto", "wall_minutes", "cumul_training_hours"),
+        default="auto",
+        help="auto: cumul_training_hours if all runs log it, else wall_minutes; or force one axis",
+    )
+    p.add_argument(
+        "--interval-training-hours",
+        type=float,
+        default=0.5,
+        help="Checkpoint step on X when --time-axis cumul_training_hours (ignored for wall_minutes)",
+    )
+    p.add_argument("--interval", type=int, default=5, help="Checkpoint interval in minutes (only for wall_minutes axis)")
     p.add_argument("--step_interval", type=int, default=50000, help="Checkpoint interval in training steps (by-step tables)")
     p.add_argument("--plot", action="store_true", help="Save comparison plots as JPG to --output-dir")
     p.add_argument("--output-dir", type=Path, default=Path("."), help="Directory for plot JPGs (used with --plot)")
@@ -762,13 +962,19 @@ if __name__ == "__main__":
     p.add_argument("--metrics", type=str, nargs="*", default=None, help="Extra TensorBoard scalar tag names to load (e.g. Training/loss)")
     p.add_argument("runs", nargs="+")
     args = p.parse_args()
-    compare_by_relative_time(
-        args.runs,
-        base_dir=args.logdir,
-        interval_min=args.interval,
-        step_interval=args.step_interval,
-        plot_output_dir=args.output_dir if args.plot else None,
-        plot_prefix=args.prefix or "",
-        use_all_scalars=args.all_scalars,
-        extra_scalar_tags=args.metrics,
-    )
+    try:
+        compare_by_relative_time(
+            args.runs,
+            base_dir=args.logdir,
+            interval_min=args.interval,
+            step_interval=args.step_interval,
+            plot_output_dir=args.output_dir if args.plot else None,
+            plot_prefix=args.prefix or "",
+            use_all_scalars=args.all_scalars,
+            extra_scalar_tags=args.metrics,
+            time_axis=args.time_axis,
+            interval_training_hours=args.interval_training_hours,
+        )
+    except ValueError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        raise SystemExit(1) from err

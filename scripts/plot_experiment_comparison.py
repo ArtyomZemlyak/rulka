@@ -16,7 +16,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from analyze_experiment_by_relative_time import compute_comparison_data
+from generate_experiment_plots import _load_comparison_data
 from experiment_plot_utils import plot_comparison
 
 
@@ -27,6 +27,13 @@ def main() -> None:
     p.add_argument("--logdir", type=Path, default=Path("tensorboard"))
     p.add_argument("--interval", type=int, default=5)
     p.add_argument("--step_interval", type=int, default=50000)
+    p.add_argument(
+        "--time-axis",
+        choices=("auto", "wall_minutes", "cumul_training_hours"),
+        default="auto",
+        help="auto: try cumul_training_hours, fall back to wall_minutes if scalar missing",
+    )
+    p.add_argument("--interval-training-hours", type=float, default=0.5)
     p.add_argument("--output-dir", type=Path, default=Path("."))
     p.add_argument("--prefix", type=str, default="")
     p.add_argument("--by-step", action="store_true", help="Also generate plots by training step")
@@ -41,12 +48,15 @@ def main() -> None:
     if not output_dir.is_absolute():
         output_dir = (Path.cwd() / output_dir).resolve()
 
-    data = compute_comparison_data(
+    data, axis_used = _load_comparison_data(
         args.runs,
-        base_dir=base_dir,
+        base_dir,
         interval_min=args.interval,
         step_interval=args.step_interval,
+        time_axis_mode=args.time_axis,
+        interval_training_hours=args.interval_training_hours,
     )
+    print(f"X axis: {axis_used}")
     saved = plot_comparison(
         data,
         output_dir,

@@ -26,73 +26,72 @@ For “longest run” comparison (almost 100M+ training steps): ``A01_as20_long`
 Results
 -------
 
-Important: run durations differ, so the findings are primarily **by relative time**. Where step-based comparison is available, it is reported **by steps** (common overlap).
+Important: run lengths differ. **Primary quantitative comparisons here use training steps** (BY STEP tables from the analysis script). Any **time-axis** prose or regenerated tables must use **cumulative training hours** (``--time-axis auto`` or ``cumul_training_hours``), not raw TensorBoard wall minutes across merged logs — see :doc:`experiments/index`.
 
 Key findings
 
-- Multi-action schedule speedup (v3 -> v3.1) improves early learning: at 120 min, ``alltime_min_ms_A01`` is still at the maximum placeholder value for ``A01_as20_long_v3`` but has already dropped to ``27.230s`` for ``A01_as20_long_v3.1``.
-- BC head pretraining (v3.1 -> v3.1_pretrained_bc) improves both peak time and reliability (finish rate), especially from the 3rd to 4th hour onward:
-  - At 180 min: ``24.730s`` best eval time and ``56%`` eval finish rate for ``v3.1_pretrained_bc`` vs ``25.490s`` and ``40%`` for ``v3.1``.
-  - At 240 min: ``24.570s`` and ``60%`` vs ``24.850s`` and ``46%``.
-  - By the end of the shared window (up to ~1680 min): ``alltime_min_ms_A01`` reaches ``24.260s`` for ``v3.1_pretrained_bc`` vs ``24.410s`` for ``v3.1``.
-- By steps (common overlap; step checkpoints shown by the analysis script):
+- Multi-action schedule speedup (v3 → v3.1): ``A01_as20_long_v3.1`` reaches strong ``alltime_min_ms_A01`` much earlier **in environment steps** than ``A01_as20_long_v3`` (see BY STEP output from the analysis command in `Analysis Tools`_).
+- BC head pretraining (v3.1 → v3.1_pretrained_bc) improves peak time and finish rate at matched steps:
   - At 20M steps: eval best time ``24.570s`` and finish rate ``59%`` for ``v3.1_pretrained_bc`` vs ``24.850s`` and ``45%`` for ``v3.1``.
   - At 80M steps: eval best time ``24.260s`` and finish rate ``73%`` for ``v3.1_pretrained_bc`` vs ``24.410s`` and ``67%`` for ``v3.1``.
-- Comparison with the longest run ``A01_as20_long``:
-  - Early (120 min): the longest run is ahead in peak time (``24.610s`` best vs ``25.580s`` for ``v3.1_pretrained_bc``) and in finish rate (``55%`` vs ``44%``).
-  - Later (end of the shared window around 490 min): ``v3.1_pretrained_bc`` slightly overtakes the longest run in best time: ``alltime_min_ms_A01`` is ``24.400s`` vs ``24.510s``.
-  - Note on the final number: the full ``v3.1_pretrained_bc`` run continues beyond the shared window; in your run log it reaches ``BEST TIMES: A01 24.26s``. That ``24.26s`` is therefore not visible in the overlap-with-``A01_as20_long`` comparison table.
-  - Step-based overlap with ``A01_as20_long`` is limited (common overlap only reaches ~19.2M steps). At that shared step, ``v3.1_pretrained_bc`` has better best time (``24.570s`` vs ``24.510s``) but lower finish rate (``59%`` vs ``71%``). The main advantage shows up as training continues in the longer v3.1_pretrained run.
-- Direct check requested: ``A01_as20_long_v3.1`` vs ``A01_as20_long_v2`` (both merged across ``run``, ``run_2``, ``run_3``):
-  - By relative time, ``v2`` is consistently ahead on A01 best time over the shared window (e.g. 120 min: ``24.550s`` vs ``27.230s``; 240 min: ``24.430s`` vs ``24.850s``; 1680 min: ``24.150s`` vs ``24.410s``).
-  - By steps (1M checkpoints), ``v2`` also stays ahead (e.g. 20M: ``24.460s`` vs ``24.850s``; 40M: ``24.300s`` vs ``24.470s``; 80M: ``24.200s`` vs ``24.410s``).
-  - Final saved best (from ``save/<run>/accumulated_stats.joblib``): ``v2 = 24.150s`` (``24150`` ms), ``v3.1 = 24.410s`` (``24410`` ms).
+- Comparison with the longest run ``A01_as20_long`` (step overlap is limited — common window only to ~19.2M steps): at that shared step, ``v3.1_pretrained_bc`` has better best time (``24.570s`` vs ``24.510s``) but lower finish rate (``59%`` vs ``71%``). The full ``v3.1_pretrained_bc`` run continues well beyond that overlap; the final logged best **A01 24.26s** comes from the longer run.
+- Direct check: ``A01_as20_long_v3.1`` vs ``A01_as20_long_v2`` (TB merged across suffix dirs). **By steps** (1M checkpoints), ``v2`` stays ahead on A01 eval best time (e.g. 20M: ``24.460s`` vs ``24.850s``; 40M: ``24.300s`` vs ``24.470s``; 80M: ``24.200s`` vs ``24.410s``). Final saved bests from ``save/<run>/accumulated_stats.joblib``: ``v2 = 24.150s`` (``24150`` ms), ``v3.1 = 24.410s`` (``24410`` ms).
 - **Main baseline vs multi-offset + BC heads:** ``A01_as20_long_v2`` (single-action) vs ``A01_as20_long_v3.1_pretrained_bc`` (multi-action + ``v5_multi_offset`` BC init); see `Direct comparison: v2 vs v3.1_pretrained_bc`_ for tables, plots, and save-state check. In short: ``v2`` keeps better **best** and **mean** eval times and higher eval finish rate in the common window; saved ``alltime_min_ms['A01']`` is ``24150`` ms vs ``24260`` ms.
 
 Run Analysis
 ------------
 
-- ``A01_as20_long_v3``: multi-action enabled, ``global_schedule_speed = 1``; trained ~1403 min.
-- ``A01_as20_long_v3.1``: multi-action enabled, ``multi_action_exploration = per_block`` and ``global_schedule_speed = 4``; trained ~1681 min.
-- ``A01_as20_long_v3.1_pretrained_bc``: v3.1 + BC heads from ``output/ptretrain/bc/v5_multi_offset``; trained ~1818 min.
-- ``A01_as20_long`` (longest reference): single-map A01 long training with ``tensorboard_suffix_schedule`` up to ~150M steps; trained ~495 min.
-- ``A01_as20_long_v2``: single-action A01 long run (``global_schedule_speed = 4``); TensorBoard merged across ``A01_as20_long_v2``, ``_2``, ``_3``; trained ~2902 min (see direct comparison below).
+- ``A01_as20_long_v3`` / ``v3.1`` / ``v3.1_pretrained_bc``: merged TensorBoard dirs. **Cumulative training** for curves = ``cumul_training_hours`` (TB / ``save/.../accumulated_stats.joblib``). Example: ``save/A01_as20_long_v3.1_pretrained_bc/`` ≈ **24.5 h** training, A01 best **24260 ms**.
+- ``A01_as20_long`` (longest reference): same rules; see :doc:`experiments/time_axis_conventions` audit table.
+- ``A01_as20_long_v2``: merged **3** TB dirs. **Audited (local logs):** **~17.7 h** cumulative training vs **~2898 min** TB wall span (ratio **~2.7×**) — wall minutes **must not** be read as training duration. Pair with ``v3.1_pretrained_bc``: **~24.5 h** training vs **~3222 min** wall (**~2.2×**).
 
 Direct comparison: v2 vs v3.1_pretrained_bc
 -------------------------------------------
 
-This section compares the **single-action** long run ``A01_as20_long_v2`` to **multi-action + BC-pretrained** ``A01_as20_long_v3.1_pretrained_bc``. TensorBoard logs are merged with suffix chunks (``v2``: 3 dirs; ``v3.1_pretrained_bc``: 4 dirs). Run durations differ (**~2902 min** vs **~3222 min**); metrics below are by **relative time** (common window **~2902 min**) and **by steps** (common step window up to **100M**).
+This section compares **single-action** ``A01_as20_long_v2`` to **multi-action + BC-pretrained** ``A01_as20_long_v3.1_pretrained_bc``. Merged suffix logs (**3** vs **4** dirs). **Cumulative training** totals: **~17.74 h** (v2) vs **~24.51 h** (v3.1_bc); **common BY TIME window** ends at **~17.74 h** (v2 stops earlier in training time). TB **wall** spans are **~2900 min** vs **~3220 min** — **not** the same as those training hours (see :doc:`experiments/time_axis_conventions`).
 
-**Save-state cross-check:** ``save/A01_as20_long_v2/accumulated_stats.joblib`` has ``alltime_min_ms['A01'] = 24150`` (~**24.150s**); ``save/A01_as20_long_v3.1_pretrained_bc/`` has **24260** (~**24.260s**). These match the per-race eval best times at the end of the shared wall-clock window (see tables below).
+**Save-state cross-check:** ``save/.../accumulated_stats.joblib`` bests **24150 ms** vs **24260 ms** — matches **100M-step** BY STEP eval-best rows and the last **cumul_training_hours** checkpoints below.
+
+**Recomputed BY TIME table** (``Race/eval_race_time_trained_A01``, ``--time-axis cumul_training_hours``, ``--interval-training-hours 1``, merged TB, 2026-03):
+
+- **2 h:** best **24.55s** vs **25.58s**; mean **129.4s** vs **184.7s**; eval finish rate **62%** vs **43%**.
+- **8 h:** best **24.29s** vs **24.40s**; mean **91.0s** vs **115.7s**; rate **76%** vs **68%**.
+- **~17.7 h** (end of common window): best **24.15s** vs **24.26s**; mean **80.7s** vs **98.6s**; rate **80%** vs **74%**.
+
+**By-step** comparisons use a common window up to **100M** steps. Embedded figures use **cumulative training hours** on X (``generate_experiment_plots.py`` default **auto**).
 
 Detailed TensorBoard Metrics Analysis
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Methodology — Relative time and by steps:** Metrics are compared (1) at checkpoints 20, 40, 60, ... min (only while both runs are active) and (2) at step checkpoints 5M, 10M, ... (only up to the smallest max step). For race times, per-race events ``Race/eval_race_time_*`` give best / mean / std, finish rate, and first finish; tables from ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc --interval 20 --step_interval 5000000``. The figures below show one metric per graph (runs as lines, by relative time).
+**Methodology — By time vs by steps:** Regenerate the BY TIME grid with explicit training-hours axis::
+
+   python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc --time-axis cumul_training_hours --interval-training-hours 1 --step_interval 5000000
+
+**BY STEP** uses the same command (step grid unchanged). Do **not** use wall-minute checkpoints for this pair: wall span **>2×** active training time (:doc:`experiments/time_axis_conventions`).
+
+**Figures:** ``python scripts/generate_experiment_plots.py --experiments multi_offset_v2_vs_v31bc_pretrained``
 
 A01 eval — best time (``Race/eval_race_time_trained_A01``)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-- **``A01_as20_long_v2``:** at 120 min — **24.55s**; at 480 min — **24.29s**; at 2900 min (end of common window) — **24.15s**.
-- **``A01_as20_long_v3.1_pretrained_bc``:** at 120 min — **25.58s**; at 480 min — **24.40s**; at 2900 min — **24.26s**.
+**By cumulative training hours:** see the **2 h / 8 h / ~17.7 h** rows in the section above (recomputed from merged TensorBoard).
 
-**By steps** (``Race/eval_race_time_trained_A01``): at 20M — **24.46s** vs **24.57s**; at 100M — **24.15s** vs **24.26s** (same ordering).
+**By steps:** at 20M — **24.46s** vs **24.57s**; at 100M — **24.15s** vs **24.26s**.
 
 .. image:: ../_static/exp_multi_offset_v2_vs_v31bc_pretrained_A01_best.jpg
-   :alt: A01 eval best race time by relative time (A01_as20_long_v2 vs A01_as20_long_v3.1_pretrained_bc)
+   :alt: A01 eval best race time by cumulative training hours (A01_as20_long_v2 vs A01_as20_long_v3.1_pretrained_bc)
 
 A01 eval — mean time (all episodes; includes DNF / cutoff races)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Mean time is dominated by non-finished runs; use it as a **stability / typical-episode** signal alongside best time.
 
-- **``A01_as20_long_v2``:** at 120 min — **132.91s**; at 480 min — **91.57s**; at 2900 min — **80.00s**.
-- **``A01_as20_long_v3.1_pretrained_bc``:** at 120 min — **180.33s**; at 480 min — **115.67s**; at 2900 min — **98.69s**.
+**By cumulative training hours:** mean-time checkpoints are in the same BY TIME table output as for best time (see command above).
 
 **By steps:** at 100M — **80.69s** vs **98.50s** mean eval time; eval finish rate **80%** vs **74%**.
 
 .. image:: ../_static/exp_multi_offset_v2_vs_v31bc_pretrained_A01_mean.jpg
-   :alt: A01 eval mean race time by relative time (A01_as20_long_v2 vs A01_as20_long_v3.1_pretrained_bc)
+   :alt: A01 eval mean race time by cumulative training hours (A01_as20_long_v2 vs A01_as20_long_v3.1_pretrained_bc)
 
 Configuration differences (this pair)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -136,30 +135,32 @@ Conclusions
   - Going from v3 to v3.1 (faster schedule + per_block exploration) improves early learning and reaches the ~24.8-24.5 s range quickly.
 - Pretraining the RL heads from the multi-offset BC run (v5_multi_offset) provides a durable benefit:
   - Higher peak time and higher finish rate at the same step levels (20M -> 80M).
-  - Best time improvements continue over a long window (up to ~1680 min).
+  - Best time improvements continue through **tens of millions of steps** (see BY STEP rows above).
   - Likely reason: better temporal/action mapping between pretrain and RL. In BC pretrain, the model predicts 5 offset actions at 10 ms spacing; in multi-action RL, one decision is taken every ~50 ms and outputs a 5-action block. This alignment is much closer than the older single-action RL setup (one action every ~50 ms), where pretrain-to-RL mapping was weak.
 - Against the longest existing baseline (``A01_as20_long`` trained up to ~150M steps), the offset+pretrained agent has a slower start but catches up later and slightly improves the final peak time in the shared window.
-- Against **``A01_as20_long_v2``** (single-action, same ``global_schedule_speed = 4``), multi-offset + BC heads (**``v3.1_pretrained_bc``**) still trails on **best** eval time, **mean** eval time, and eval **finish rate** through the common wall-clock window and at 100M steps; saved bests **24.150s** vs **24.260s** (see `Direct comparison: v2 vs v3.1_pretrained_bc`_).
+- Against **``A01_as20_long_v2``** (single-action, same ``global_schedule_speed = 4``), multi-offset + BC heads (**``v3.1_pretrained_bc``**) still trails on **best** eval time, **mean** eval time, and eval **finish rate** on the shared **cumulative-training-hours** window (figures / BY TIME table) and at **100M** steps; saved bests **24.150s** vs **24.260s** (see `Direct comparison: v2 vs v3.1_pretrained_bc`_).
 
 Recommendations
 ---------------
 
 - If you adopt multi-action offsets, try ``global_schedule_speed = 4`` and ``multi_action_exploration = per_block`` as the first tuning pair.
 - If you can afford it, initialize from a multi-offset BC run (here: ``v5_multi_offset``) to improve long-run finish rate and to raise the achievable best time at large step counts.
-- For step-based comparisons against other “longest run” baselines, expect limited overlap if scalar/race tags stop being logged at different step ranges; use relative-time plots as the primary comparison in that case.
+- For comparisons against other “longest run” baselines, expect limited **step** overlap if logging stops at different ranges; use **training-hours** (or wall, if you must) curves from the analysis script or embedded plots.
 
 Analysis Tools
 ---------------
 
-- Compare v3 variants (relative time + by steps; recommended checkpoint resolution: ``--step_interval 1000000``):
+- Compare v3 variants (default **auto** time axis + by steps; recommended: ``--step_interval 1000000``):
 
-  ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v3 A01_as20_long_v3.1 A01_as20_long_v3.1_pretrained_bc --interval 60 --step_interval 1000000``
+  ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v3 A01_as20_long_v3.1 A01_as20_long_v3.1_pretrained_bc --interval-training-hours 0.5 --step_interval 1000000``
 
 - Compare against the longest baseline ``A01_as20_long``:
 
-  ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v3.1_pretrained_bc A01_as20_long --interval 10 --step_interval 1000000``
+  ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v3.1_pretrained_bc A01_as20_long --interval-training-hours 0.5 --step_interval 1000000``
 
-- Compare **v2** (single-action) vs **v3.1_pretrained_bc** (plots include per-race **best** and **mean** time curves):
+- Compare **v2** vs **v3.1_pretrained_bc** (BY TIME + BY STEP): ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc --interval-training-hours 0.5 --step_interval 5000000``
 
-  ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc --interval 20 --step_interval 5000000 --plot --output-dir docs/source/_static --prefix exp_multi_offset_v2_vs_v31bc_pretrained``
+- **Plots** for docs: ``python scripts/generate_experiment_plots.py --experiments multi_offset_v2_vs_v31bc_pretrained``. One-off JPG: ``python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc --time-axis cumul_training_hours --interval-training-hours 0.5 --step_interval 5000000 --plot --output-dir docs/source/_static --prefix exp_multi_offset_v2_vs_v31bc_pretrained``
+
+- Audit wall vs training time: ``python scripts/audit_tensorboard_training_timeline.py --runs A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc``
 

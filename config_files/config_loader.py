@@ -10,6 +10,7 @@ import numpy as np
 import yaml
 
 from config_files.config_schema import (
+    BTRConfig,
     EnvironmentConfig,
     ExplorationConfig,
     InputAction,
@@ -220,6 +221,9 @@ class ConfigView:
         # State normalization
         if hasattr(sn, name):
             return getattr(sn, name)
+        # BTR
+        if hasattr(m.btr, name):
+            return getattr(m.btr, name)
         raise AttributeError(f"Config has no attribute '{name}'")
 
 
@@ -256,6 +260,10 @@ def load_config(config_path: Path | str) -> ConfigView:
             data["rewards"][key] = _apply_schedule_speed(
                 data["rewards"][key], speed
             )
+    if "gamma_schedule" in data.get("training", {}):
+        data["training"]["gamma_schedule"] = _apply_schedule_speed(
+            data["training"]["gamma_schedule"], speed
+        )
     if "memory_size_schedule" in data.get("memory", {}):
         data["memory"]["memory_size_schedule"] = _apply_schedule_speed(
             data["memory"]["memory_size_schedule"], speed
@@ -312,6 +320,7 @@ def load_config(config_path: Path | str) -> ConfigView:
         f"float_inputs_mean length {len(mean_arr)} != expected {expected_len} != float_input_dim {neural.float_input_dim}"
     )
 
+    btr = BTRConfig.model_validate(data.get("btr", {}))
     user = UserConfig()
 
     from config_files.config_schema import RulkaConfig
@@ -328,6 +337,7 @@ def load_config(config_path: Path | str) -> ConfigView:
         inputs=inputs,
         state_normalization=state_norm,
         user=user,
+        btr=btr,
     )
     return ConfigView(cfg)
 

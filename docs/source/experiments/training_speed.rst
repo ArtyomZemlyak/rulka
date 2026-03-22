@@ -15,7 +15,7 @@ This document covers experiments on **batch_size** and **running_speed**. Baseli
 Results
 -------
 
-**Important:** Experiments had different durations (uni_5 ~160 min, uni_7 ~86 min, etc.), so comparing by “last value” is meaningless. All findings below are based on **relative time** — minutes from run start; metrics are compared at the same moments (5, 10, 20, … min), up to when the shortest compared run ends.
+**Important:** Experiments had different durations (uni_5 ~160 min, uni_7 ~86 min, etc.), so comparing by “last value” is meaningless. All findings below are based on **aligned time checkpoints** from ``analyze_experiment_by_relative_time.py``. With default ``--time-axis auto``, those checkpoints are **cumulative training hours** when the scalar is logged (same idea as console ``Training hours``); for these short **single-session** ``uni_*`` runs that is usually **close** to wall-clock minutes from the first TB event. If a run was restarted, use ``scripts/audit_tensorboard_training_timeline.py`` and see :doc:`experiments/index`. Metrics are compared at the same checkpoints up to when the shortest run ends.
 
 **Data source:** All numbers below are from ``scripts/analyze_experiment_by_relative_time.py`` (per-race tables for race times: **Hock** = long track ~55–70 s, **A01** = short track ~24–25 s). Reproduce: ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 ... --interval 5`` (``--logdir <path>`` if needed).
 
@@ -50,7 +50,7 @@ To reproduce metrics by **relative time**: ``python scripts/analyze_experiment_b
 Analysis methodology
 ~~~~~~~~~~~~~~~~~~~~
 
-The script ``analyze_experiment_by_relative_time.py`` supports **two or more runs** (e.g. ``uni_5 uni_6 uni_7 uni_10 uni_11 uni_12``). It compares by **relative time** (minutes from run start); checkpoints are 5, 10, 15, … min up to the shortest run.
+The script ``analyze_experiment_by_relative_time.py`` supports **two or more runs** (e.g. ``uni_5 uni_6 uni_7 uni_10 uni_11 uni_12``). Default **auto** time axis uses **cumulative training hours** when logged; with ``--time-axis wall_minutes``, checkpoints are 5, 10, 15, … **wall** minutes up to the shortest run.
 
 - **Race times (preferred):** Uses per-race events ``Race/eval_race_time_*`` and ``Race/explo_race_time_*``. For each run, one **run-wide t0** (min wall_time across race tags) is used so "5 min" is the same moment for all tags. At each checkpoint T min: **best** = min of race times with rel_min ≤ T, **mean**, **std** (stability), **best_fin** (best among finished only), **finish rate**, **first finish** (minute). This gives more dynamics and stability info than scalar metrics alone.
 
@@ -63,7 +63,7 @@ Detailed TensorBoard Metrics Analysis
 
 Metrics below are from TensorBoard logs (``tensorboard\uni_<N>``). Baseline is uni_5 (2048 batch, 160 speed). The figures below show comparison plots (one metric per graph, runs as lines, by relative time) for the main comparisons.
 
-**Methodology — Relative time:** Experiments had different durations (see Run Analysis), so comparing by “last value” is invalid. Metrics are aligned by **relative time** — minutes from run start. Values are taken at checkpoints 5, 10, 15, 20, … min; comparison runs only until the shortest compared run is still going. Race times: use **per-race events** (script prints best/mean/std/finish rate at each checkpoint) or scalar ``alltime_min_ms_*`` (best so far at that moment). Loss / Q / GPU %: **last value at that moment**. Tables: ``python scripts/analyze_experiment_by_relative_time.py <run1> <run2> [<run3> ...] [--interval 5]``.
+**Methodology — Aligned time checkpoints:** Experiments had different durations (see Run Analysis), so comparing by “last value” is invalid. Default **auto** uses **cumulative training hours**; for these short ``uni_*`` runs the minute labels below still match historical checkpoints (≈ wall time). Comparison runs only until the shortest run ends. Race times: **per-race events** or ``alltime_min_ms_*``. Loss / Q / GPU %: **last value at that checkpoint**. Regenerate: ``python scripts/analyze_experiment_by_relative_time.py <runs>`` (``--interval-training-hours 0.0833`` ≈ 5 min, or ``--time-axis wall_minutes --interval 5``). See :doc:`experiments/index`.
 
 **Key metrics** (aligned with :doc:`tensorboard_metrics`): Per-race: ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` (best/mean/std, finish rate). Scalars: ``alltime_min_ms_{map}``, ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``. Also: ``Performance/transitions_learned_per_second``, ``Gradients/norm_before_clip_max``. For interpretation see that file.
 
@@ -181,7 +181,7 @@ Hardware
 Conclusions
 -----------
 
-Conclusions are given by **relative time** (minutes from run start); comparing by “last value” when runs have different duration is invalid.
+Conclusions are given by **aligned time checkpoints** (default script: cumulative training hours; here, short runs ⇒ close to wall minutes); comparing by “last value” when runs have different duration is invalid.
 
 1. **Larger batch (8192) hurts:** On the common window by relative time — worse best times, ~10× higher loss, GPU % no gain (~52%). Keep batch ≤ 2048 or use 512 for the “small batch + fast speed” regime.
 

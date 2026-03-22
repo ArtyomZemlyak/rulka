@@ -355,6 +355,33 @@ class UserConfig(BaseSettings):
         return platform in ["linux", "linux2"]
 
 
+# --- BTR (Beyond The Rainbow) ---
+class BTRConfig(BaseModel):
+    # Munchausen IQN: soft-policy targets instead of hard max
+    use_munchausen: bool = False
+    munchausen_alpha: float = 0.9
+    munchausen_entropy_tau: float = 0.03
+    munchausen_lo: float = -1.0
+
+    # IMPALA-CNN: residual CNN encoder replacing the 4-layer conv
+    use_impala_cnn: bool = False
+    impala_model_size: int = 2
+
+    # Adaptive MaxPooling: replaces Flatten after conv layers
+    use_adaptive_maxpool: bool = False
+    adaptive_maxpool_size: int = 6
+
+    # Spectral Normalization on conv layers
+    use_spectral_norm: bool = False
+
+    # Layer Normalization on dense layers (V/A heads, float extractor)
+    use_layer_norm: bool = False
+
+    # NoisyNets: factorized noisy linear layers in V/A heads
+    use_noisy_linear: bool = False
+    noisy_sigma0: float = 0.5
+
+
 # --- Root Config ---
 class RulkaConfig(BaseModel):
     environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
@@ -370,5 +397,6 @@ class RulkaConfig(BaseModel):
         default_factory=StateNormalizationConfig
     )
     user: UserConfig = Field(default_factory=UserConfig)
+    btr: BTRConfig = Field(default_factory=BTRConfig)
 
     model_config = {"arbitrary_types_allowed": True}
