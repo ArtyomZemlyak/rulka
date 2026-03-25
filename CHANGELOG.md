@@ -4,13 +4,23 @@ All notable changes to this project are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.6.1] - 2026-03-25
 
 ### Analysis
 - ``analyze_experiment_by_relative_time.py``: ``--time-axis auto`` (default) uses ``cumul_training_hours`` when all runs log it, else wall minutes; explicit ``cumul_training_hours`` / ``wall_minutes`` still available.
 - ``audit_tensorboard_training_timeline.py``: compares merged TB wall span vs ``cumul_training_hours`` per run (detect misleading wall-axis docs).
 - ``generate_experiment_plots.py``: default ``--time-axis auto`` tries cumulative training hours and falls back to wall minutes if ``cumul_training_hours`` is missing from any run; regenerated ``docs/source/_static/exp_*.jpg`` accordingly.
 - Experiment docs: time-axis methodology; new ``docs/source/experiments/time_axis_conventions.rst`` audit table (wall vs ``cumul_training_hours``); ``multi_action_prediction.rst`` recomputed training-hour checkpoints for v2 vs v3.1_bc; ``pretrain_bc.rst`` run lengths corrected for full_iqn_bc / _2 / _3 and collapse narrative clarified (wall vs active training).
+
+### BTR experiment + docs
+- Added a dedicated BTR A01 comparison write-up: ``docs/source/experiments/models/btr.rst``.
+- Generated and embedded BTR comparison plots in ``docs/source/_static/`` (prefixed ``exp_btr_A01_v2_v4*``).
+- Added BTR config used for the experiment runs: ``config_files/rl/config_btr.yaml``.
+- Reorganized model documentation paths so architectures live under ``docs/source/models/`` (moved/added ``models/iqn_architecture.rst`` and ``models/btr_architecture.rst``).
+
+### Runtime reliability
+- Added optional CPU pinning for ``TmForever.exe`` via config (new fields in ``config_files/config_schema.py`` and ``config_files/rl/config_default.yaml``).
+- Hardened prioritized replay: when TorchRL prioritized trees are unavailable on Windows builds, the code falls back to uniform ``RandomSampler``.
 
 ## [1.6.0] - 2026-03-20
 
