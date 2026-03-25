@@ -1,5 +1,26 @@
-# Rulka default configuration
-# Use: python scripts/train.py --config config_files/rl/config_default.yaml
+# Beyond The Rainbow (BTR) — paper-aligned defaults for Rulka
+# Paper: https://arxiv.org/abs/2411.03820  |  Upstream code: https://github.com/VIPTankz/BTR
+# Train: python scripts/train.py --config config_files/rl/config_btr.yaml
+#
+# What the paper adds on top of Rainbow-style IQN (six ingredients mirrored in `btr:` + below):
+#   1) Munchausen-style soft policy in the TD target (tau=0.03, alpha=0.9, log clamp lo=-1)
+#   2) IMPALA residual CNN encoder (channel scale `impala_model_size: 2`)
+#   3) Adaptive max-pooling to fixed spatial size (6x6)
+#   4) Spectral normalization on convolutions
+#   5) LayerNorm on MLP / heads (listed in the paper; upstream Agent.py defaults layer_norm=0 — we enable it here as the full recipe)
+#   6) Factorized NoisyNet exploration on value stream (sigma0=0.5); epsilon/Boltzmann are skipped when NoisyNet is on (like --eps_disable 1)
+#
+# Hyperparameters taken from upstream main.py / Agent.py defaults (Atari-200M setup):
+#   lr=1e-4, batch=256, n-step=3, grad clip=10, discount=0.997, PER alpha=0.2, IQN taus=8,
+#   dueling on, Double DQN off (mutually exclusive with Munchausen in their stack), noisy+spectral+impala+maxpool on,
+#   target: hard copy every 500 learner steps in upstream; Rulka uses Polyak soft_update_tau each trigger (see neural_network).
+#
+# Rulka-specific caveats (read before long runs):
+#   - Image size stays 64x64 (TM); Atari uses 84x84 — not changed here.
+#   - PER: BTR anneals IS beta 0.45→1 over training; Rulka uses a fixed prio_beta (we use 1.0 = full correction).
+#   - Discount 0.997 is paper Atari frame-level; many TM runs prefer gamma→1 for full lap credit — see `gamma_schedule` comment block.
+#   - global_schedule_speed multiplies all schedule x-coordinates in config_loader; this file uses 1 so numbers match the paper table mentally.
+#   - Paper batch 256 is small for TM throughput; increase batch_size if the learner is not saturated.
 
 environment:
   tm_engine_step_per_action: 5 # 5
@@ -30,14 +51,19 @@ neural_network:
   w_downsized: 64
   h_downsized: 64
   float_hidden_dim: 256
-  dense_hidden_dimension: 1024
-  iqn_embedding_dimension: 128
+  # BTR Agent.py: linear_size=512 (trunk before dueling heads)
+  dense_hidden_dimension: 512
+  # BTR Agent.py: ncos=64 (IQN cosine embedding dim)
+  iqn_embedding_dimension: 64
+  # BTR main.py: --taus 8 (samples per forward for training targets)
   iqn_n: 8
   iqn_k: 32
   iqn_kappa: 0.005
-  use_ddqn: true
+  # BTR: --double 0 with Munchausen IQN (hard-max / DDQN target path disabled in code when munchausen on)
+  use_ddqn: false
   clip_grad_value: 1000
-  clip_grad_norm: 30
+  # BTR main.py: --grad_clip 10
+  clip_grad_norm: 10
   number_memories_trained_on_between_target_network_updates: 128
   soft_update_tau: 0.02
   target_self_loss_clamp_ratio: 4
@@ -51,26 +77,28 @@ neural_network:
   use_iqn_image_head: true
 
 training:
-  run_name: "A01_as20_long_v4.1_btr"
+  run_name: "A01_as20_long_v4.2_btr"
+  # BTR main.py: --bs 256 (raise if learner waits on GPU)
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
   adam_beta2: 0.999
-  weight_decay_lr_ratio: 0.1
+  # BTR Agent: adamw=False — no AdamW-style decoupled WD; disable custom WD scaling for parity
+  weight_decay_lr_ratio: 0
+  # Keep 1 so schedule step numbers are not multiplied (see config_loader._apply_schedule_speed)
   global_schedule_speed: 1
+  # BTR: lr=1e-4 (constant in upstream). Rulka uses from_exponential_schedule: a single [0, lr] row
+  # keeps LR flat; add a second row only if you want exponential decay between two anchors.
   lr_schedule:
-    - [0, 0.001]
-    - [3000000, 0.00005]
-    - [12000000, 0.00005]
-    - [15000000, 0.00001]
-    # - [0, 0.001]
-    # - [10000000, 0.00005]
-    # - [20000000, 0.00005]
-    # - [30000000, 0.00001]
+    - [0, 0.0001]
+  # Paper / main.py: --discount 0.997 (constant). For TM-style “full lap” horizon, many configs anneal to 1.0 instead, e.g.:
+  #   gamma_schedule:
+  #     - [0, 0.999]
+  #     - [1500000, 0.999]
+  #     - [2500000, 1]
   gamma_schedule:
-    - [0, 0.999]
-    - [1500000, 0.999]
-    - [2500000, 1]
+    - [0, 0.997]
+    - [400000000, 0.997]
   n_steps: 3
   discard_non_greedy_actions_in_nsteps: true
   tensorboard_suffix_schedule:
@@ -118,31 +146,28 @@ training:
   pretrain_V_head_freeze: false
 
 memory:
+  # BTR Agent: max_mem_size=1_048_576; ramp sizes toward ~1M long buffer (staircase = no interpolation)
   memory_size_schedule:
-    - [0, [50000, 20000]]
-    - [5000000, [100000, 75000]]
-    - [7000000, [200000, 150000]]
+    - [0, [65536, 32768]]
+    - [500000, [1048576, 262144]]
+  # BTR main.py: --per 1, --per_alpha 0.2
   prio_alpha: 0
   prio_epsilon: 0.002
+  # Upstream starts beta=0.45 and anneals to 1; Rulka has no annealer — 1.0 = full IS correction (stable default)
   prio_beta: 1
   number_times_single_memory_is_used_before_discard: 32
   buffer_test_ratio: 0.05
 
 exploration:
+  # With btr.use_noisy_linear=true, IQN skips epsilon/Boltzmann during rollouts (NoisyNet only). Schedules kept for ablations.
   epsilon_schedule:
     - [0, 1]
     - [50000, 1]
     - [300000, 0.1]
     - [3000000, 0.03]
-    # - [0, 1]
-    # - [300000, 1]
-    # - [3000000, 0.1]
-    # - [10000000, 0.03]
   epsilon_boltzmann_schedule:
     - [0, 0.15]
     - [10000000, 0.03]
-  # - [0, 0.03]
-  # - [3000000, 0.03]
   tau_epsilon_boltzmann: 0.01
   # When n_actions_per_block > 1: "per_action" (default) or "per_block"
   multi_action_exploration: per_block
@@ -163,33 +188,27 @@ rewards:
   engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
   final_speed_reward_as_if_duration_s: 2
 
-# BTR (Beyond The Rainbow) — all features OFF by default for backward compatibility.
-# Enable individually to integrate BTR recipe components.
-# Reference: https://arxiv.org/abs/2411.03820
+# BTR stack — all ON (full recipe). Toggle individual flags for ablations.
 btr:
-  # Munchausen IQN: soft-policy targets (replaces hard-max / DDQN target)
+  # Munchausen (Agent sets entropy_tau=0.03, lo=-1, alpha=munch_alpha)
   use_munchausen: true
-  munchausen_alpha: 0.9          # scaling of log-policy bonus (paper default: 0.9)
-  munchausen_entropy_tau: 0.03   # softmax temperature for log-policy (paper default: 0.03)
-  munchausen_lo: -1.0            # clamp lower bound for log-policy term
+  munchausen_alpha: 0.9
+  munchausen_entropy_tau: 0.03
+  munchausen_lo: -1.0
 
-  # IMPALA-CNN: 3-block residual encoder replacing the 4-layer CNN
   use_impala_cnn: true
-  impala_model_size: 2           # channel multiplier (paper default: 2)
+  impala_model_size: 2
 
-  # Adaptive MaxPooling: replaces Flatten after conv, produces fixed spatial output
   use_adaptive_maxpool: true
-  adaptive_maxpool_size: 6       # output spatial size (paper default: 6x6)
+  adaptive_maxpool_size: 6
 
-  # Spectral Normalization on conv layers
   use_spectral_norm: true
 
-  # Layer Normalization on dense layers (V/A heads, float extractor)
+  # Paper lists LayerNorm as an ingredient; upstream argparse defaults layer_norm=0 — enable for “full six”
   use_layer_norm: true
 
-  # NoisyNets: factorized noisy linear in V/A heads (state-dependent exploration)
   use_noisy_linear: true
-  noisy_sigma0: 0.5              # initial noise scale (paper default: 0.5)
+  noisy_sigma0: 0.5
 
 map_cycle:
   entries:

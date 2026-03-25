@@ -309,27 +309,37 @@ def copy_buffer_content_to_other_buffer(source_buffer: ReplayBuffer, target_buff
 
 
 def make_buffers(buffer_size: int) -> tuple[ReplayBuffer, ReplayBuffer]:
+    def _make_sampler():
+        if get_config().prio_alpha <= 0:
+            return RandomSampler()
+        try:
+            return CustomPrioritizedSampler(
+                buffer_size, get_config().prio_alpha, get_config().prio_beta, get_config().prio_epsilon, torch.float64
+            )
+        except RuntimeError as e:
+            # TorchRL prioritized trees are optional in some builds (common on Windows).
+            # Fallback keeps training runnable with uniform replay.
+            if "SumSegmentTreeFp32 is not available" in str(e):
+                print(
+                    "[WARNING] Prioritized replay is unavailable in current TorchRL build "
+                    "(SumSegmentTreeFp32 missing). Falling back to RandomSampler."
+                )
+                return RandomSampler()
+            raise
+
     buffer = ReplayBuffer(
         storage=ListStorage(buffer_size),
         batch_size=get_config().batch_size,
         collate_fn=buffer_collate_function,
         prefetch=1,
-        sampler=CustomPrioritizedSampler(
-            buffer_size, get_config().prio_alpha, get_config().prio_beta, get_config().prio_epsilon, torch.float64
-        )
-        if get_config().prio_alpha > 0
-        else RandomSampler(),
+        sampler=_make_sampler(),
     )
     buffer_test = ReplayBuffer(
         storage=ListStorage(int(buffer_size * get_config().buffer_test_ratio)),
         batch_size=get_config().batch_size,
         collate_fn=buffer_collate_function,
         prefetch=1,
-        sampler=CustomPrioritizedSampler(
-            buffer_size, get_config().prio_alpha, get_config().prio_beta, get_config().prio_epsilon, torch.float64
-        )
-        if get_config().prio_alpha > 0
-        else RandomSampler(),
+        sampler=_make_sampler(),
     )
     return buffer, buffer_test
 

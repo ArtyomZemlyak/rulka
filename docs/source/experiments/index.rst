@@ -32,5 +32,5 @@ Contents
    pretrain_bc
    pretrain/index
    iqn_no_image_head
-   models/iqn_architecture
    models/iqn
+   models/btr

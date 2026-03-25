@@ -45,6 +45,42 @@ from trackmania_rl.float_inputs import (
 from trackmania_rl.tmi_interaction.tminterface2 import MessageType, TMInterface
 
 
+def _apply_tm_forever_cpu_affinity(tm_pid: int, collector_index: int | None) -> None:
+    """Pin TmForever to one logical CPU if enabled in config (Windows and Linux)."""
+    cfg = get_config()
+    if not cfg.pin_tm_forever_cpu_affinity:
+        return
+    if collector_index is None:
+        print(
+            "Warning: pin_tm_forever_cpu_affinity is True but collector_index is None; "
+            "skipping cpu_affinity (pass collector_index from collector_process_fn)."
+        )
+        return
+    explicit = cfg.tm_forever_cpu_affinity_cpus
+    if explicit is not None:
+        if collector_index < 0 or collector_index >= len(explicit):
+            print(
+                f"Warning: tm_forever_cpu_affinity_cpus length {len(explicit)} "
+                f"does not cover collector_index={collector_index}; skipping cpu_affinity"
+            )
+            return
+        mask = [int(explicit[collector_index])]
+    else:
+        mask = [int(cfg.tm_forever_cpu_affinity_offset) + int(collector_index)]
+    n_logical = psutil.cpu_count(logical=True) or 1
+    if any(c < 0 or c >= n_logical for c in mask):
+        print(
+            f"Warning: cpu_affinity mask {mask} out of range for "
+            f"{n_logical} logical CPUs; skipping"
+        )
+        return
+    try:
+        psutil.Process(tm_pid).cpu_affinity(mask)
+        print(f"TmForever pid={tm_pid} cpu_affinity set to {mask}")
+    except (psutil.Error, OSError, ValueError) as e:
+        print(f"Warning: could not set TmForever cpu_affinity to {mask}: {e}")
+
+
 def _prev_indices_from_rollout_actions(actions_list, n_prev: int, n_actions_per_block: int, action_forward_idx: int):
     """Build prev_indices for build_float_vector: last n_prev individual actions.
 
@@ -348,6 +384,7 @@ class GameInstanceManager:
         max_minirace_duration_ms=2000,
         tmi_port=None,
         send_keys_to_window_only=False,
+        collector_index: int | None = None,
     ):
         # Create TMInterface we will be using to interact with the game client
         self.iface = None
@@ -371,6 +408,8 @@ class GameInstanceManager:
         # When True, send_key_to_game_window only uses PostMessage to our hwnd
         # (no focus change, no keybd_event/SendInput). Use for multi-instance capture.
         self.send_keys_to_window_only = send_keys_to_window_only
+        # Used with pin_tm_forever_cpu_affinity: which collector owns this game instance.
+        self.collector_index = collector_index
 
     def get_tm_window_id(self):
         assert self.tm_process_id is not None
@@ -465,6 +504,7 @@ class GameInstanceManager:
                         pass
 
         print(f"Found Trackmania process id: {self.tm_process_id=}")
+        _apply_tm_forever_cpu_affinity(self.tm_process_id, self.collector_index)
         self.last_game_reboot = time.perf_counter()
         self.latest_map_path_requested = -1
         self.msgtype_response_to_wakeup_TMI = None

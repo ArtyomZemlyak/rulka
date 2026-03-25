@@ -49,6 +49,7 @@ def collector_process_fn(
         max_overall_duration_ms=config.cutoff_rollout_if_race_not_finished_within_duration_ms,
         max_minirace_duration_ms=config.cutoff_rollout_if_no_vcp_passed_within_duration_ms,
         tmi_port=tmi_port,
+        collector_index=process_number,
     )
 
     inference_network, uncompiled_inference_network = iqn.make_untrained_iqn_network(config.use_jit, is_inference=True)

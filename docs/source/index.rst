@@ -47,6 +47,12 @@ The project uses distributional reinforcement learning (IQN - Implicit Quantile 
 
 .. toctree::
    :maxdepth: 2
+   :caption: Model Architectures:
+
+   models/index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Experiments:
 
    experiments/index

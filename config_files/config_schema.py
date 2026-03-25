@@ -296,6 +296,12 @@ class PerformanceConfig(BaseModel):
     threshold_to_save_all_runs_ms: int = -1
     running_speed: int = 512
     force_window_focus_on_input: bool = False
+    # Pin each game client (TmForever.exe) to specific logical CPUs after launch.
+    # collector_process_fn passes process_number as collector_index; see game_instance_manager.launch_game.
+    pin_tm_forever_cpu_affinity: bool = False
+    tm_forever_cpu_affinity_offset: int = 0
+    # If set, collector i uses tm_forever_cpu_affinity_cpus[i] (must cover all collector indices).
+    tm_forever_cpu_affinity_cpus: Optional[list[int]] = None
 
 
 # --- Input Action ---

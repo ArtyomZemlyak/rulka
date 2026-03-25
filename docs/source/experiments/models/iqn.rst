@@ -3,6 +3,11 @@ IQN model experiments
 
 This page documents experiments on **IQN model variants**: **use_ddqn** (Double DQN), **iqn_embedding_dimension**, **W_downsized / H_downsized** (image dimensions), and related parameters.
 
+Architecture references:
+
+- Baseline IQN architecture: :doc:`../../models/iqn_architecture`
+- BTR architecture (implemented as IQN add-ons): :doc:`../../models/btr_architecture`
+
 **How the runs relate (chain of changes):**
 
 - **uni_12** → **uni_16**: only **use_ddqn** (False → True). Same: batch 512, speed 512, map 64–64, iqn_embedding_dimension 64, W/H 128.
