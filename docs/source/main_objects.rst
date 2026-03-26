@@ -78,7 +78,7 @@ The learner process and collector processes have access to a common uncompiled `
 
 The network's structure is further defined in the class' ``forward()`` method.
 A detailed architecture description with block diagrams is in
-:doc:`models/iqn_architecture`, and BTR additions are documented in
+:doc:`models/iqn_architecture`; optional BTR paper features on the same IQN class are in
 :doc:`models/btr_architecture`.
 
 

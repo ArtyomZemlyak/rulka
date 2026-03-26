@@ -26,6 +26,7 @@ environment:
   # Multi-action: e.g. [0, 10, 20, 30, 40] for N=5 actions per block (10ms each). Omit or [0] = single action.
   # rl_action_offsets_ms: [0, 10, 20, 30, 40]
 
+# Network width / IQN hyperparams. CNN variants (IMPALA, noisy, etc.) live under btr: below.
 neural_network:
   w_downsized: 64
   h_downsized: 64
@@ -52,6 +53,8 @@ neural_network:
 
 training:
   run_name: "A01_as20_long_v4.1_btr"
+  # RL stack: "iqn" selects IQN wiring in train/learner/collector. Topology = neural_network + btr + environment (not this field alone).
+  algorithm: iqn
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -163,8 +166,8 @@ rewards:
   engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
   final_speed_reward_as_if_duration_s: 2
 
-# BTR (Beyond The Rainbow) — all features OFF by default for backward compatibility.
-# Enable individually to integrate BTR recipe components.
+# BTR (Beyond The Rainbow) — optional IQN upgrades only (not a separate algorithm / not another training.algorithm).
+# Same IQN_Network + iqn wiring; flip flags to match the paper recipe or ablate (pydantic defaults are all false).
 # Reference: https://arxiv.org/abs/2411.03820
 btr:
   # Munchausen IQN: soft-policy targets (replaces hard-max / DDQN target)

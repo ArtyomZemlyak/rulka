@@ -3,9 +3,11 @@ Model architectures
 
 This section describes the model architectures used in the project.
 
-The base model is :doc:`iqn_architecture` (Implicit Quantile Network).
-The BTR variant is described in :doc:`btr_architecture` and is implemented
-as a set of additional components on top of the same IQN backbone.
+The only value-based RL backbone in the training stack is **IQN** (:doc:`iqn_architecture`).
+**BTR (Beyond The Rainbow)** is **not** a separate architecture or ``training.algorithm``:
+it is a **bundle of optional improvements** (Munchausen targets, IMPALA-CNN, pooling, spectral norm,
+LayerNorm, NoisyNets) toggled under the ``btr:`` section of the same YAML and wired into
+``IQN_Network`` / the IQN trainer. See :doc:`btr_architecture` for the feature map.
 
 Contents
 --------

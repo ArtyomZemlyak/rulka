@@ -13,7 +13,7 @@ from torch import multiprocessing as mp
 
 from config_files.config_loader import load_config, set_config, get_config
 from trackmania_rl import utilities
-from trackmania_rl.agents import iqn as iqn
+from trackmania_rl.agents.algorithms import get_wiring
 from trackmania_rl.utilities import set_random_seed
 
 
@@ -52,7 +52,8 @@ def collector_process_fn(
         collector_index=process_number,
     )
 
-    inference_network, uncompiled_inference_network = iqn.make_untrained_iqn_network(config.use_jit, is_inference=True)
+    wiring = get_wiring()
+    inference_network, uncompiled_inference_network = wiring.make_network(config.use_jit, is_inference=True)
     try:
         w1_path = save_dir / "weights1.torch"
         if w1_path.exists():
@@ -66,7 +67,7 @@ def collector_process_fn(
     except Exception as e:
         print(f"[INFO] Worker {process_number} starting with fresh weights")
 
-    inferer = iqn.Inferer(inference_network, config.iqn_k, config.tau_epsilon_boltzmann)
+    inferer = wiring.make_inferer(inference_network)
 
     def update_network():
         with shared_network_lock:

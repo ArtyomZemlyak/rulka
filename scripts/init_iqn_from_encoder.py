@@ -21,20 +21,27 @@ python scripts/init_iqn_from_encoder.py \
     --save-dir    save/ \
     --no-fresh
 
-# Validate only (no writing):
+# Validate only (no writing; no GPU required):
 python scripts/init_iqn_from_encoder.py \
     --encoder-pt  pretrain_visual_out/encoder.pt \
     --dry-run
 
+# Same topology as training (not default.yaml):
+python scripts/init_iqn_from_encoder.py \
+    --encoder-pt  pretrain_visual_out/encoder.pt \
+    --save-dir save/my_run/ \
+    --rl-config config_files/rl/config_btr.yaml
+
 Notes
 -----
-* Requires CUDA (same as RL training).
+* CUDA is required when writing checkpoints (IQN lives on GPU). ``--dry-run`` skips CUDA.
 * For multi-channel encoders (--stack-mode channel, n_stack > 1), the first
   Conv2d layer kernels are averaged across input channels to produce a 1-ch
   weight compatible with IQN's img_head.  A warning is printed when this happens.
 * The optimizer checkpoint (optimizer1.torch) is NOT written by this script;
   the learner starts with a fresh optimizer when no optimizer checkpoint exists.
 * Run this script from the project root so that config_files/ is on the Python path.
+* RL topology (IQN shape) comes from --rl-config (default: config_files/rl/config_default.yaml).
 """
 
 from __future__ import annotations
@@ -48,6 +55,15 @@ import torch
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_RL_CONFIG = _REPO_ROOT / "config_files" / "rl" / "config_default.yaml"
+
+
+def _resolve_rl_config(path: Path | None) -> Path:
+    if path is not None:
+        return path.resolve()
+    return _DEFAULT_RL_CONFIG.resolve()
 
 
 def _check_cuda() -> None:
@@ -117,10 +133,12 @@ def _maybe_avg_to_1ch(state_dict: dict, meta: dict | None) -> dict:
 
 
 def _build_iqn_pair() -> tuple:
-    """Create a fresh (online, target) IQN network pair on CUDA."""
-    from trackmania_rl.agents.iqn import make_untrained_iqn_network
-    online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
-    target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+    """Create a fresh (online, target) IQN network pair on CUDA (same factory as RL train/export)."""
+    from trackmania_rl.agents.algorithms.registry import get_wiring
+
+    w = get_wiring("iqn")
+    online, _ = w.make_network(False, False)
+    target, _ = w.make_network(False, False)
     return online, target
 
 
@@ -131,9 +149,11 @@ def _load_existing_pair(save_dir: Path) -> tuple | None:
     if not (w1.exists() and w2.exists()):
         return None
 
-    from trackmania_rl.agents.iqn import make_untrained_iqn_network
-    online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
-    target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+    from trackmania_rl.agents.algorithms.registry import get_wiring
+
+    w = get_wiring("iqn")
+    online, _ = w.make_network(False, False)
+    target, _ = w.make_network(False, False)
     online.load_state_dict(torch.load(w1, weights_only=False))
     target.load_state_dict(torch.load(w2, weights_only=False))
     log.info("Loaded existing IQN checkpoints from %s", save_dir)
@@ -179,25 +199,38 @@ def main() -> None:
                          "and only replace img_head (preserving other layer weights).")
     ap.add_argument("--dry-run", action="store_true",
                     help="Validate encoder compatibility only; do not write any files.")
+    ap.add_argument(
+        "--rl-config",
+        type=Path,
+        default=None,
+        help="RL YAML (topology for IQN). Default: config_files/rl/config_default.yaml under repo root.",
+    )
 
     args = ap.parse_args()
 
-    _check_cuda()
+    rl_path = _resolve_rl_config(args.rl_config)
+    if not rl_path.is_file():
+        log.error("RL config not found: %s", rl_path)
+        sys.exit(1)
+    from config_files.config_loader import load_config, set_config
 
-    # 1. Load artifact
+    set_config(load_config(rl_path))
+    log.info("Loaded RL config: %s", rl_path)
+
+    # 1. Load artifact (CPU) and validate — no CUDA required for --dry-run
     state_dict, meta = _load_artifact(args.encoder_pt, args.meta_json)
-
-    # 2. Validate
     _validate(state_dict, meta)
 
     if args.dry_run:
         log.info("Dry-run complete.  No files written.")
         return
 
-    # 3. Average first layer if multi-channel
+    _check_cuda()
+
+    # 2. Average first layer if multi-channel
     state_dict = _maybe_avg_to_1ch(state_dict, meta)
 
-    # 4. Build or load IQN network pair
+    # 3. Build or load IQN network pair
     networks = None
     if not args.no_fresh:
         log.info("Creating fresh IQN network pair.")
@@ -208,10 +241,10 @@ def main() -> None:
             log.info("No existing checkpoints found in %s; creating fresh pair.", args.save_dir)
             networks = _build_iqn_pair()
 
-    # 5. Inject encoder
+    # 4. Inject encoder
     _inject_encoder(networks, state_dict)
 
-    # 6. Save
+    # 5. Save
     _save(networks, args.save_dir)
 
 

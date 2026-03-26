@@ -6,7 +6,7 @@ This page documents experiments on **IQN model variants**: **use_ddqn** (Double 
 Architecture references:
 
 - Baseline IQN architecture: :doc:`../../models/iqn_architecture`
-- BTR architecture (implemented as IQN add-ons): :doc:`../../models/btr_architecture`
+- BTR paper options (optional IQN add-ons, ``btr:`` in YAML — not a separate model class): :doc:`../../models/btr_architecture`
 
 **How the runs relate (chain of changes):**
 

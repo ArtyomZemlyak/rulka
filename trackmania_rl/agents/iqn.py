@@ -24,7 +24,7 @@ from trackmania_rl import utilities
 
 
 # ---------------------------------------------------------------------------
-#  BTR building blocks
+#  Optional IQN enhancements (BTR paper — toggled via config btr:, not a separate algorithm)
 # ---------------------------------------------------------------------------
 
 
@@ -868,20 +868,11 @@ class Inferer:
         return (actions_arr, is_greedy, value, q_values)
 
 
-def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Network, IQN_Network]:
-    """
-    Constructs two identical copies of the IQN network.
-
-    The first copy is compiled (if jit == True) and is used for inference, for rollouts, for training, etc...
-    The second copy is never compiled and **only** used to efficiently share a neural network's weights between processes.
-
-    Args:
-        jit: a boolean indicating whether compilation should be used
-    """
+def build_iqn_network_uncompiled() -> IQN_Network:
+    """Build IQN_Network from current get_config() without torch.compile or device placement (SRP vs make_untrained_iqn_network)."""
     cfg = get_config()
     use_image_head = cfg.use_iqn_image_head
 
-    # BTR flags
     btr_kwargs = dict(
         use_impala_cnn=cfg.use_impala_cnn,
         impala_model_size=cfg.impala_model_size,
@@ -905,7 +896,7 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
     else:
         conv_head_output_dim = 0
 
-    uncompiled_model = IQN_Network(
+    return IQN_Network(
         float_inputs_dim=cfg.float_input_dim,
         float_hidden_dim=cfg.float_hidden_dim,
         conv_head_output_dim=conv_head_output_dim,
@@ -918,6 +909,19 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
         n_actions_per_block=cfg.n_actions_per_block,
         **btr_kwargs,
     )
+
+
+def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Network, IQN_Network]:
+    """
+    Constructs two identical copies of the IQN network.
+
+    The first copy is compiled (if jit == True) and is used for inference, for rollouts, for training, etc...
+    The second copy is never compiled and **only** used to efficiently share a neural network's weights between processes.
+
+    Args:
+        jit: a boolean indicating whether compilation should be used
+    """
+    uncompiled_model = build_iqn_network_uncompiled()
     if jit:
         # torch.compile; multi-process stability is handled by warmup in main process + collector warmup under game_spawning_lock (see train.py, collector_process.py).
 

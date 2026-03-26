@@ -23,8 +23,8 @@ from torchrl.data.replay_buffers import PrioritizedSampler
 
 from config_files.config_loader import get_config
 from trackmania_rl import buffer_management, utilities
-from trackmania_rl.agents import iqn as iqn
-from trackmania_rl.agents.iqn import make_untrained_iqn_network
+from trackmania_rl.agents.algorithms import get_wiring
+# IQN-only: quantile forward, iqn_loss, inferer.infer_network contract. Guard if training.algorithm != iqn.
 from trackmania_rl.analysis_metrics import (
     distribution_curves,
     highest_prio_transitions,
@@ -49,20 +49,8 @@ def _mean_action_gap_from_rollout(q_values):
 
 
 def _get_frozen_param_prefixes():
-    """Return parameter name prefixes to freeze (e.g. 'img_head.') from config _freeze flags."""
-    cfg = get_config()
-    prefixes = []
-    if getattr(cfg, "pretrain_encoder_freeze", False):
-        prefixes.append("img_head.")
-    if getattr(cfg, "pretrain_float_head_freeze", False):
-        prefixes.append("float_feature_extractor.")
-    if getattr(cfg, "pretrain_iqn_fc_freeze", False):
-        prefixes.append("iqn_fc.")
-    if getattr(cfg, "pretrain_actions_head_freeze", False):
-        prefixes.append("A_head.")
-    if getattr(cfg, "pretrain_V_head_freeze", False):
-        prefixes.append("V_head.")
-    return prefixes
+    """IQN pretrain freeze prefixes; delegated to iqn_wiring (single source of truth)."""
+    return get_wiring("iqn").freeze_prefixes_from_config(get_config())
 
 
 def _apply_pretrain_freeze(network):
@@ -161,8 +149,9 @@ def learner_process_fn(
     # Create new stuff
     # ========================================================
 
-    online_network, uncompiled_online_network = make_untrained_iqn_network(get_config().use_jit, is_inference=False)
-    target_network, _ = make_untrained_iqn_network(get_config().use_jit, is_inference=False)
+    wiring = get_wiring()
+    online_network, uncompiled_online_network = wiring.make_network(get_config().use_jit, is_inference=False)
+    target_network, _ = wiring.make_network(get_config().use_jit, is_inference=False)
 
     print("\n" + "="*80)
     print("  NETWORK ARCHITECTURE")
@@ -281,20 +270,15 @@ def learner_process_fn(
     # ========================================================
     # Make the trainer
     # ========================================================
-    trainer = iqn.Trainer(
-        online_network=online_network,
-        target_network=target_network,
-        optimizer=optimizer1,
-        scaler=scaler,
-        batch_size=get_config().batch_size,
-        iqn_n=get_config().iqn_n,
+    trainer = wiring.make_trainer(
+        online_network,
+        target_network,
+        optimizer1,
+        scaler,
+        get_config().batch_size,
     )
 
-    inferer = iqn.Inferer(
-        inference_network=online_network,
-        iqn_k=get_config().iqn_k,
-        tau_epsilon_boltzmann=get_config().tau_epsilon_boltzmann,
-    )
+    inferer = wiring.make_inferer(online_network)
 
     # ================================================================
     #   PHASE 3: IngestThread — offload rollout ingestion to background
@@ -588,7 +572,7 @@ def learner_process_fn(
             single_reset_flag = get_config().single_reset_flag
             accumulated_stats["cumul_number_single_memories_should_have_been_used"] += get_config().additional_transition_after_reset
 
-            _, untrained_iqn_network = make_untrained_iqn_network(get_config().use_jit, False)
+            _, untrained_iqn_network = wiring.make_network(get_config().use_jit, False)
             frozen_prefixes = _get_frozen_param_prefixes()
             utilities.soft_copy_param(
                 online_network, untrained_iqn_network, get_config().overall_reset_mul_factor,

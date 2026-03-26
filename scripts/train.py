@@ -1,7 +1,8 @@
 # =======================================================================================================================
 # Train TrackMania RL agent. Configuration from YAML file (--config).
 # =======================================================================================================================
-# Config MUST be loaded before any trackmania_rl imports (iqn etc need get_config at import time)
+# Config MUST be loaded before any trackmania_rl.agents.* import: agents.algorithms pulls in iqn.py, which
+# uses get_config() when building networks / training; set_config(load_config(...)) must run first.
 
 import argparse
 import ctypes
@@ -44,7 +45,7 @@ import torch.multiprocessing as mp
 from art import tprint
 from torch.multiprocessing import Lock
 
-from trackmania_rl.agents.iqn import make_untrained_iqn_network
+from trackmania_rl.agents.algorithms import get_wiring
 from trackmania_rl.multiprocess.collector_process import collector_process_fn
 from trackmania_rl.multiprocess.learner_process import learner_process_fn
 from trackmania_rl.utilities import set_random_seed
@@ -89,54 +90,73 @@ if __name__ == "__main__":
     # Save config snapshot to experiment folder
     shutil.copy(config_path, save_dir / "config_snapshot.yaml")
 
-    # --- Pretrain encoder injection ---
-    # If pretrain_encoder_path is set and weights1.torch does not yet exist,
-    # inject the pretrained img_head into a fresh IQN network pair so that
-    # the learner and collectors start from the pretrained visual backbone.
-    # Skipped automatically on resumed runs (weights1.torch already present).
     weights_existed = (save_dir / "weights1.torch").exists()
     pretrain_injected = False
-    if config.pretrain_encoder_path:
-        from trackmania_rl.pretrain.export import inject_encoder_into_iqn
-        pretrain_injected = inject_encoder_into_iqn(
-            encoder_pt=Path(base_dir) / config.pretrain_encoder_path,
-            save_dir=save_dir,
-            overwrite=False,
-        )
-        if pretrain_injected:
-            print("[OK] Pretrain encoder injected; training will start from pretrained img_head.")
-
-    # --- Pretrain BC full IQN injection (from iqn_bc.pt) ---
-    # Only on fresh run (weights did not exist at start): load full BC IQN state into current weights.
     bc_heads_injected = False
-    if config.pretrain_bc_heads_path and not weights_existed:
-        from trackmania_rl.pretrain.export import inject_bc_heads_into_iqn
-        bc_heads_injected = inject_bc_heads_into_iqn(
-            bc_heads_path=Path(base_dir) / config.pretrain_bc_heads_path,
-            save_dir=save_dir,
-        )
-        if bc_heads_injected:
-            print("[OK] Pretrain BC full IQN state (img_head, float_feature_extractor, iqn_fc, A_head, V_head) injected.")
-
-    # --- Pretrain piecewise: float_head.pt -> float_feature_extractor, actions_head.pt -> A_head ---
     float_head_injected = False
     actions_head_injected = False
-    if config.pretrain_float_head_path and not weights_existed:
-        from trackmania_rl.pretrain.export import inject_float_head_into_iqn
-        float_head_injected = inject_float_head_into_iqn(
-            float_head_path=Path(base_dir) / config.pretrain_float_head_path,
-            save_dir=save_dir,
+
+    _pretrain_paths_set = bool(
+        config.pretrain_encoder_path
+        or config.pretrain_bc_heads_path
+        or config.pretrain_float_head_path
+        or config.pretrain_actions_head_path
+    )
+    if config.algorithm != "iqn" and _pretrain_paths_set:
+        print(
+            "[WARN] IQN-only pretrain paths are ignored when training.algorithm != 'iqn' "
+            f"(algorithm={config.algorithm!r})."
         )
-        if float_head_injected:
-            print("[OK] Pretrain float_feature_extractor (float_head.pt) injected.")
-    if config.pretrain_actions_head_path and not weights_existed:
-        from trackmania_rl.pretrain.export import inject_actions_head_into_iqn
-        actions_head_injected = inject_actions_head_into_iqn(
-            actions_head_path=Path(base_dir) / config.pretrain_actions_head_path,
-            save_dir=save_dir,
-        )
-        if actions_head_injected:
-            print("[OK] Pretrain A_head (actions_head.pt) injected.")
+    elif config.algorithm == "iqn":
+        # --- Pretrain encoder injection ---
+        # If pretrain_encoder_path is set and weights1.torch does not yet exist,
+        # inject the pretrained img_head into a fresh IQN network pair so that
+        # the learner and collectors start from the pretrained visual backbone.
+        # Skipped automatically on resumed runs (weights1.torch already present).
+        if config.pretrain_encoder_path:
+            from trackmania_rl.pretrain.export import inject_encoder_into_iqn
+
+            pretrain_injected = inject_encoder_into_iqn(
+                encoder_pt=Path(base_dir) / config.pretrain_encoder_path,
+                save_dir=save_dir,
+                overwrite=False,
+            )
+            if pretrain_injected:
+                print("[OK] Pretrain encoder injected; training will start from pretrained img_head.")
+
+        # --- Pretrain BC full IQN injection (from iqn_bc.pt) ---
+        # Only on fresh run (weights did not exist at start): load full BC IQN state into current weights.
+        if config.pretrain_bc_heads_path and not weights_existed:
+            from trackmania_rl.pretrain.export import inject_bc_heads_into_iqn
+
+            bc_heads_injected = inject_bc_heads_into_iqn(
+                bc_heads_path=Path(base_dir) / config.pretrain_bc_heads_path,
+                save_dir=save_dir,
+            )
+            if bc_heads_injected:
+                print(
+                    "[OK] Pretrain BC full IQN state (img_head, float_feature_extractor, iqn_fc, A_head, V_head) injected."
+                )
+
+        # --- Pretrain piecewise: float_head.pt -> float_feature_extractor, actions_head.pt -> A_head ---
+        if config.pretrain_float_head_path and not weights_existed:
+            from trackmania_rl.pretrain.export import inject_float_head_into_iqn
+
+            float_head_injected = inject_float_head_into_iqn(
+                float_head_path=Path(base_dir) / config.pretrain_float_head_path,
+                save_dir=save_dir,
+            )
+            if float_head_injected:
+                print("[OK] Pretrain float_feature_extractor (float_head.pt) injected.")
+        if config.pretrain_actions_head_path and not weights_existed:
+            from trackmania_rl.pretrain.export import inject_actions_head_into_iqn
+
+            actions_head_injected = inject_actions_head_into_iqn(
+                actions_head_path=Path(base_dir) / config.pretrain_actions_head_path,
+                save_dir=save_dir,
+            )
+            if actions_head_injected:
+                print("[OK] Pretrain A_head (actions_head.pt) injected.")
 
     tensorboard_base_dir = Path(base_dir) / "tensorboard"
 
@@ -150,6 +170,7 @@ if __name__ == "__main__":
     tprint("Rulka", font="tarty1")
     print("=" * 80)
     print(f"  Run name: {config.run_name}")
+    print(f"  Algorithm: {config.algorithm}")
     print(f"  GPU collectors: {config.gpu_collectors_count}")
     print(f"  Base TMI port: {config.base_tmi_port}")
     print(f"  Save directory: {save_dir}")
@@ -177,9 +198,8 @@ if __name__ == "__main__":
     ]
     shared_network_lock = Lock()
     game_spawning_lock = Lock()
-    _, uncompiled_shared_network = make_untrained_iqn_network(
-        jit=config.use_jit, is_inference=False
-    )
+    wiring = get_wiring()
+    _, uncompiled_shared_network = wiring.make_network(jit=config.use_jit, is_inference=False)
     with shared_network_lock:
         uncompiled_shared_network.share_memory()
     # Snapshot of shared-memory tensors for cross-process weight sync.
@@ -189,28 +209,7 @@ if __name__ == "__main__":
     shared_state_dict = uncompiled_shared_network.state_dict()
 
     # --- Compilation Warmup (Windows Stability) ---
-    # Populate the torch.compile cache in the main process before spawning workers.
-    # This avoids PermissionError in collectors during simultaneous cache writes.
-    if config.use_jit:
-        print("\n[INFO] Warming up torch.compile (Populating Triton cache)...")
-        # Dummy inputs for warmup
-        dummy_img = torch.zeros((1, 1, config.H_downsized, config.W_downsized), device="cuda", dtype=torch.float32)
-        dummy_float = torch.zeros((1, config.float_input_dim), device="cuda", dtype=torch.float32)
-        
-        # 1. Warm up Inference (Collectors use mode="max-autotune")
-        inf_net, _ = make_untrained_iqn_network(jit=True, is_inference=True)
-        inf_net.eval()
-        with torch.no_grad():
-            for _ in range(2):
-                inf_net(dummy_img, dummy_float, config.iqn_k)
-        
-        # 2. Warm up Training (Learner uses mode="max-autotune-no-cudagraphs")
-        train_net, _ = make_untrained_iqn_network(jit=True, is_inference=False)
-        train_net.train()
-        for _ in range(2):
-            train_net(dummy_img, dummy_float, config.iqn_k)
-        
-        print("[OK] Warmup complete. Triton cache is now populated.\n")
+    wiring.warmup_compile(config)
 
     # Start worker processes (each loads config from config_path)
     collector_processes = [

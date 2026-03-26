@@ -6,7 +6,7 @@ IQN architecture
 This page documents the baseline model used in the project:
 ``trackmania_rl.agents.iqn.IQN_Network``.
 
-For the BTR variant, see :doc:`btr_architecture`.
+For optional BTR paper features on the same IQN stack, see :doc:`btr_architecture`.
 Important: BTR in this codebase is **not a separate model family**. It is a
 set of optional additions on top of this same IQN architecture.
 
@@ -128,6 +128,6 @@ Implementation references
 See also
 --------
 
-- :doc:`btr_architecture` — BTR additions over this IQN backbone.
+- :doc:`btr_architecture` — toggles under ``btr:`` (same backbone, not another algorithm).
 - :doc:`../experiments/models/iqn` — IQN experiment results and ablations.
 - :doc:`../configuration_guide` — config parameters for IQN and training.

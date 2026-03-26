@@ -2,6 +2,9 @@
 # Paper: https://arxiv.org/abs/2411.03820  |  Upstream code: https://github.com/VIPTankz/BTR
 # Train: python scripts/train.py --config config_files/rl/config_btr.yaml
 #
+# BTR is NOT a separate architecture or training.algorithm: keep training.algorithm: iqn.
+# This file turns ON the full `btr:` feature bundle inside the same IQN stack (get_wiring("iqn")).
+#
 # What the paper adds on top of Rainbow-style IQN (six ingredients mirrored in `btr:` + below):
 #   1) Munchausen-style soft policy in the TD target (tau=0.03, alpha=0.9, log clamp lo=-1)
 #   2) IMPALA residual CNN encoder (channel scale `impala_model_size: 2`)
@@ -47,6 +50,7 @@ environment:
   # Multi-action: e.g. [0, 10, 20, 30, 40] for N=5 actions per block (10ms each). Omit or [0] = single action.
   # rl_action_offsets_ms: [0, 10, 20, 30, 40]
 
+# Core IQN dims; BTR-style toggles (IMPALA, LayerNorm, Munchausen, …) are under btr:.
 neural_network:
   w_downsized: 64
   h_downsized: 64
@@ -78,6 +82,8 @@ neural_network:
 
 training:
   run_name: "A01_as20_long_v4.2_btr"
+  # RL stack registry key. Architecture flags live under neural_network and btr: below.
+  algorithm: iqn
   # BTR main.py: --bs 256 (raise if learner waits on GPU)
   batch_size: 4096
   adam_epsilon: 0.0001

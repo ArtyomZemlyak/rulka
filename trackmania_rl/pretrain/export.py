@@ -331,10 +331,12 @@ def inject_encoder_into_iqn(
         )
         state_dict = average_first_layer_to_1ch(state_dict)
 
-    # Build fresh IQN network pair and inject
-    from trackmania_rl.agents.iqn import make_untrained_iqn_network
-    online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
-    target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+    # Build fresh IQN network pair and inject (always IQN topology; literal "iqn" not get_config().algorithm)
+    from trackmania_rl.agents.algorithms.registry import get_wiring
+
+    iqn_wiring = get_wiring("iqn")
+    online, _ = iqn_wiring.make_network(False, False)
+    target, _ = iqn_wiring.make_network(False, False)
 
     encoder_sd_cuda = {k: v.to("cuda") for k, v in state_dict.items()}
     online.img_head.load_state_dict(encoder_sd_cuda, strict=True)
@@ -408,9 +410,11 @@ def inject_bc_heads_into_iqn(
             "No existing IQN weights in %s; creating fresh pair before BC state injection.",
             save_dir,
         )
-        from trackmania_rl.agents.iqn import make_untrained_iqn_network
-        online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
-        target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+        from trackmania_rl.agents.algorithms.registry import get_wiring
+
+        iqn_wiring = get_wiring("iqn")
+        online, _ = iqn_wiring.make_network(False, False)
+        target, _ = iqn_wiring.make_network(False, False)
         save_dir.mkdir(parents=True, exist_ok=True)
         torch.save(online.state_dict(), w1)
         torch.save(target.state_dict(), w2)

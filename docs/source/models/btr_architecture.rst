@@ -1,6 +1,6 @@
 .. _btr_architecture:
 
-BTR architecture (IQN + extras)
+BTR options (IQN + paper extras)
 ===============================
 
 This page describes how BTR is implemented in this project.

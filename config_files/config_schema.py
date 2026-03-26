@@ -137,6 +137,9 @@ class NeuralNetworkConfig(BaseModel):
 # --- Training ---
 class TrainingConfig(BaseModel):
     run_name: str = "uni_18"
+    # RL stack key for get_wiring (train / learner / collector). Network shape comes from neural_network + btr + environment, not from this field.
+    # Checkpoints under save/<run_name>/ must match the same algorithm + architecture as the run that wrote them.
+    algorithm: Literal["iqn"] = "iqn"
     pretrain_encoder_path: Optional[str] = None
     # Optional: path to BC run dir or to iqn_bc.pt to load full IQN state into checkpoints.
     # All matching parts are loaded: img_head, float_feature_extractor, iqn_fc, A_head, V_head.
@@ -363,6 +366,12 @@ class UserConfig(BaseSettings):
 
 # --- BTR (Beyond The Rainbow) ---
 class BTRConfig(BaseModel):
+    """Optional IQN enhancements from the BTR paper — not a separate RL algorithm or wiring key.
+
+    Same ``training.algorithm`` (iqn) and same ``IQN_Network`` class; flags only change internals
+    (encoder, heads, loss path). Pair with :class:`NeuralNetworkConfig` for widths / IQN hyperparams.
+    """
+
     # Munchausen IQN: soft-policy targets instead of hard max
     use_munchausen: bool = False
     munchausen_alpha: float = 0.9
