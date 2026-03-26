@@ -51,8 +51,8 @@ neural_network:
   use_iqn_image_head: true
 
 training:
-  run_name: "linesight_hock"
-  batch_size: 512
+  run_name: "linesight_A1"
+  batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -143,12 +143,13 @@ btr:
 
 map_cycle:
   entries:
-    - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: true, fill_buffer: true, repeat: 4}
-    - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: false, fill_buffer: true, repeat: 1}
+    # - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: true, fill_buffer: true, repeat: 64}
+    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 4}
+    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 
 performance:
-  gpu_collectors_count: 2
-  max_rollout_queue_size: 1
+  gpu_collectors_count: 8
+  max_rollout_queue_size: 4
   send_shared_network_every_n_batches: 10
   update_inference_network_every_n_actions: 20
   plot_race_time_left_curves: false

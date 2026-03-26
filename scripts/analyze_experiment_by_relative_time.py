@@ -926,7 +926,6 @@ def compare_by_relative_time(
         )
     _print_tables(data)
     if plot_output_dir is not None and plot_output_dir != Path(""):
-        import sys
         _scripts_dir = Path(__file__).resolve().parent
         if str(_scripts_dir) not in sys.path:
             sys.path.insert(0, str(_scripts_dir))
