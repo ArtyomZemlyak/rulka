@@ -6,10 +6,9 @@ In this file, we define:
 """
 
 import copy
-import math
 import random
 from math import sqrt
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -21,10 +20,16 @@ from torchrl.data import ReplayBuffer
 
 from config_files.config_loader import get_config
 from trackmania_rl import utilities
+from trackmania_rl.nn_build.iqn_quantile_forward import forward_iqn_q_values_from_state_features
+from trackmania_rl.nn_build.iqn_btr_from_config import iqn_btr_mlp_head_kw_from_config
+from trackmania_rl.nn_build.vis_cnn_head import vis_cnn_head_kw_from_nn_vis
+
+if TYPE_CHECKING:
+    from config_files.nn_schema import IqnDecoderConfig
 
 
 # ---------------------------------------------------------------------------
-#  BTR building blocks
+#  Optional IQN enhancements (BTR paper — toggled via config btr:, not a separate algorithm)
 # ---------------------------------------------------------------------------
 
 
@@ -181,14 +186,14 @@ class IQN_Network(torch.nn.Module):
         float_inputs_dim: int,
         float_hidden_dim: int,
         conv_head_output_dim: int,
-        dense_hidden_dimension: int,
         iqn_embedding_dimension: int,
         n_actions: int,
         float_inputs_mean: npt.NDArray,
         float_inputs_std: npt.NDArray,
+        decoder: "IqnDecoderConfig",
         use_image_head: bool = True,
         n_actions_per_block: int = 1,
-        # BTR flags
+        # BTR flags (CNN + NoisyNet / layer norm on heads+float)
         use_impala_cnn: bool = False,
         impala_model_size: int = 2,
         use_adaptive_maxpool: bool = False,
@@ -199,17 +204,17 @@ class IQN_Network(torch.nn.Module):
         noisy_sigma0: float = 0.5,
     ):
         super().__init__()
+        from trackmania_rl.nn_build.iqn_heads import (
+            build_iqn_advantage_head,
+            build_iqn_float_extractor,
+            build_iqn_value_head,
+        )
+
         self.iqn_embedding_dimension = iqn_embedding_dimension
         self.use_image_head = use_image_head
         self.n_actions_per_block = n_actions_per_block
         self.use_noisy_linear = use_noisy_linear
-        activation_function = torch.nn.LeakyReLU
-
-        # --- linear layer factory (NoisyLinear vs plain Linear) ---
-        def _linear(in_f: int, out_f: int) -> nn.Module:
-            if use_noisy_linear:
-                return FactorizedNoisyLinear(in_f, out_f, sigma_0=noisy_sigma0)
-            return nn.Linear(in_f, out_f)
+        dense_hidden_dimension = decoder.dense_hidden_dimension
 
         # --- Image head ---
         if use_image_head:
@@ -223,73 +228,31 @@ class IQN_Network(torch.nn.Module):
         else:
             self.img_head = None
 
-        # --- Float feature extractor ---
-        if use_layer_norm:
-            self.float_feature_extractor = nn.Sequential(
-                nn.Linear(float_inputs_dim, float_hidden_dim),
-                nn.LayerNorm(float_hidden_dim),
-                activation_function(inplace=True),
-                nn.Linear(float_hidden_dim, float_hidden_dim),
-                nn.LayerNorm(float_hidden_dim),
-                activation_function(inplace=True),
-            )
-        else:
-            self.float_feature_extractor = nn.Sequential(
-                nn.Linear(float_inputs_dim, float_hidden_dim),
-                activation_function(inplace=True),
-                nn.Linear(float_hidden_dim, float_hidden_dim),
-                activation_function(inplace=True),
-            )
+        self.float_feature_extractor = build_iqn_float_extractor(
+            float_inputs_dim, float_hidden_dim, use_layer_norm
+        )
 
         dense_input_dimension = (conv_head_output_dim if use_image_head else 0) + float_hidden_dim
-        a_head_hidden = dense_hidden_dimension // 2
 
-        # --- Dueling A head ---
-        if n_actions_per_block <= 1:
-            if use_layer_norm:
-                self.A_head = nn.Sequential(
-                    _linear(dense_input_dimension, a_head_hidden),
-                    nn.LayerNorm(a_head_hidden),
-                    activation_function(inplace=True),
-                    _linear(a_head_hidden, n_actions),
-                )
-            else:
-                self.A_head = nn.Sequential(
-                    _linear(dense_input_dimension, a_head_hidden),
-                    activation_function(inplace=True),
-                    _linear(a_head_hidden, n_actions),
-                )
-            self.A_head_multi = None
-        else:
-            if use_layer_norm:
-                self.A_head = nn.Sequential(
-                    _linear(dense_input_dimension, a_head_hidden),
-                    nn.LayerNorm(a_head_hidden),
-                    activation_function(inplace=True),
-                )
-            else:
-                self.A_head = nn.Sequential(
-                    _linear(dense_input_dimension, a_head_hidden),
-                    activation_function(inplace=True),
-                )
-            self.A_head_multi = _linear(a_head_hidden, n_actions_per_block * n_actions)
+        self.A_head, self.A_head_multi = build_iqn_advantage_head(
+            dense_input_dimension=dense_input_dimension,
+            dense_hidden_dimension=dense_hidden_dimension,
+            n_actions=n_actions,
+            n_actions_per_block=n_actions_per_block,
+            head_cfg=decoder.advantage,
+            use_layer_norm=use_layer_norm,
+            use_noisy_linear=use_noisy_linear,
+            noisy_sigma0=noisy_sigma0,
+        )
 
-        # --- Dueling V head ---
-        # Last layer MatmulLinear: out_features=1 + plain nn.Linear uses F.linear internally,
-        # which still breaks torch.compile backward (same [512] vs [1,512] gradient bug).
-        if use_layer_norm:
-            self.V_head = nn.Sequential(
-                _linear(dense_input_dimension, dense_hidden_dimension // 2),
-                nn.LayerNorm(dense_hidden_dimension // 2),
-                activation_function(inplace=True),
-                MatmulLinear(dense_hidden_dimension // 2, 1),
-            )
-        else:
-            self.V_head = nn.Sequential(
-                _linear(dense_input_dimension, dense_hidden_dimension // 2),
-                activation_function(inplace=True),
-                MatmulLinear(dense_hidden_dimension // 2, 1),
-            )
+        self.V_head = build_iqn_value_head(
+            dense_input_dimension=dense_input_dimension,
+            dense_hidden_dimension=dense_hidden_dimension,
+            head_cfg=decoder.value,
+            use_layer_norm=use_layer_norm,
+            use_noisy_linear=use_noisy_linear,
+            noisy_sigma0=noisy_sigma0,
+        )
 
         # --- IQN cosine embedding ---
         self.iqn_fc = nn.Sequential(
@@ -301,8 +264,10 @@ class IQN_Network(torch.nn.Module):
 
         self.n_actions = n_actions
 
-        self.float_inputs_mean = torch.tensor(float_inputs_mean, dtype=torch.float32).to("cuda")
-        self.float_inputs_std = torch.tensor(float_inputs_std, dtype=torch.float32).to("cuda")
+        self.register_buffer(
+            "float_inputs_mean", torch.tensor(float_inputs_mean, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer("float_inputs_std", torch.tensor(float_inputs_std, dtype=torch.float32), persistent=True)
 
     def initialize_weights(self):
         lrelu_neg_slope = 1e-2
@@ -361,36 +326,24 @@ class IQN_Network(torch.nn.Module):
     def forward(
         self, img: torch.Tensor, float_inputs: torch.Tensor, num_quantiles: int, tau: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        batch_size = img.shape[0]
         float_outputs = self.float_feature_extractor((float_inputs - self.float_inputs_mean) / self.float_inputs_std)
         if self.img_head is not None:
             img_outputs = self.img_head(img)
             concat = torch.cat((img_outputs, float_outputs), 1)
         else:
             concat = float_outputs
-        if tau is None:
-            tau = (
-                torch.arange(num_quantiles // 2, device="cuda", dtype=torch.float32).repeat_interleave(batch_size).unsqueeze(1)
-                + torch.rand(size=(batch_size * num_quantiles // 2, 1), device="cuda", dtype=torch.float32)
-            ) / num_quantiles
-            tau = torch.cat((tau, 1 - tau), dim=0)
-        quantile_net = torch.cos(
-            torch.arange(1, self.iqn_embedding_dimension + 1, 1, device="cuda") * math.pi * tau
+        return forward_iqn_q_values_from_state_features(
+            concat,
+            num_quantiles,
+            tau,
+            iqn_embedding_dimension=self.iqn_embedding_dimension,
+            iqn_fc=self.iqn_fc,
+            V_head=self.V_head,
+            A_head=self.A_head,
+            A_head_multi=self.A_head_multi,
+            n_actions=self.n_actions,
+            n_actions_per_block=self.n_actions_per_block,
         )
-        quantile_net = quantile_net.expand([-1, self.iqn_embedding_dimension])
-        quantile_net = self.iqn_fc(quantile_net)
-        concat = concat.repeat(num_quantiles, 1)
-        concat = concat * quantile_net
-
-        V = self.V_head(concat)
-        if self.A_head_multi is None:
-            A = self.A_head(concat)
-            Q = V + A - A.mean(dim=-1).unsqueeze(-1)
-            return Q, tau
-        a_hidden = self.A_head(concat)
-        A = self.A_head_multi(a_hidden).view(-1, self.n_actions_per_block, self.n_actions)
-        Q = V.unsqueeze(1) + A - A.mean(dim=-1, keepdim=True)
-        return Q, tau
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -447,8 +400,8 @@ class Trainer:
 
     def __init__(
         self,
-        online_network: IQN_Network,
-        target_network: IQN_Network,
+        online_network: nn.Module,
+        target_network: nn.Module,
         optimizer: torch.optim.Optimizer,
         scaler: torch.amp.GradScaler,
         batch_size: int,
@@ -868,7 +821,72 @@ class Inferer:
         return (actions_arr, is_greedy, value, q_values)
 
 
-def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Network, IQN_Network]:
+def build_iqn_network_uncompiled():
+    """Build IQN network from current get_config() without torch.compile or device placement (SRP vs make_untrained_iqn_network).
+
+    When ``nn.fusion_mode != none``, uses the same multimodal vision+fusion body as PPO
+    (``TorchMultimodalActorCritic`` with ``include_policy_heads=False``), wrapped for IQN quantiles.
+    When ``nn.fusion_mode == none`` and ``nn.vis.transformer.use_hf_backbone``, uses
+    the HF vision + float trunk as for PPO ``HfActorCritic``. Otherwise builds classic ``IQN_Network`` (CNN or no_image).
+    """
+    cfg = get_config()
+    from trackmania_rl.nn_build.iqn_multimodal import (
+        build_iqn_hf_vision_network_uncompiled,
+        build_iqn_torch_fusion_network_uncompiled,
+        iqn_uses_hf_vision_only_backbone,
+        iqn_uses_torch_fusion_backbone,
+    )
+
+    if iqn_uses_torch_fusion_backbone(cfg):
+        return build_iqn_torch_fusion_network_uncompiled(cfg)
+    if iqn_uses_hf_vision_only_backbone(cfg):
+        return build_iqn_hf_vision_network_uncompiled(cfg)
+
+    v = cfg.vis
+    cnn_kw = vis_cnn_head_kw_from_nn_vis(v)
+    if v.no_image:
+        use_image_head = False
+    elif v.transformer is not None:
+        raise ValueError(
+            "IQN with nn.vis.transformer requires use_hf_backbone: true (HF ViT path), "
+            "or set nn.fusion_mode to vision_transformer / post_concat / unified for native/HF multimodal. "
+            "Native vis.transformer without fusion_mode is not wired for IQN."
+        )
+    else:
+        assert v.cnn is not None
+        use_image_head = True
+
+    btr_kw = iqn_btr_mlp_head_kw_from_config(cfg)
+
+    if use_image_head:
+        tmp_head = _build_img_head(
+            use_impala_cnn=cnn_kw["use_impala_cnn"],
+            impala_model_size=cnn_kw["impala_model_size"],
+            use_spectral_norm=cnn_kw["use_spectral_norm"],
+            use_adaptive_maxpool=cnn_kw["use_adaptive_maxpool"],
+            adaptive_maxpool_size=cnn_kw["adaptive_maxpool_size"],
+        )
+        conv_head_output_dim = calculate_conv_output_dim(tmp_head, cfg.H_downsized, cfg.W_downsized)
+    else:
+        conv_head_output_dim = 0
+
+    return IQN_Network(
+        float_inputs_dim=cfg.float_input_dim,
+        float_hidden_dim=cfg.float_hidden_dim,
+        conv_head_output_dim=conv_head_output_dim,
+        iqn_embedding_dimension=cfg.iqn_embedding_dimension,
+        n_actions=len(cfg.inputs),
+        float_inputs_mean=cfg.float_inputs_mean,
+        float_inputs_std=cfg.float_inputs_std,
+        decoder=cfg.decoder,
+        use_image_head=use_image_head,
+        n_actions_per_block=cfg.n_actions_per_block,
+        **cnn_kw,
+        **btr_kw,
+    )
+
+
+def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[nn.Module, nn.Module]:
     """
     Constructs two identical copies of the IQN network.
 
@@ -878,46 +896,7 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
     Args:
         jit: a boolean indicating whether compilation should be used
     """
-    cfg = get_config()
-    use_image_head = cfg.use_iqn_image_head
-
-    # BTR flags
-    btr_kwargs = dict(
-        use_impala_cnn=cfg.use_impala_cnn,
-        impala_model_size=cfg.impala_model_size,
-        use_adaptive_maxpool=cfg.use_adaptive_maxpool,
-        adaptive_maxpool_size=cfg.adaptive_maxpool_size,
-        use_spectral_norm=cfg.use_spectral_norm,
-        use_layer_norm=cfg.use_layer_norm,
-        use_noisy_linear=cfg.use_noisy_linear,
-        noisy_sigma0=cfg.noisy_sigma0,
-    )
-
-    if use_image_head:
-        tmp_head = _build_img_head(
-            use_impala_cnn=cfg.use_impala_cnn,
-            impala_model_size=cfg.impala_model_size,
-            use_spectral_norm=cfg.use_spectral_norm,
-            use_adaptive_maxpool=cfg.use_adaptive_maxpool,
-            adaptive_maxpool_size=cfg.adaptive_maxpool_size,
-        )
-        conv_head_output_dim = calculate_conv_output_dim(tmp_head, cfg.H_downsized, cfg.W_downsized)
-    else:
-        conv_head_output_dim = 0
-
-    uncompiled_model = IQN_Network(
-        float_inputs_dim=cfg.float_input_dim,
-        float_hidden_dim=cfg.float_hidden_dim,
-        conv_head_output_dim=conv_head_output_dim,
-        dense_hidden_dimension=cfg.dense_hidden_dimension,
-        iqn_embedding_dimension=cfg.iqn_embedding_dimension,
-        n_actions=len(cfg.inputs),
-        float_inputs_mean=cfg.float_inputs_mean,
-        float_inputs_std=cfg.float_inputs_std,
-        use_image_head=use_image_head,
-        n_actions_per_block=cfg.n_actions_per_block,
-        **btr_kwargs,
-    )
+    uncompiled_model = build_iqn_network_uncompiled()
     if jit:
         # torch.compile; multi-process stability is handled by warmup in main process + collector warmup under game_spawning_lock (see train.py, collector_process.py).
 
@@ -929,7 +908,7 @@ def make_untrained_iqn_network(jit: bool, is_inference: bool) -> Tuple[IQN_Netwo
             print(f"[OK] torch.compile enabled (mode={compile_mode})")
         except Exception as e:
             print(f"Warning: torch.compile failed ({e}). Falling back to uncompiled model.")
-            print(f"  Hint: On Windows, install Triton with: pip install triton-windows")
+            print("  Hint: On Windows, install Triton with: pip install triton-windows")
             model = copy.deepcopy(uncompiled_model)
     else:
         model = copy.deepcopy(uncompiled_model)

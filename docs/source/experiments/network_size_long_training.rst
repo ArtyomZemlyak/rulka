@@ -17,12 +17,12 @@ Comparisons are by **relative time** (common window 120 min) and by **steps** wh
 Experiment Overview
 -------------------
 
-We compared **A01_as20_big_long** (single map A01, larger CNN + IQN) with **A01_as20_long** (same task, small network), and with **uni_20** / **uni_20_long** (small network, two maps) for context. Same training hyperparameters (batch 512, speed 512, lr/gamma schedules); only differences are **neural_network** (image size, embedding, iqn_n/iqn_k) and map cycle (A01 only vs A01+Hock). Goal: see how network size affects time-to-convergence and final A01 performance on long runs.
+We compared **A01_as20_big_long** (single map A01, larger CNN + IQN) with **A01_as20_long** (same task, small network), and with **uni_20** / **uni_20_long** (small network, two maps) for context. Same training hyperparameters (batch 512, speed 512, lr/gamma schedules); only differences are **nn** (image size, embedding, iqn_n/iqn_k) and map cycle (A01 only vs A01+Hock). Goal: see how network size affects time-to-convergence and final A01 performance on long runs.
 
 Results
 -------
 
-**Important:** Audited wall spans: A01_as20_big_long **~561 min** wall / **~9.4 h** training; A01_as20_long **~486 min** / **~8.2 h**; uni_20_long **~822 min** / **~15.9 h** — ratios ~1 for these (suffix merges, little idle inflation). **v2-style** long runs (e.g. ``A01_as20_long_v2``) are **not** in this comparison; those can be **>2×** wall vs training (:doc:`experiments/time_axis_conventions`). Below: historical **120-minute wall** window + BY STEP; regenerate with ``--time-axis cumul_training_hours`` if you need training-time checkpoints.
+**Important:** Audited wall spans: A01_as20_big_long **~561 min** wall / **~9.4 h** training; A01_as20_long **~486 min** / **~8.2 h**; uni_20_long **~822 min** / **~15.9 h** — ratios ~1 for these (suffix merges, little idle inflation). **v2-style** long runs (e.g. ``A01_as20_long_v2``) are **not** in this comparison; those can be **>2×** wall vs training (:doc:`time_axis_conventions`). Below: historical **120-minute wall** window + BY STEP; regenerate with ``--time-axis cumul_training_hours`` if you need training-time checkpoints.
 
 **Key findings (at 120 min, common window):**
 
@@ -81,11 +81,11 @@ Configuration Changes
 
 **Small network (uni_20, uni_20_long, A01_as20_long):**
 
-- ``neural_network``: w_downsized = 64, h_downsized = 64, iqn_embedding_dimension = 128, iqn_n = 8, iqn_k = 32.
+- ``nn`` (small): ``vis.image_size`` 64×64, ``iqn.embedding_dimension`` = 128, ``iqn.n`` = 8, ``iqn.k`` = 32.
 
 **Big network (A01_as20_big_long):**
 
-- ``neural_network``: w_downsized = **128**, h_downsized = **128**, iqn_embedding_dimension = **256**, iqn_n = **16**, iqn_k = **64**. Other training/performance params unchanged (batch 512, speed 512, map_cycle A01 only).
+- ``nn`` (big): ``vis.image_size`` **128×128**, ``iqn.embedding_dimension`` = **256**, ``iqn.n`` = **16**, ``iqn.k`` = **64**. Other training/performance params unchanged (batch 512, speed 512, map_cycle A01 only).
 
 Hardware
 --------

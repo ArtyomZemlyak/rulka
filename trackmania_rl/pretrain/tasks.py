@@ -10,11 +10,12 @@ Three tasks are implemented:
 All modules expose the encoder as ``self.encoder`` so the caller can extract
 it after training without unpacking a checkpoint.
 
-Requires:  pip install lightning
+Requires:  pip install lightning  (or  pip install pytorch-lightning)
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Optional
 
@@ -22,18 +23,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from trackmania_rl.pretrain.lightning_compat import (
+    LIGHTNING_AVAILABLE as _LIGHTNING_AVAILABLE,
+    Callback,
+    LightningModule as _LightningModuleBase,
+)
+
 log = logging.getLogger(__name__)
 
-try:
-    import lightning as L
-    from lightning.pytorch.callbacks import Callback
-    _LIGHTNING_AVAILABLE = True
-    _Base = L.LightningModule
-except ImportError:
-    _LIGHTNING_AVAILABLE = False
-    L = None  # type: ignore[assignment]
-    _Base = object
-    Callback = object  # type: ignore[assignment,misc]
+_Base = _LightningModuleBase if _LIGHTNING_AVAILABLE else object
 
 LIGHTNING_AVAILABLE = _LIGHTNING_AVAILABLE
 
@@ -347,12 +345,16 @@ if _LIGHTNING_AVAILABLE:
             n_offsets: int = 1,
             offset_weights: Optional[list[float]] = None,
             bc_time_offsets_ms: Optional[list[int]] = None,
+            use_rl_architecture: bool = False,
+            n_actions_per_block: int = 1,
         ) -> None:
             super().__init__()
             self.model = model
             self.lr = lr
             self.weight_decay = weight_decay
             self.use_full_iqn = use_full_iqn
+            self.use_rl_architecture = use_rl_architecture
+            self._n_actions_per_block = int(n_actions_per_block)
             self.full_iqn_random_tau = full_iqn_random_tau
             self._float_dim = float_dim
             self._n_offsets = n_offsets
@@ -362,11 +364,27 @@ if _LIGHTNING_AVAILABLE:
                 if offset_weights is not None and len(offset_weights) == n_offsets
                 else torch.ones(n_offsets, dtype=torch.float32)
             )
-            if use_full_iqn:
-                self.encoder = getattr(model, "img_head", model)
+            sig = inspect.signature(model.forward)
+            self._use_iqn_forward = bool(use_full_iqn or (use_rl_architecture and "num_quantiles" in sig.parameters))
+
+            from trackmania_rl.pretrain.models import PpoPolicyBcMultiOffset
+
+            root = model.base if isinstance(model, PpoPolicyBcMultiOffset) else model
+            if use_full_iqn or (use_rl_architecture and self._use_iqn_forward):
+                self.encoder = getattr(root, "img_head", root)
+            elif use_rl_architecture:
+                enc = (
+                    getattr(root, "img_head", None)
+                    or getattr(root, "backbone", None)
+                    or getattr(root, "_hf_vis_backbone", None)
+                )
+                self.encoder = enc if enc is not None else root
             else:
                 self.encoder = getattr(model, "encoder", model)
-            n_actions = getattr(getattr(model, "action_head", None), "out_features", None) or getattr(model, "n_actions", None)
+
+            n_actions = getattr(model, "n_actions", None)
+            if n_actions is None:
+                n_actions = getattr(getattr(model, "action_head", None), "out_features", None)
             if n_actions is None and getattr(model, "action_head", None) is not None:
                 ah = model.action_head
                 if isinstance(ah, nn.ModuleList) and len(ah) > 0:
@@ -392,7 +410,7 @@ if _LIGHTNING_AVAILABLE:
                 img = img.unsqueeze(1)
             elif img.dim() == 5 and img.shape[1] > 1:
                 img = img[:, -1]
-            if self.use_full_iqn:
+            if self._use_iqn_forward:
                 if float_inputs is None:
                     float_inputs = torch.zeros(
                         img.shape[0], self._float_dim, device=img.device, dtype=torch.float32
@@ -407,15 +425,33 @@ if _LIGHTNING_AVAILABLE:
                 Q, _ = self.model(img, float_inputs, num_quantiles, tau=tau)
                 logits = Q
             else:
-                logits = self.model(img, float_inputs)
+                if float_inputs is None and self._float_dim > 0:
+                    float_inputs = torch.zeros(
+                        img.shape[0], self._float_dim, device=img.device, dtype=torch.float32
+                    )
+                raw = self.model(img, float_inputs)
+                logits = raw.logits if hasattr(raw, "logits") else raw
+                assert logits is not None
+                if (
+                    self.use_rl_architecture
+                    and self._n_actions_per_block > 1
+                    and logits.dim() == 2
+                    and action_idx.dim() == 2
+                    and action_idx.shape[1] == self._n_actions_per_block
+                ):
+                    logits = logits.reshape(-1, self._n_actions_per_block, self._n_actions)
+
             single_head = action_idx.dim() == 1
             if single_head:
                 loss = F.cross_entropy(logits, action_idx)
                 return loss, logits, action_idx
-            # Multi-offset: logits (B, n_offsets, n_actions), action_idx (B, n_offsets)
+            # Multi-head: logits (B, H, n_actions), action_idx (B, H) — temporal offsets or PPO multi-slot
+            nh = logits.shape[1]
             w = self._offset_weights.to(logits.device)
+            if w.numel() != nh:
+                w = torch.ones(nh, device=logits.device, dtype=logits.dtype)
             total = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            for i in range(self._n_offsets):
+            for i in range(nh):
                 total = total + w[i] * F.cross_entropy(logits[:, i], action_idx[:, i])
             return total, logits, action_idx
 
@@ -439,9 +475,13 @@ if _LIGHTNING_AVAILABLE:
             self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("train_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
             if action_idx.dim() == 2:
-                for i in range(self._n_offsets):
+                for i in range(action_idx.shape[1]):
                     acc_i = (pred[:, i] == action_idx[:, i]).float().mean()
-                    name = f"train_acc_offset_ms_{self._bc_time_offsets_ms[i]}" if self._bc_time_offsets_ms is not None else f"train_acc_offset_{i}"
+                    name = (
+                        f"train_acc_offset_ms_{self._bc_time_offsets_ms[i]}"
+                        if self._bc_time_offsets_ms is not None and i < len(self._bc_time_offsets_ms)
+                        else f"train_acc_offset_{i}"
+                    )
                     self.log(name, acc_i, on_step=False, on_epoch=True)
             target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
             self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._train_correct, self._train_total)
@@ -454,9 +494,13 @@ if _LIGHTNING_AVAILABLE:
             self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("val_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
             if action_idx.dim() == 2:
-                for i in range(self._n_offsets):
+                for i in range(action_idx.shape[1]):
                     acc_i = (pred[:, i] == action_idx[:, i]).float().mean()
-                    name = f"val_acc_offset_ms_{self._bc_time_offsets_ms[i]}" if self._bc_time_offsets_ms is not None else f"val_acc_offset_{i}"
+                    name = (
+                        f"val_acc_offset_ms_{self._bc_time_offsets_ms[i]}"
+                        if self._bc_time_offsets_ms is not None and i < len(self._bc_time_offsets_ms)
+                        else f"val_acc_offset_{i}"
+                    )
                     self.log(name, acc_i, on_step=False, on_epoch=True)
             target = action_idx if action_idx.dim() == 1 else action_idx[:, 0]
             self._update_acc_buffers(pred if pred.dim() == 1 else pred[:, 0], target, self._val_correct, self._val_total)
@@ -485,6 +529,8 @@ if _LIGHTNING_AVAILABLE:
 else:
     class BCLightningModule:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
+            from trackmania_rl.pretrain.lightning_compat import lightning_import_debug_message
+
             raise ImportError(
-                "BCLightningModule requires lightning. Install it with: pip install lightning"
+                "BCLightningModule requires PyTorch Lightning.\n" + lightning_import_debug_message()
             )

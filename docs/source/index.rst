@@ -6,11 +6,12 @@ Welcome to the TrackMania RL project documentation!
 
 This is a fork and extension of the original `Linesight <https://github.com/pb4git/linesight>`_ project, adapted for reinforcement learning experiments in *Trackmania Nations Forever*.
 
-The project uses distributional reinforcement learning (IQN - Implicit Quantile Networks) to train an AI agent to drive in TrackMania. The goal is to explore RL algorithms, reward shaping, and training techniques in a complex racing environment.
+The project trains an AI agent to drive in *Trackmania Nations Forever* using reinforcement learning. The default stack is **IQN** (Implicit Quantile Networks, distributional off-policy RL). A second stack is **PPO** (on-policy actor-critic). Both can use a **CNN** image head, **Hugging Face** vision, or a shared **native multimodal fusion** graph (``nn.fusion_mode``); see :doc:`models/index` and :doc:`configuration_guide`.
 
 **Key Features:**
 
-- Distributional RL with IQN (Implicit Quantile Network)
+- Distributional RL with IQN (Implicit Quantile Network), default
+- Optional on-policy **PPO** with shared TM rollout pipeline (see :ref:`ppo-config` in :doc:`configuration_guide`)
 - Modular configuration system for easy experimentation
 - Support for multiple parallel game instances
 - Hot-reloadable training parameters

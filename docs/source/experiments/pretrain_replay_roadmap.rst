@@ -298,15 +298,22 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
 
   **Level 0 experiment matrix (minimum viable):**
 
-  +-----------+----------------------------+-------------------------------------------+
-  | Run label | Pretrain                   | Note                                      |
-  +===========+============================+===========================================+
-  | A_scratch | None (IQN from scratch)    | Baseline; keep RL config identical.       |
-  +-----------+----------------------------+-------------------------------------------+
-  | B1_ae     | AE → IQN              | ``--task ae``                             |
-  +-----------+----------------------------+-------------------------------------------+
-  | B2_simclr | SimCLR → IQN          | ``--task simclr``                         |
-  +-----------+----------------------------+-------------------------------------------+
+  .. list-table:: Level 0 experiment matrix
+     :header-rows: 1
+     :widths: 12 28 48
+
+     * - Run label
+       - Pretrain
+       - Note
+     * - A_scratch
+       - None (IQN from scratch)
+       - Baseline; keep RL config identical.
+     * - B1_ae
+       - AE → IQN
+       - ``--task ae``
+     * - B2_simclr
+       - SimCLR → IQN
+       - ``--task simclr``
 
   **KPIs (record at fixed wall-clock intervals, e.g. 30 min and 60 min):**
 
@@ -322,39 +329,60 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
 
   - **Training options (every option is in config):** All Level 1 variants are controlled by ``config_files/pretrain/bc/pretrain_config_bc.yaml`` (and schema ``config_files/pretrain_bc_schema.py``). Override via CLI, env ``PRETRAIN_BC_<FIELD>``, or a custom YAML.
 
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Option                     | Config key                             | Notes                                                             |
-  +===========================+========================================+==================================================================+
-  | Image resolution           | ``image_size``                         | Must match RL ``w_downsized`` / ``h_downsized`` (e.g. 64).        |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Temporal stack             | ``n_stack``                            | 1 = single frame; >1 = consecutive frames per sample. Interval between frames = **1000/fps** ms from capture (e.g. 10 FPS → 100 ms, 64 FPS → ~15.6 ms); stack of 3 spans 2× that. |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Image normalization       | ``image_normalization``                | ``"01"`` = [0,1] (default); ``"iqn"`` = (x-128)/128 for IQN align.  |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Float (scalar) inputs      | ``use_floats``                         | If true, BC uses same float state as IQN; requires float in cache.|
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Float state length         | ``float_input_dim``                    | Required when ``use_floats`` true; match RL ``float_input_dim``.   |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Float normalization       | ``float_inputs_mean``, ``float_inputs_std`` | Same as RL state_normalization; length = ``float_input_dim``. |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Float head size            | ``float_hidden_dim``                   | Match RL ``neural_network.float_hidden_dim`` for IQN transfer.     |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Save float head for IQN   | ``save_float_head``                    | When use_floats: save float head for ``float_feature_extractor``.  |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | What to save               | ``bc_mode``                            | ``backbone`` \| ``full_policy`` \| ``auxiliary_head``.             |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Init from Level 0          | ``encoder_init_path``                  | Path to ``encoder.pt`` or null (train from scratch).              |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Action space size          | ``n_actions``                         | Must match RL ``len(config.inputs)`` (e.g. 12).                    |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | BC target                  | ``bc_target``                         | ``current_tick`` = action at last frame; ``next_tick`` = action at next timestep (MDP-aligned). |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Early stopping             | ``lightning.early_stopping``            | Stop when val metric stops improving.                             |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Early stopping patience    | ``lightning.patience``                 | Epochs with no improvement before stop.                           |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
-  | Checkpoint monitor         | ``lightning.checkpoint_monitor``       | ``auto`` \| ``val_loss`` \| ``train_loss``.                        |
-  +---------------------------+----------------------------------------+------------------------------------------------------------------+
+  **RL alignment:** square frame side for BC/pretrain caches must match RL ``nn.vis.image_size.width`` (the same value as flat ``get_config().w_downsized`` after load).
+
+  .. list-table:: Level 1 BC training options
+     :header-rows: 1
+     :widths: 22 24 54
+
+     * - Option
+       - Config key
+       - Notes
+     * - Image resolution
+       - ``image_size``
+       - Must match RL ``w_downsized`` / ``h_downsized`` (e.g. 64); YAML source is ``nn.vis.image_size`` (see **RL alignment** above).
+     * - Temporal stack
+       - ``n_stack``
+       - 1 = single frame; >1 = consecutive frames per sample. Interval between frames = **1000/fps** ms from capture (e.g. 10 FPS → 100 ms, 64 FPS → ~15.6 ms); stack of 3 spans 2× that.
+     * - Image normalization
+       - ``image_normalization``
+       - ``"01"`` = [0,1] (default); ``"iqn"`` = (x-128)/128 for IQN align.
+     * - Float (scalar) inputs
+       - ``use_floats``
+       - If true, BC uses same float state as IQN; requires float in cache.
+     * - Float state length
+       - ``float_input_dim``
+       - Required when ``use_floats`` true; match RL ``float_input_dim``.
+     * - Float normalization
+       - ``float_inputs_mean``, ``float_inputs_std``
+       - Same as RL ``state_normalization``; length = ``float_input_dim``.
+     * - Float head size
+       - ``float_hidden_dim``
+       - Match RL ``nn.float.mlp.hidden_dim`` for IQN transfer.
+     * - Save float head for IQN
+       - ``save_float_head``
+       - When ``use_floats``: save float head for ``float_feature_extractor``.
+     * - What to save
+       - ``bc_mode``
+       - ``backbone`` \| ``full_policy`` \| ``auxiliary_head``.
+     * - Init from Level 0
+       - ``encoder_init_path``
+       - Path to ``encoder.pt`` or null (train from scratch).
+     * - Action space size
+       - ``n_actions``
+       - Must match RL ``len(config.inputs)`` (e.g. 12).
+     * - BC target
+       - ``bc_target``
+       - ``current_tick`` = action at last frame; ``next_tick`` = action at next timestep (MDP-aligned).
+     * - Early stopping
+       - ``lightning.early_stopping``
+       - Stop when val metric stops improving.
+     * - Early stopping patience
+       - ``lightning.patience``
+       - Epochs with no improvement before stop.
+     * - Checkpoint monitor
+       - ``lightning.checkpoint_monitor``
+       - ``auto`` \| ``val_loss`` \| ``train_loss``.
 
   - **Data:** Replays from ``capture_replays_tmnf.py``; read ``manifest.json`` per frame for ``inputs``; align frames ``frame_*_*ms.jpeg`` with inputs (same ``step``/``time_ms``). You can either load on-the-fly from ``data_dir`` or prebuild a **BC cache** (``train.npy`` + ``train_actions.npy``, optional ``val.npy``/``val_actions.npy``) via ``preprocess_cache_dir`` for faster I/O. **BC target:** ``bc_target: current_tick`` uses the action at the last frame of each window; ``bc_target: next_tick`` uses the action at the *next* timestep (observe s_t → predict a_t for MDP alignment); with ``next_tick`` the last frame of each replay has no “next” action and is dropped. **Reusing Level 0 cache:** Use the *same* directory as Level 0 ``preprocess_cache_dir`` (e.g. ``cache/pretrain_64``) only when ``bc_target`` is ``current_tick``; with ``next_tick`` a full BC cache is always built. Level 0 writes ``train.npy``, ``val.npy``, ``cache_meta.json``. When you run BC with that dir and ``current_tick``, only ``train_actions.npy`` and ``val_actions.npy`` are added (same row order). If any frame lacks ``action_idx`` in ``manifest.json``, a full BC cache is built instead.
 
@@ -423,27 +451,50 @@ Experiments are ordered by **implementation and data complexity**. Later steps a
 Summary table: pretrain → IQN pipeline
 --------------------------------------
 
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| Level  | Pretrain type                     | Output you get                                    | How to plug into current IQN pipeline                            |
-+========+===================================+==================================================+==================================================================+
-| 0      | Unsupervised (AE/VAE/SimCLR)       | ``encoder.pt`` (CNN only)                        | Load into ``network.img_head``; save full IQN checkpoint; start learner from it. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 1      | BC (frames → actions)              | Encoder + action head                            | Load encoder → ``img_head``; optional: warm buffer + short L_BC in learner. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 2      | BC + LSTM                         | Encoder + LSTM + action head                     | Use encoder in ``img_head``; or extend IQN with LSTM and load both. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 3      | DAGGER                            | Better BC policy / dataset                       | Same as Level 1/2: better init or better buffer for IQN.         |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 4      | BC + RL (IQN/PPO)                 | Pretrained policy + RL fine-tuning               | Init IQN from BC; optional L = L_RL + λ·L_BC in learner; then pure IQN. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 5      | LAM (Genie)                       | Latent actions from video; mapping to real actions | Synthetic (s,a) for buffer/BC; or LAM encoder as feature extractor for IQN. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 6      | Multimodal BC                     | Encoder + mixture/VAE/quantile head              | Encoder → ``img_head``; optional exploration prior from BC.       |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 7      | Track/trajectory embedding        | Encoder z (track or trajectory → vector)        | Extra float input (z); or reward/planning from z; transfer to new tracks. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
-| 8      | State+position → remaining traj.  | Model “expert continuation” from (s, progress)  | Auxiliary loss; or reward/prior from predicted trajectory; no weight transfer. |
-+--------+-----------------------------------+--------------------------------------------------+------------------------------------------------------------------+
+.. list-table:: Pretrain → IQN pipeline (summary)
+   :header-rows: 1
+   :widths: 8 22 24 46
+
+   * - Level
+     - Pretrain type
+     - Output you get
+     - How to plug into current IQN pipeline
+   * - 0
+     - Unsupervised (AE/VAE/SimCLR)
+     - ``encoder.pt`` (CNN only)
+     - Load into ``network.img_head``; save full IQN checkpoint; start learner from it.
+   * - 1
+     - BC (frames → actions)
+     - Encoder + action head
+     - Load encoder → ``img_head``; optional: warm buffer + short L_BC in learner.
+   * - 2
+     - BC + LSTM
+     - Encoder + LSTM + action head
+     - Use encoder in ``img_head``; or extend IQN with LSTM and load both.
+   * - 3
+     - DAGGER
+     - Better BC policy / dataset
+     - Same as Level 1/2: better init or better buffer for IQN.
+   * - 4
+     - BC + RL (IQN/PPO)
+     - Pretrained policy + RL fine-tuning
+     - Init IQN from BC; optional L = L_RL + λ·L_BC in learner; then pure IQN.
+   * - 5
+     - LAM (Genie)
+     - Latent actions from video; mapping to real actions
+     - Synthetic (s,a) for buffer/BC; or LAM encoder as feature extractor for IQN.
+   * - 6
+     - Multimodal BC
+     - Encoder + mixture/VAE/quantile head
+     - Encoder → ``img_head``; optional exploration prior from BC.
+   * - 7
+     - Track/trajectory embedding
+     - Encoder z (track or trajectory → vector)
+     - Extra float input (z); or reward/planning from z; transfer to new tracks.
+   * - 8
+     - State+position → remaining traj.
+     - Model “expert continuation” from (s, progress)
+     - Auxiliary loss; or reward/prior from predicted trajectory; no weight transfer.
 
 ---
 

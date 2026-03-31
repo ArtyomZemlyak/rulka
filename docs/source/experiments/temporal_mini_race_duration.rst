@@ -178,4 +178,4 @@ Recommendations
 **Analysis tools:**
 
 - **By relative time** (2+ runs): ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_13 uni_14 --interval 5`` (``--logdir "<path>"`` if not from project root). Output: per-race tables (best/mean/std, finish rate, first finish) then scalar metrics.
-- **Key metrics:** Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``alltime_min_ms_hock``, ``alltime_min_ms_A01``, ``Training/loss``, ``RL/avg_Q_trained_A01``, ``Performance/learner_percentage_training`` (see :doc:`tensorboard_metrics`).
+- **Key metrics:** Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``alltime_min_ms_hock``, ``alltime_min_ms_A01``, ``Training/loss``, ``RL/avg_Q_trained_A01``, ``Performance/learner_percentage_training`` (see :doc:`../tensorboard_metrics`).

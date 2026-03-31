@@ -117,6 +117,10 @@ A: Config is loaded once at startup. To change parameters, edit the YAML file an
 .. warning::
    Don't change network architecture, input dimensions, or action space - these require restart.
 
+**Q: How do I freeze part of the network during RL (e.g. pretrained vision)?**
+
+A: Use boolean flags under YAML ``nn`` — :ref:`nn-rl-parameter-freeze` in :doc:`configuration_guide` (``nn.vis.freeze``, ``nn.float.freeze``, ``nn.encoder.freeze`` for PPO fusion, ``nn.iqn.freeze`` for IQN, ``nn.decoder.advantage.freeze`` / ``value.freeze``, ``nn.decoder.shared_trunk_freeze`` for PPO). Older ``training.pretrain_*_freeze`` / ``nn_frozen_param_prefixes`` keys were removed; freezing is configured only under ``nn``. If you change the frozen set mid-run, expect a fresh optimizer state or remove ``optimizer1.torch`` (see :doc:`troubleshooting`).
+
 Documentation
 =============
 
@@ -191,7 +195,7 @@ A:
 
 - Increase ``gpu_collectors_count`` in the ``performance`` section
 - Increase ``running_speed`` (up to 200x)
-- Reduce image resolution (``w_downsized``, ``h_downsized``) in the ``neural_network`` section
+- Reduce image resolution (``nn.vis.image_size`` / flat ``w_downsized``, ``h_downsized``)
 - Disable visualization in the ``performance`` section
 
 **Q: How can I reduce memory usage?**

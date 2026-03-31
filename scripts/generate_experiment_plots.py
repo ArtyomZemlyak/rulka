@@ -114,6 +114,11 @@ EXPERIMENTS = [
         "prefix": "exp_linesight_A1_vs_A01_as20_long_v2",
     },
     {
+        "name": "ppo_smoke_vs_A01_v2",
+        "runs": ["ppo_smoke_run", "A01_as20_long_v2"],
+        "prefix": "exp_ppo_smoke_vs_A01_v2",
+    },
+    {
         "name": "multi_offset_v2_vs_v31bc_pretrained",
         "runs": ["A01_as20_long_v2", "A01_as20_long_v3.1_pretrained_bc"],
         "prefix": "exp_multi_offset_v2_vs_v31bc_pretrained",

@@ -5,8 +5,10 @@ This page documents experiments on **IQN model variants**: **use_ddqn** (Double 
 
 Architecture references:
 
-- Baseline IQN architecture: :doc:`../../models/iqn_architecture`
-- BTR architecture (implemented as IQN add-ons): :doc:`../../models/btr_architecture`
+- IQN architectures (classic CNN, HF vision, multimodal fusion): :doc:`../../models/iqn_architecture`
+- BTR paper options (optional IQN add-ons, ``btr:`` in YAML — not a separate model class): :doc:`../../models/btr_architecture`
+
+The **uni_*** experiments below use the **classic** CNN IQN stack (``fusion_mode: none``). Multimodal IQN shares the fusion body with PPO; see the architecture page for routing.
 
 **How the runs relate (chain of changes):**
 
@@ -108,7 +110,7 @@ GPU Utilization (Performance/learner_percentage_training)
 Configuration Changes
 ----------------------
 
-**Neural network** (``neural_network`` section in config YAML):
+**Neural network** (``nn`` section in config YAML):
 
 - **uni_12:** use_ddqn = False (target network both selects and evaluates next action).
 - **uni_16:** use_ddqn = True (online network selects next action, target network evaluates it — Double DQN).
@@ -222,7 +224,7 @@ GPU Utilization
 Configuration Changes (Experiment 2)
 -------------------------------------
 
-**Neural network** (``neural_network`` section in config YAML):
+**Neural network** (``nn`` section in config YAML):
 
 - **uni_16:** iqn_embedding_dimension = 64.
 - **uni_17:** iqn_embedding_dimension = 128.
@@ -328,7 +330,7 @@ GPU Utilization (Performance/learner_percentage_training)
 Configuration Changes (Experiment 3)
 -------------------------------------
 
-**Neural network** (``neural_network`` section in config YAML):
+**Neural network** (``nn`` section in config YAML):
 
 - **uni_17:** W_downsized = 128, H_downsized = 128.
 - **uni_18:** W_downsized = 256, H_downsized = 256.
@@ -470,7 +472,7 @@ By steps (common step window up to 3.3M steps)
 Configuration Changes (Experiment 4)
 ------------------------------------
 
-**Neural network** (``neural_network`` section in config YAML):
+**Neural network** (``nn`` section in config YAML):
 
 - **uni_17:** W_downsized = 128, H_downsized = 128, iqn_embedding_dimension = 128.
 - **uni_19:** W_downsized = 64, H_downsized = 64, iqn_embedding_dimension = 64.
@@ -587,7 +589,7 @@ By steps (common step window up to 3.3M steps)
 Configuration Changes (Experiment 5)
 ------------------------------------
 
-**Neural network** (``neural_network`` section in config YAML):
+**Neural network** (``nn`` section in config YAML):
 
 - **uni_17:** W_downsized = 128, H_downsized = 128, iqn_embedding_dimension = 128.
 - **uni_20:** W_downsized = 64, H_downsized = 64, iqn_embedding_dimension = 128.
@@ -614,4 +616,4 @@ Analysis tools (all IQN experiments)
 
 - By **relative time and by steps:** ``python scripts/analyze_experiment_by_relative_time.py uni_12 uni_16 --interval 5 [--step_interval 50000]`` (Exp 1); ``uni_16 uni_17`` (Exp 2); ``uni_17 uni_18`` (Exp 3); ``uni_17 uni_19`` (Exp 4); ``uni_17 uni_20`` (Exp 5). Script outputs both relative-time and BY STEP tables. Use ``--logdir "<path>"`` if not from project root.
 - By last value: ``python scripts/analyze_experiment.py <run1> <run2> ...`` (less meaningful when durations differ).
-- Key metrics: Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training`` (see :doc:`tensorboard_metrics`).
+- Key metrics: Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training`` (see :doc:`../../tensorboard_metrics`).

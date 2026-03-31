@@ -8,7 +8,7 @@ This experiment tests RL training with the IQN **image head disabled** (``use_iq
 
 **Goal:** Compare learning speed and final performance of float-only IQN vs full IQN (with image head) on the same map cycle and training schedule.
 
-**Key parameter:** ``neural_network.use_iqn_image_head: false``. All other settings (batch_size, running_speed, map_cycle, rewards, etc.) match a comparable run with image head for a fair comparison.
+**Key parameter:** ``nn.vis.no_image: true`` (no image head). All other settings (batch_size, running_speed, map_cycle, rewards, etc.) match a comparable run with image head for a fair comparison.
 
 Results
 -------
@@ -78,7 +78,7 @@ GPU Utilization (training %)
 Configuration Changes
 ----------------------
 
-**Neural network** (``neural_network`` section in config YAML):
+**Neural network** (``nn`` section in config YAML):
 
 .. code-block:: yaml
 

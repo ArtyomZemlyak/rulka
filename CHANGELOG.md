@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.7.0] - 2026-03-31
+
+### RL architecture and training pipeline
+- Added algorithm wiring abstractions (`trackmania_rl/agents/algorithms/`) to decouple training loop orchestration from IQN-specific implementation details.
+- Introduced PPO stack: PPO wiring, learner path, policy optimization modules, and reusable policy model builders under `trackmania_rl/agents/policy_models/` and `trackmania_rl/agents/policy_optimization/`.
+- Added new RL configs for PPO and transformer/CNN variants (`config_files/rl/config_ppo*.yaml`, `config_files/rl/config_btr_post_concat_cnn_transformer.yaml`) and extended schema/loader support for NN topology selection.
+
+### Pretrain, model export, and compatibility
+- Expanded BC pretrain and policy-loading paths (`trackmania_rl/pretrain/train_bc.py`, `trackmania_rl/pretrain/rl_policy_factory.py`) to support RL policy initialization and PPO-compatible checkpoints.
+- Added/updated preprocessing, dataset, model, and export logic for multi-modal inputs and topology-aware construction.
+- Added `trackmania_rl/pretrain/lightning_compat.py` to stabilize Lightning integration boundaries.
+
+### Runtime and utility updates
+- Updated collector/learner process integration and training entrypoints (`scripts/train.py`, `trackmania_rl/multiprocess/*`) to support algorithm pluggability and new PPO flow.
+- Added parameter-freeze helpers and soft-copy controls (`trackmania_rl/param_freeze.py`) for safer transfer/fine-tuning workflows.
+- Added vectorized reward utilities (`trackmania_rl/reward_vectorized.py`) and utility refactors supporting new training modes.
+
+### Validation and documentation
+- Added focused tests for PPO math/wiring, config migrations, NN schema, BC-to-RL policy loading, and parameter freeze behavior.
+- Expanded architecture and experiment docs with PPO baseline write-up (`docs/source/experiments/ppo_vs_iqn_baseline.rst`), PPO architecture page, and NN topology catalog.
+- Refreshed configuration/troubleshooting/installation and experiment pages to document new training options and expected workflows.
+
 ## [1.6.1] - 2026-03-25
 
 ### Analysis

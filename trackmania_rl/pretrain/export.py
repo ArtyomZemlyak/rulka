@@ -207,17 +207,17 @@ def validate_encoder_compatibility(
     from trackmania_rl.agents.iqn import _build_img_head
     try:
         from config_files.config_loader import get_config
+        from trackmania_rl.nn_build.vis_cnn_head import vis_cnn_head_kw_from_nn_vis
+
         cfg = get_config()
-        ref_head = _build_img_head(
-            use_impala_cnn=cfg.use_impala_cnn,
-            impala_model_size=cfg.impala_model_size,
-            use_spectral_norm=cfg.use_spectral_norm,
-            use_adaptive_maxpool=cfg.use_adaptive_maxpool,
-            adaptive_maxpool_size=cfg.adaptive_maxpool_size,
-        )
+        ref_head = _build_img_head(**vis_cnn_head_kw_from_nn_vis(cfg.vis))
     except RuntimeError:
+        from trackmania_rl.nn_build.vis_cnn_head import default_vis_cnn_head_kw
         from trackmania_rl.pretrain.models import build_iqn_encoder
-        ref_head = build_iqn_encoder(in_channels=1, image_size=image_size)
+
+        ref_head = build_iqn_encoder(
+            in_channels=1, image_size=image_size, cnn_head_kw=default_vis_cnn_head_kw()
+        )
     expected_dim = calculate_conv_output_dim(ref_head, image_size, image_size)
     with torch.no_grad():
         test_out = encoder(torch.zeros(1, in_channels, image_size, image_size))
@@ -254,6 +254,27 @@ def validate_encoder_compatibility(
 # IQN injection helper (used by train.py and init_iqn_from_encoder.py)
 # ---------------------------------------------------------------------------
 
+
+def iqn_cnn_img_head_module(net: nn.Module) -> Optional[nn.Module]:
+    """CNN vision stem for encoder.pt injection: classic ``IQN_Network.img_head`` or ``fusion.img_head``."""
+    h = getattr(net, "img_head", None)
+    if h is not None:
+        return h
+    fusion = getattr(net, "fusion", None)
+    if fusion is not None:
+        h = getattr(fusion, "img_head", None)
+        if h is not None:
+            return h
+    return None
+
+
+def iqn_float_feature_extractor_key_prefix(checkpoint_sd: dict) -> str:
+    """Prefix for float MLP keys in ``weights*.torch`` (multimodal IQN uses ``fusion.``)."""
+    if any(k.startswith("fusion.float_feature_extractor.") for k in checkpoint_sd):
+        return "fusion.float_feature_extractor."
+    return "float_feature_extractor."
+
+
 def inject_encoder_into_iqn(
     encoder_pt: Path,
     save_dir: Path,
@@ -284,7 +305,9 @@ def inject_encoder_into_iqn(
     """
     from config_files.config_loader import get_config
     cfg = get_config()
-    if cfg.use_impala_cnn:
+    from trackmania_rl.nn_build.vis_cnn_head import vis_cnn_head_kw_from_nn_vis
+
+    if vis_cnn_head_kw_from_nn_vis(cfg.vis)["use_impala_cnn"]:
         raise ValueError(
             "Pretrained encoder injection is not supported with use_impala_cnn=True. "
             "The pretrained encoder uses the default 4-layer CNN which is incompatible "
@@ -331,16 +354,25 @@ def inject_encoder_into_iqn(
         )
         state_dict = average_first_layer_to_1ch(state_dict)
 
-    # Build fresh IQN network pair and inject
-    from trackmania_rl.agents.iqn import make_untrained_iqn_network
-    online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
-    target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+    # Build fresh IQN network pair and inject (always IQN topology; literal "iqn" not get_config().algorithm)
+    from trackmania_rl.agents.algorithms.registry import get_wiring
+
+    iqn_wiring = get_wiring("iqn")
+    online, _ = iqn_wiring.make_network(False, False)
+    target, _ = iqn_wiring.make_network(False, False)
 
     encoder_sd_cuda = {k: v.to("cuda") for k, v in state_dict.items()}
-    online.img_head.load_state_dict(encoder_sd_cuda, strict=True)
-    target.img_head.load_state_dict(encoder_sd_cuda, strict=True)
+    for name, net in (("online", online), ("target", target)):
+        head = iqn_cnn_img_head_module(net)
+        if head is None:
+            raise ValueError(
+                "pretrain_encoder_path requires a CNN image stem (img_head). "
+                f"IQN topology for {name!r} has no img_head (HF-only vision or float-only). "
+                "Use classic IQN CNN / fusion with a CNN vis branch, or omit pretrain_encoder_path."
+            )
+        head.load_state_dict(encoder_sd_cuda, strict=True)
     log.info(
-        "[PRETRAIN] Loaded pretrain weights into IQN img_head (online + target); "
+        "[PRETRAIN] Loaded pretrain weights into IQN CNN img_head (online + target); "
         "%d tensor keys.",
         len(state_dict),
     )
@@ -408,9 +440,11 @@ def inject_bc_heads_into_iqn(
             "No existing IQN weights in %s; creating fresh pair before BC state injection.",
             save_dir,
         )
-        from trackmania_rl.agents.iqn import make_untrained_iqn_network
-        online, _ = make_untrained_iqn_network(jit=False, is_inference=False)
-        target, _ = make_untrained_iqn_network(jit=False, is_inference=False)
+        from trackmania_rl.agents.algorithms.registry import get_wiring
+
+        iqn_wiring = get_wiring("iqn")
+        online, _ = iqn_wiring.make_network(False, False)
+        target, _ = iqn_wiring.make_network(False, False)
         save_dir.mkdir(parents=True, exist_ok=True)
         torch.save(online.state_dict(), w1)
         torch.save(target.state_dict(), w2)
@@ -477,8 +511,9 @@ def inject_float_head_into_iqn(float_head_path: Path, save_dir: Path) -> bool:
     if not w1.exists() or not w2.exists():
         raise FileNotFoundError(f"Checkpoints not found in {save_dir}; run encoder injection first.")
     head_sd = torch.load(pt, map_location="cpu", weights_only=True)
-    prefixed = {f"float_feature_extractor.{k}": v for k, v in head_sd.items()}
     online_sd = torch.load(w1, map_location="cpu", weights_only=True)
+    fprefix = iqn_float_feature_extractor_key_prefix(online_sd)
+    prefixed = {f"{fprefix}{k}": v for k, v in head_sd.items()}
     target_sd = torch.load(w2, map_location="cpu", weights_only=True)
     copied = 0
     for key in prefixed:
@@ -560,3 +595,64 @@ def load_encoder_into_bc(encoder_pt: Path, bc_network: nn.Module) -> None:
     encoder = bc_network.encoder
     encoder.load_state_dict(state_dict, strict=True)
     log.info("Loaded encoder weights into BC network from %s", encoder_pt)
+
+
+def inject_ppo_bc_policy_into_save_dir(
+    bc_policy_path: Path,
+    save_dir: Path,
+    *,
+    uncompiled: nn.Module | None = None,
+    overwrite: bool = False,
+) -> bool:
+    """Write ``save_dir/weights1.torch`` from BC ``ppo_policy_bc.pt`` (fusion + multi-offset).
+
+    Expects current :func:`config_files.config_loader.get_config` (RL YAML) to match the BC
+    run built with the same ``rl_config_path`` (same ``nn`` topology).
+
+    If *uncompiled* is the live PPO policy from ``make_network``, weights are loaded into that
+    module (no second HF backbone build). Otherwise a new network is built via ``make_network``.
+
+    Fusion build skips ``nn.init_from_pretrained`` automatically when BC ``ppo_policy_bc.pt`` or
+    ``save/<run_name>/weights1.torch`` exists (see ``skip_multimodal_fusion_hub_init_from_pretrained``).
+    """
+    from config_files.config_loader import get_config
+    from trackmania_rl import utilities
+    from trackmania_rl.agents.algorithms import get_wiring
+
+    w1 = save_dir / "weights1.torch"
+    if w1.exists() and not overwrite:
+        log.info(
+            "PPO BC pretrain skipped: %s already exists (resume run; use overwrite to force).",
+            w1,
+        )
+        return False
+
+    p = Path(bc_policy_path)
+    if p.is_dir():
+        p = p / "ppo_policy_bc.pt"
+    if not p.is_file():
+        raise FileNotFoundError(f"PPO BC checkpoint not found (expected ppo_policy_bc.pt): {p}")
+
+    cfg = get_config()
+    if getattr(cfg, "algorithm", "") != "ppo":
+        raise ValueError("inject_ppo_bc_policy_into_save_dir requires training.algorithm: ppo")
+
+    if uncompiled is None:
+        wiring = get_wiring()
+        _, uncompiled = wiring.make_network(cfg.use_jit, is_inference=False)
+    sd = torch.load(p, map_location="cpu", weights_only=False)
+    slice_head = bool(getattr(cfg, "pretrain_ppo_policy_slice_head_to_model", False))
+    prep = utilities.prepare_ppo_policy_state_dict_for_load(
+        sd, uncompiled, slice_policy_head_to_model=slice_head
+    )
+    uncompiled.load_state_dict(prep, strict=True)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    to_save = {k: v.detach().cpu() for k, v in uncompiled.state_dict().items()}
+    torch.save(to_save, w1)
+    log.info(
+        "[PRETRAIN] PPO: BC policy %s → %s (%d tensors)",
+        p,
+        w1,
+        len(to_save),
+    )
+    return True

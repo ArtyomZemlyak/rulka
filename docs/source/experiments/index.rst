@@ -25,6 +25,7 @@ Contents
    exploration
    global_schedule_speed
    linesight_config_vs_A01_baseline
+   ppo_vs_iqn_baseline
    multi_action_prediction
    iqn_modernization_plan
    network_size_long_training

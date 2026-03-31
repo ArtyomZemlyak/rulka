@@ -26,7 +26,7 @@ For “longest run” comparison (almost 100M+ training steps): ``A01_as20_long`
 Results
 -------
 
-Important: run lengths differ. **Primary quantitative comparisons here use training steps** (BY STEP tables from the analysis script). Any **time-axis** prose or regenerated tables must use **cumulative training hours** (``--time-axis auto`` or ``cumul_training_hours``), not raw TensorBoard wall minutes across merged logs — see :doc:`experiments/index`.
+Important: run lengths differ. **Primary quantitative comparisons here use training steps** (BY STEP tables from the analysis script). Any **time-axis** prose or regenerated tables must use **cumulative training hours** (``--time-axis auto`` or ``cumul_training_hours``), not raw TensorBoard wall minutes across merged logs — see :doc:`index`.
 
 Key findings
 
@@ -42,13 +42,13 @@ Run Analysis
 ------------
 
 - ``A01_as20_long_v3`` / ``v3.1`` / ``v3.1_pretrained_bc``: merged TensorBoard dirs. **Cumulative training** for curves = ``cumul_training_hours`` (TB / ``save/.../accumulated_stats.joblib``). Example: ``save/A01_as20_long_v3.1_pretrained_bc/`` ≈ **24.5 h** training, A01 best **24260 ms**.
-- ``A01_as20_long`` (longest reference): same rules; see :doc:`experiments/time_axis_conventions` audit table.
+- ``A01_as20_long`` (longest reference): same rules; see :doc:`time_axis_conventions` audit table.
 - ``A01_as20_long_v2``: merged **3** TB dirs. **Audited (local logs):** **~17.7 h** cumulative training vs **~2898 min** TB wall span (ratio **~2.7×**) — wall minutes **must not** be read as training duration. Pair with ``v3.1_pretrained_bc``: **~24.5 h** training vs **~3222 min** wall (**~2.2×**).
 
 Direct comparison: v2 vs v3.1_pretrained_bc
 -------------------------------------------
 
-This section compares **single-action** ``A01_as20_long_v2`` to **multi-action + BC-pretrained** ``A01_as20_long_v3.1_pretrained_bc``. Merged suffix logs (**3** vs **4** dirs). **Cumulative training** totals: **~17.74 h** (v2) vs **~24.51 h** (v3.1_bc); **common BY TIME window** ends at **~17.74 h** (v2 stops earlier in training time). TB **wall** spans are **~2900 min** vs **~3220 min** — **not** the same as those training hours (see :doc:`experiments/time_axis_conventions`).
+This section compares **single-action** ``A01_as20_long_v2`` to **multi-action + BC-pretrained** ``A01_as20_long_v3.1_pretrained_bc``. Merged suffix logs (**3** vs **4** dirs). **Cumulative training** totals: **~17.74 h** (v2) vs **~24.51 h** (v3.1_bc); **common BY TIME window** ends at **~17.74 h** (v2 stops earlier in training time). TB **wall** spans are **~2900 min** vs **~3220 min** — **not** the same as those training hours (see :doc:`time_axis_conventions`).
 
 **Save-state cross-check:** ``save/.../accumulated_stats.joblib`` bests **24150 ms** vs **24260 ms** — matches **100M-step** BY STEP eval-best rows and the last **cumul_training_hours** checkpoints below.
 
@@ -67,7 +67,7 @@ Detailed TensorBoard Metrics Analysis
 
    python scripts/analyze_experiment_by_relative_time.py A01_as20_long_v2 A01_as20_long_v3.1_pretrained_bc --time-axis cumul_training_hours --interval-training-hours 1 --step_interval 5000000
 
-**BY STEP** uses the same command (step grid unchanged). Do **not** use wall-minute checkpoints for this pair: wall span **>2×** active training time (:doc:`experiments/time_axis_conventions`).
+**BY STEP** uses the same command (step grid unchanged). Do **not** use wall-minute checkpoints for this pair: wall span **>2×** active training time (:doc:`time_axis_conventions`).
 
 **Figures:** ``python scripts/generate_experiment_plots.py --experiments multi_offset_v2_vs_v31bc_pretrained``
 

@@ -58,6 +58,10 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 - Reduce ``batch_size`` in the ``training`` section
 - Check RAM usage with Task Manager / htop
 
+**Optimizer state / checkpoint after changing ``nn.*.freeze``**
+
+If you change which parameters are frozen (``nn.vis.freeze``, ``nn.decoder.advantage.freeze``, etc.; see :ref:`nn-rl-parameter-freeze` in :doc:`configuration_guide`), the set of tensors in the Adam optimizer state no longer matches the network. The learner may log that it starts a **fresh optimizer**. To avoid confusing resumes, delete ``optimizer1.torch`` / ``scaler.torch`` under ``save/<run_name>/`` when the trainable parameter set changes, or start a new ``run_name``.
+
 **Agent gets stuck or doesn't progress**
 
 - Verify virtual checkpoint file (`.npy`) is correctly generated
@@ -83,8 +87,7 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 *If issue persists:*
 
 1. Check that windows are not minimized (game pauses when minimized)
-2. Verify ``force_window_focus_on_input: false`` in the ``performance`` section of the config YAML
-3. With multiple maps, ensure smooth transitions between maps in logs
+2. With multiple maps, ensure smooth transitions between maps in logs
 
 **Game crashes on startup**
 
@@ -95,7 +98,8 @@ Ensure you're using PyTorch 2.7+ with matching TorchRL version. The ``uv sync`` 
 
 .. _bc-cache-skip-indices:
 
-**BC cache: "Sample missing meta/float" or skip_indices**
+BC cache: "Sample missing meta/float" or skip_indices
+-------------------------------------------------------
 
 When building BC cache with float inputs (``use_full_iqn`` or ``use_floats``), some frames may lack required metadata (race state snapshots in ``manifest.json``) for the float vector. The cache builder skips such samples and writes ``skip_indices.json``; bad samples are removed from the cache.
 

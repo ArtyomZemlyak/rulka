@@ -2,6 +2,9 @@
 # Paper: https://arxiv.org/abs/2411.03820  |  Upstream code: https://github.com/VIPTankz/BTR
 # Train: python scripts/train.py --config config_files/rl/config_btr.yaml
 #
+# BTR is NOT a separate architecture or training.algorithm: keep training.algorithm: iqn.
+# This file turns ON the full `btr:` feature bundle inside the same IQN stack (get_wiring("iqn")).
+#
 # What the paper adds on top of Rainbow-style IQN (six ingredients mirrored in `btr:` + below):
 #   1) Munchausen-style soft policy in the TD target (tau=0.03, alpha=0.9, log clamp lo=-1)
 #   2) IMPALA residual CNN encoder (channel scale `impala_model_size: 2`)
@@ -13,7 +16,7 @@
 # Hyperparameters taken from upstream main.py / Agent.py defaults (Atari-200M setup):
 #   lr=1e-4, batch=256, n-step=3, grad clip=10, discount=0.997, PER alpha=0.2, IQN taus=8,
 #   dueling on, Double DQN off (mutually exclusive with Munchausen in their stack), noisy+spectral+impala+maxpool on,
-#   target: hard copy every 500 learner steps in upstream; Rulka uses Polyak soft_update_tau each trigger (see neural_network).
+#   target: hard copy every 500 learner steps in upstream; Rulka uses Polyak soft_update_tau each trigger (see ``nn.training``).
 #
 # Rulka-specific caveats (read before long runs):
 #   - Image size stays 64x64 (TM); Atari uses 84x84 — not changed here.
@@ -21,6 +24,8 @@
 #   - Discount 0.997 is paper Atari frame-level; many TM runs prefer gamma→1 for full lap credit — see `gamma_schedule` comment block.
 #   - global_schedule_speed multiplies all schedule x-coordinates in config_loader; this file uses 1 so numbers match the paper table mentally.
 #   - Paper batch 256 is small for TM throughput; increase batch_size if the learner is not saturated.
+#
+# IQN topology: ``nn`` (below) + ``btr:`` toggles. Vision CNN belongs under ``nn.vis.cnn`` (single source of truth). Loader may still fill omitted CNN keys from ``btr:`` for older minimal YAML.
 
 environment:
   tm_engine_step_per_action: 5 # 5
@@ -47,37 +52,54 @@ environment:
   # Multi-action: e.g. [0, 10, 20, 30, 40] for N=5 actions per block (10ms each). Omit or [0] = single action.
   # rl_action_offsets_ms: [0, 10, 20, 30, 40]
 
-neural_network:
-  w_downsized: 64
-  h_downsized: 64
-  float_hidden_dim: 256
-  # BTR Agent.py: linear_size=512 (trunk before dueling heads)
-  dense_hidden_dimension: 512
-  # BTR Agent.py: ncos=64 (IQN cosine embedding dim)
-  iqn_embedding_dimension: 64
-  # BTR main.py: --taus 8 (samples per forward for training targets)
-  iqn_n: 8
-  iqn_k: 32
-  iqn_kappa: 0.005
-  # BTR: --double 0 with Munchausen IQN (hard-max / DDQN target path disabled in code when munchausen on)
-  use_ddqn: false
-  clip_grad_value: 1000
-  # BTR main.py: --grad_clip 10
-  clip_grad_norm: 10
-  number_memories_trained_on_between_target_network_updates: 128
-  soft_update_tau: 0.02
-  target_self_loss_clamp_ratio: 4
-  single_reset_flag: 0
-  reset_every_n_frames_generated: 40000000000000
-  additional_transition_after_reset: 1600000
-  last_layer_reset_factor: 0.8
-  overall_reset_mul_factor: 0.01
-  use_jit: true
-  # Set to false to train IQN without image head (float features only).
-  use_iqn_image_head: true
+nn:
+  vis:
+    image_size:
+      width: 64
+      height: 64
+    cnn:
+      use_impala_cnn: true
+      impala_model_size: 2
+      use_adaptive_maxpool: true
+      adaptive_maxpool_size: 6
+      use_spectral_norm: true
+  float:
+    mlp:
+      hidden_dim: 256
+  fusion_mode: none
+  encoder: {}
+  iqn:
+    embedding_dimension: 64
+    n: 8
+    k: 32
+    kappa: 0.005
+  decoder:
+    shared_input: post_tau
+    dense_hidden_dimension: 512
+    advantage:
+      mlp:
+        layers: 1
+    value:
+      mlp:
+        layers: 1
+  training:
+    use_jit: true
+    use_ddqn: false
+    clip_grad_value: 1000
+    clip_grad_norm: 10
+    number_memories_trained_on_between_target_network_updates: 128
+    soft_update_tau: 0.02
+    target_self_loss_clamp_ratio: 4
+    single_reset_flag: 0
+    reset_every_n_frames_generated: 40000000000000
+    additional_transition_after_reset: 1600000
+    last_layer_reset_factor: 0.8
+    overall_reset_mul_factor: 0.01
 
 training:
   run_name: "A01_as20_long_v4.2_btr"
+  # RL stack registry key. Topology = ``nn`` + ``btr:`` below.
+  algorithm: iqn
   # BTR main.py: --bs 256 (raise if learner waits on GPU)
   batch_size: 4096
   adam_epsilon: 0.0001
@@ -139,12 +161,6 @@ training:
   # pretrain_actions_head_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/actions_head.pt"
 
   # Freeze pretrain parts during RL (default: false).
-  pretrain_encoder_freeze: false
-  pretrain_float_head_freeze: false
-  pretrain_iqn_fc_freeze: false
-  pretrain_actions_head_freeze: false
-  pretrain_V_head_freeze: false
-
 memory:
   # BTR Agent: max_mem_size=1_048_576; ramp sizes toward ~1M long buffer (staircase = no interpolation)
   memory_size_schedule:
@@ -196,14 +212,6 @@ btr:
   munchausen_entropy_tau: 0.03
   munchausen_lo: -1.0
 
-  use_impala_cnn: true
-  impala_model_size: 2
-
-  use_adaptive_maxpool: true
-  adaptive_maxpool_size: 6
-
-  use_spectral_norm: true
-
   # Paper lists LayerNorm as an ingredient; upstream argparse defaults layer_norm=0 — enable for “full six”
   use_layer_norm: true
 
@@ -229,7 +237,6 @@ performance:
   frames_before_save_best_runs: 1500000
   threshold_to_save_all_runs_ms: -1
   running_speed: 32
-  force_window_focus_on_input: false
   # Pin each TmForever.exe to one logical CPU: collector i -> tm_forever_cpu_affinity_offset + i
   pin_tm_forever_cpu_affinity: false
   # tm_forever_cpu_affinity_offset: 0

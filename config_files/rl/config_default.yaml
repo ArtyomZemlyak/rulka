@@ -26,32 +26,56 @@ environment:
   # Multi-action: e.g. [0, 10, 20, 30, 40] for N=5 actions per block (10ms each). Omit or [0] = single action.
   # rl_action_offsets_ms: [0, 10, 20, 30, 40]
 
-neural_network:
-  w_downsized: 64
-  h_downsized: 64
-  float_hidden_dim: 256
-  dense_hidden_dimension: 1024
-  iqn_embedding_dimension: 128
-  iqn_n: 8
-  iqn_k: 32
-  iqn_kappa: 0.005
-  use_ddqn: true
-  clip_grad_value: 1000
-  clip_grad_norm: 30
-  number_memories_trained_on_between_target_network_updates: 128
-  soft_update_tau: 0.02
-  target_self_loss_clamp_ratio: 4
-  single_reset_flag: 0
-  reset_every_n_frames_generated: 40000000000000
-  additional_transition_after_reset: 1600000
-  last_layer_reset_factor: 0.8
-  overall_reset_mul_factor: 0.01
-  use_jit: true
-  # Set to false to train IQN without image head (float features only).
-  use_iqn_image_head: true
+# Hierarchical ``nn:`` (``vis`` / ``float`` / ``fusion_mode`` / ``init_from_pretrained`` / ``encoder`` / ``iqn`` / ``decoder`` / ``training``). Empty ``vis.cnn`` fields are filled from ``btr:`` at load when present.
+nn:
+  vis:
+    image_size:
+      width: 64
+      height: 64
+    cnn:
+      use_impala_cnn: true
+      impala_model_size: 2
+      use_adaptive_maxpool: true
+      adaptive_maxpool_size: 6
+      use_spectral_norm: true
+  float:
+    mlp:
+      hidden_dim: 256
+  fusion_mode: none
+  init_from_pretrained: ""
+  encoder: {}
+  iqn:
+    embedding_dimension: 128
+    n: 8
+    k: 32
+    kappa: 0.005
+  decoder:
+    shared_input: post_tau
+    dense_hidden_dimension: 1024
+    advantage:
+      mlp:
+        layers: 1
+    value:
+      mlp:
+        layers: 1
+  training:
+    use_jit: true
+    use_ddqn: true
+    clip_grad_value: 1000
+    clip_grad_norm: 30
+    number_memories_trained_on_between_target_network_updates: 128
+    soft_update_tau: 0.02
+    target_self_loss_clamp_ratio: 4
+    single_reset_flag: 0
+    reset_every_n_frames_generated: 40000000000000
+    additional_transition_after_reset: 1600000
+    last_layer_reset_factor: 0.8
+    overall_reset_mul_factor: 0.01
 
 training:
-  run_name: "A01_as20_long_v4.1_btr"
+  run_name: "A01_testing_1"
+  # RL stack: "iqn" selects IQN wiring in train/learner/collector. Topology = nn + btr + environment (not this field alone).
+  algorithm: iqn
   batch_size: 4096
   adam_epsilon: 0.0001
   adam_beta1: 0.9
@@ -110,13 +134,6 @@ training:
   #   pretrain_actions_head_path: "output/ptretrain/bc/v2"
   # pretrain_actions_head_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/actions_head.pt"
 
-  # Freeze pretrain parts during RL (default: false).
-  pretrain_encoder_freeze: false
-  pretrain_float_head_freeze: false
-  pretrain_iqn_fc_freeze: false
-  pretrain_actions_head_freeze: false
-  pretrain_V_head_freeze: false
-
 memory:
   memory_size_schedule:
     - [0, [50000, 20000]]
@@ -163,8 +180,8 @@ rewards:
   engineered_close_to_vcp_reward_schedule: [[0, 0.0]]
   final_speed_reward_as_if_duration_s: 2
 
-# BTR (Beyond The Rainbow) — all features OFF by default for backward compatibility.
-# Enable individually to integrate BTR recipe components.
+# BTR (Beyond The Rainbow) — optional IQN upgrades only (not a separate algorithm / not another training.algorithm).
+# Same IQN_Network + iqn wiring; flip flags to match the paper recipe or ablate (pydantic defaults are all false).
 # Reference: https://arxiv.org/abs/2411.03820
 btr:
   # Munchausen IQN: soft-policy targets (replaces hard-max / DDQN target)
@@ -194,7 +211,7 @@ btr:
 map_cycle:
   entries:
     # - {short_name: hock, map_path: "ESL-Hockolicious.Challenge.Gbx", reference_line_path: "ESL-Hockolicious_0.5m_cl2.npy", is_exploration: true, fill_buffer: true, repeat: 64}
-    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 64}
+    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 1}
     - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 
 performance:
@@ -210,7 +227,6 @@ performance:
   frames_before_save_best_runs: 1500000
   threshold_to_save_all_runs_ms: -1
   running_speed: 32
-  force_window_focus_on_input: false
   # Pin each TmForever.exe to one logical CPU: collector i -> tm_forever_cpu_affinity_offset + i
   pin_tm_forever_cpu_affinity: false
   # tm_forever_cpu_affinity_offset: 0

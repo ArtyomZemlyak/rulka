@@ -16,10 +16,10 @@ Example:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from config_files.pretrain_schema import LightningConfig
@@ -87,7 +87,7 @@ class BCPretrainConfig(BaseSettings):
         default=None,
         description="Directory for BC cache (train.npy, train_actions.npy, etc.). null = disabled.",
     )
-    # Path to RL config. Required: image_size, n_actions, dense_hidden_dimension,
+    # Path to RL config. Required for alignment: image_size (from nn.vis), n_actions, dense_hidden_dimension,
     # iqn_embedding_dimension, float params (when use_floats) all come from here.
     rl_config_path: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parent / "rl" / "config_default.yaml",
@@ -97,7 +97,7 @@ class BCPretrainConfig(BaseSettings):
     cache_build_workers: int = Field(default=0, ge=0, description="Threads for cache construction.")
 
     # ---------- Image ----------
-    # image_size loaded from rl_config_path (neural_network.w_downsized).
+    # image_size loaded from rl_config_path (nn.vis.image_size width / w_downsized).
     n_stack: int = Field(default=1, ge=1, le=32, description="Consecutive frames per sample.")
 
     # Image normalization: "01" = [0, 1] (current pretrain default); "iqn" = (x-128)/128
@@ -156,6 +156,15 @@ class BCPretrainConfig(BaseSettings):
     merge_actions_head: bool = Field(
         default=False,
         description="When True and multi-offset (a_head or full IQN), save all offset heads into the same file: actions_head.pt gets {offset_0: ..., offset_1: ...}; iqn_bc.pt gets A_head.* (first) plus A_head_offset_1.*, A_head_offset_2.*, .... If False, only the first head is saved (default for RL merge).",
+    )
+    # ---------- Match RL policy topology (IQN / PPO CNN-HF-fusion from rl_config_path) ----------
+    bc_use_rl_architecture: bool = Field(
+        default=False,
+        description=(
+            "If True, build the same policy class as RL (algorithm from rl_config_path): IQN_Network or PPO actor-critic "
+            "(CNN / HF / fusion). Ignores legacy build_bc_network and use_full_iqn builders. Requires use_floats when "
+            "the RL policy uses float inputs."
+        ),
     )
     # ---------- Full IQN in BC (two variants) ----------
     use_full_iqn: bool = Field(
@@ -252,6 +261,18 @@ class BCPretrainConfig(BaseSettings):
     def _require_floats_when_full_iqn(self) -> "BCPretrainConfig":
         if self.use_full_iqn and not self.use_floats:
             raise ValueError("use_full_iqn is True but use_floats is False; full IQN requires float inputs.")
+        return self
+
+    @model_validator(mode="after")
+    def _rl_arch_excludes_legacy_iqn_builder(self) -> "BCPretrainConfig":
+        if self.bc_use_rl_architecture and self.use_full_iqn:
+            raise ValueError("Use either bc_use_rl_architecture or use_full_iqn, not both.")
+        return self
+
+    @model_validator(mode="after")
+    def _rl_arch_requires_floats(self) -> "BCPretrainConfig":
+        if self.bc_use_rl_architecture and not self.use_floats:
+            raise ValueError("bc_use_rl_architecture requires use_floats True (RL policy uses float observations).")
         return self
 
     @model_validator(mode="after")

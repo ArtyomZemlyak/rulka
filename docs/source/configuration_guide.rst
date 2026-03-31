@@ -2,10 +2,10 @@
 Configuration Guide
 ====================
 
-This guide provides detailed documentation for all configuration parameters in TrackMania RL (Rulka).
+This guide documents the main configuration knobs in TrackMania RL (Rulka).
 
 Configuration files are located in ``config_files/`` and organized by category for easy editing.
-Each setting includes a brief inline comment. This document provides comprehensive explanations.
+Field names and defaults are split between ``config_files/config_schema.py`` (environment, training, memory, …) and ``config_files/nn_schema.py`` (YAML key ``nn``). This guide explains behavior and typical usage; for an exhaustive ``nn`` tree see :ref:`nn-yaml-reference`.
 
 .. contents:: Table of Contents
    :local:
@@ -38,14 +38,139 @@ Configuration Structure (YAML)
 
 The default YAML (``config_files/rl/config_default.yaml``) is organized into sections that correspond to the former Python modules:
 
-1. **environment** - Environment and simulation
-2. **neural_network** - Network architecture
-3. **training** - Training hyperparameters
-4. **memory** - Replay buffer
-5. **exploration** - Exploration strategies
-6. **rewards** - Reward shaping
-7. **map_cycle** - Map training cycle
-8. **performance** - System performance
+1. **environment** — Environment and simulation
+2. **nn** — Network architecture (see :ref:`nn-yaml-reference`): ``fusion_mode``, ``init_from_pretrained``, ``vis``, ``float``, ``encoder``, ``iqn``, ``decoder``, ``training``, plus optional :ref:`nn-rl-parameter-freeze` flags under those subtrees
+3. **training** — Training hyperparameters (``algorithm``, LR, schedules, …)
+4. **memory** — Replay buffer (IQN)
+5. **exploration** — Exploration strategies (IQN)
+6. **rewards** — Reward shaping
+7. **map_cycle** — Map training cycle
+8. **performance** — System performance
+9. **btr** — Optional IQN/BTR flags (Munchausen, LayerNorm, NoisyNet, …). CNN fields in ``btr:`` can be merged into ``nn.vis.cnn`` at load when those keys are omitted there (``config_loader._merge_btr_cnn_into_vis``). Prefer setting vision CNN under ``nn.vis.cnn`` in new configs.
+
+.. _nn-yaml-reference:
+
+Neural network YAML (``nn``) — full reference
+=============================================
+
+The hierarchical block under YAML key ``nn`` is validated as ``config_files.nn_schema.NnConfig``. It is merged from disk in ``config_loader.load_config`` (including BTR→CNN fill) into the flat ``NeuralNetworkConfig`` on ``RulkaConfig.neural_network`` (there is no separate top-level YAML key ``neural_network:``; pretrain and scripts that mention image size should think ``nn.vis.image_size`` / ``get_config().w_downsized``). For a **full matrix of supported topologies** (algorithm × ``fusion_mode`` × vision × fusion trunk), see :doc:`models/nn_topology_catalog`.
+
+**Flat access:** ``get_config()`` (``ConfigView``) exposes most fields as attributes: e.g. ``cfg.vis``, ``cfg.decoder``, ``cfg.fusion_mode``, ``cfg.float_hidden_dim``, ``cfg.dense_hidden_dimension``, ``cfg.transformers`` (bundle from ``NnConfig.to_multimodal()``: ``fusion_mode`` + ``encoder.transformer`` + ``init_from_pretrained``), ``cfg.use_jit``, ``cfg.iqn_n``, …
+
+``nn.fusion_mode`` (string)
+   ``none`` | ``vision_transformer`` | ``post_concat`` | ``unified``. **PPO:** selects ``TorchMultimodalActorCritic`` vs CNN vs HF-only actor. **IQN:** when not ``none``, builds the **same** multimodal body as PPO (``TorchMultimodalActorCritic`` with ``include_policy_heads=False``) inside ``IQNSharedBackboneNetwork`` (:doc:`models/iqn_architecture`). When ``none``, IQN uses classic ``IQN_Network`` or HF-vision stack (see that page). The schema enforces consistency with ``nn.vis`` (e.g. ``unified`` vs ``d_model``). YAML may place ``fusion_mode`` under ``nn.encoder``; the loader hoists it to ``nn``.
+
+``nn.init_from_pretrained`` (string)
+   Optional directory with Rulka ``save_pretrained`` fusion weights when ``fusion_mode != none``. **PPO** loads it inside ``make_multimodal_fusion_network_pair`` after build (unless skipped via ``trackmania_rl.utilities.skip_multimodal_fusion_hub_init_from_pretrained``). **IQN** does **not** run that hub load automatically today — start fusion IQN from an RL checkpoint or wire loading in your script. Hub JSON must include ``rulka_transformers.vis_branch`` (current saves add it via ``infer_vis_branch``). Trust flag: ``nn.encoder.transformer.trust_remote_code``.
+
+``nn.vis`` — vision branch
+   ``no_image`` (bool): if true, float-only (no CNN/ViT). ``image_size``: ``width`` / ``height`` (aliases ``w`` / ``h``). ``freeze`` (bool, default false): see :ref:`nn-rl-parameter-freeze`. Exactly **one** of:
+
+   - **``cnn``** — ``VisCnnBodyConfig``: ``use_impala_cnn``, ``impala_model_size``, ``use_adaptive_maxpool``, ``adaptive_maxpool_size``, ``use_spectral_norm``.
+   - **``transformer``** — ``TransformersConfig`` (ViT slot / HF / fusion vision): ``use_hf_backbone``, ``model_name_or_path``, ``trust_remote_code``, ``hidden_dropout_prob``, ``d_model``, ``n_layers``, ``n_heads``, ``ff_mult``, ``dropout``, ``patch_size``, ``post_concat_seq_len``, ``unified_float_tokens``, ``fusion_tokens`` (``summary`` | ``patch_tokens`` — vision tokens into multimodal fusion, e.g. ``post_concat`` + ``token_sequence``). Constraint: ``d_model`` divisible by ``n_heads``.
+
+``nn.float`` (YAML key ``float``)
+   ``freeze`` (bool): see :ref:`nn-rl-parameter-freeze`. ``mlp.hidden_dim`` — width of the float MLP trunk (default branch).
+
+``nn.encoder``
+   Used when ``fusion_mode != none`` (multimodal bundle also exposed as ``cfg.transformers`` from ``NnConfig.to_multimodal()``).
+
+   - ``freeze`` (bool): see :ref:`nn-rl-parameter-freeze`.
+   - ``mlp`` (optional): ``hidden_dim`` — overrides float width for **fusion** builds (``float_hidden_dim_effective()``), IQN and PPO.
+   - ``transformer``: fusion-stack ``TransformersConfig`` (``d_model``, ``n_layers``, ``n_heads``, ``ff_mult``, ``dropout``, ``post_concat_seq_len``, ``unified_float_tokens``; HF fusion: ``use_hf_backbone``, ``model_name_or_path``, ``trust_remote_code``, ``hidden_dropout_prob``).
+   - ``fusion_encoder`` (optional): ``linear`` | ``native_transformer`` | ``mlp`` | ``cnn`` | ``hf_embedding`` — trunk after early fusion; if omitted, inferred (e.g. ``linear`` for ``vision_transformer``, ``native_transformer`` for ``post_concat`` / ``unified``, ``hf_embedding`` when ``encoder.transformer.use_hf_backbone``).
+   - ``fusion_mlp`` / ``fusion_cnn`` / ``hf_embedding``: sub-configs when ``fusion_encoder`` is ``mlp`` / ``cnn`` / ``hf_embedding`` (see ``config_files/nn_schema.py``).
+   - ``post_concat_layout``: ``fused_vector`` | ``token_sequence`` (``post_concat`` only).
+   - ``float_token_input``: ``raw`` | ``mlp_hidden``; ``float_token_layout``: ``dense`` | ``per_feature`` (for ``token_sequence`` layouts).
+
+   The same keys appear on the **flattened** multimodal dict (``cfg.transformers``) for factories; YAML loads them under ``nn.encoder`` and the root ``nn`` for ``fusion_mode`` / ``init_from_pretrained``.
+
+``nn.iqn``
+   ``embedding_dimension``, ``n``, ``k``, ``kappa`` — IQN quantile hyperparameters. ``freeze`` (bool): see :ref:`nn-rl-parameter-freeze` (IQN only).
+
+``nn.decoder`` (IQN heads / width; PPO trunk + heads)
+   ``shared_input``: ``pre_tau`` | ``post_tau`` (transformer slots require ``post_tau`` in the schema). ``dense_hidden_dimension``. ``shared_trunk_freeze`` (bool): see :ref:`nn-rl-parameter-freeze` (PPO only). **Per slot** ``advantage`` and ``value``: optional ``freeze`` (bool); see :ref:`nn-rl-parameter-freeze`. Slot body is either
+
+   - **``mlp``** — ``MLPConfig``: ``hidden_dim`` (alias ``hidden``), ``n_hidden_layers`` (alias ``layers``); if ``hidden_dim`` omitted, heads use ``dense_hidden_dimension // 2``.
+   - **``transformer``** — ``TransformerStackConfig``: ``d_model``, ``n_layers``, ``n_heads``, ``ff_mult``, ``dropout``; ``use_hf_backbone: true`` is rejected until implemented. Legacy key ``transformer_encoder`` is accepted as an alias for ``transformer``.
+
+``nn.training`` (YAML key ``training`` inside ``nn``)
+   IQN-adjacent: ``use_jit``, ``use_ddqn``, ``clip_grad_value``, ``clip_grad_norm``, ``number_memories_trained_on_between_target_network_updates``, ``soft_update_tau``, ``target_self_loss_clamp_ratio``, reset knobs (``single_reset_flag``, ``reset_every_n_frames_generated``, ``additional_transition_after_reset``, ``last_layer_reset_factor``, ``overall_reset_mul_factor``). **Not** the same dict as top-level ``training:`` (run name, algorithm, LR).
+
+.. _nn-rl-parameter-freeze:
+
+RL parameter freeze
+-------------------
+
+Optional booleans (default ``false``) under YAML ``nn`` mark matching weights as non-trainable during **IQN** or **PPO** learning: ``requires_grad=False`` and those tensors are **not** passed to the optimizer. Prefix matching follows ``module.named_parameters()`` names; keys prefixed with ``_orig_mod.`` (from ``torch.compile``) are normalized the same way as in training (see ``trackmania_rl/param_freeze.py``). IQN periodic **soft reset** uses the same prefix set so frozen weights are not overwritten.
+
+**Flags and effect**
+
+- ``nn.vis.freeze`` — **Vision stem.** Classic IQN (``IQN_Network``): ``img_head.`` only. **IQN** multimodal or HF-vision shared stack: same vision prefixes as PPO but under submodule ``fusion.`` (e.g. ``fusion.img_head.``, ``fusion._hf_vis_backbone.``). **PPO:** those prefixes without the ``fusion.`` prefix (``trackmania_rl/param_freeze.py``). Only names that exist in your run are frozen; the learner log lists **active** prefixes.
+- ``nn.float.freeze`` — Classic IQN: ``float_feature_extractor.``. **IQN** multimodal / HF vision: ``fusion.float_feature_extractor.`` (and ``fusion.float_to_hidden.`` on HF-vision-only IQN). **PPO:** ``float_feature_extractor.`` and ``float_to_hidden.`` where applicable.
+- ``nn.encoder.freeze`` — **Fusion trunk** (after vision+float tokenization, before policy trunk / IQN quantile block): ``bridge``, ``enc_fusion_native``, HF fusion projections, sequence tokenizers, position parameters, … **PPO:** top-level module names. **IQN** with ``fusion_mode != none``: same logical tensors, prefixed with ``fusion.``. **IQN** with HF vision only and ``fusion_mode: none``: the flag currently does **not** map to fusion-trunk prefixes (no separate ``encoder`` submodule in that wrapper); use ``vis`` / ``float`` / head freezes as needed.
+- ``nn.iqn.freeze`` — **IQN only:** ``iqn_fc.`` (quantile cosine → hidden MLP). Ignored for PPO.
+- ``nn.decoder.advantage.freeze`` / ``nn.decoder.value.freeze`` — IQN: ``A_head.`` **and** ``A_head_multi.`` (multi-action) / ``V_head.``. PPO: ``policy_head.`` / ``value_head.``.
+- ``nn.decoder.shared_trunk_freeze`` — **PPO only:** ``trunk.`` (shared MLP before policy/value heads). Ignored for IQN.
+
+**Removed (do not use in new configs):** top-level ``training:`` keys ``pretrain_encoder_freeze``, ``pretrain_float_head_freeze``, ``pretrain_iqn_fc_freeze``, ``pretrain_actions_head_freeze``, ``pretrain_V_head_freeze``, and ``nn_frozen_param_prefixes`` — freeze is configured **only** under ``nn`` as above.
+
+**BC-only** models that wrap the policy (e.g. multi-offset BC with extra ``bc_heads``) are outside this RL freeze map; pretrain code may freeze heads separately.
+
+**Example (IQN — freeze visual backbone only):**
+
+.. code-block:: yaml
+
+   nn:
+     vis:
+       freeze: true
+       image_size: { width: 64, height: 64 }
+       cnn: { use_impala_cnn: true, impala_model_size: 2, ... }
+
+**Example (PPO fusion — freeze ViT stem, train fusion + trunk):**
+
+.. code-block:: yaml
+
+   nn:
+     vis:
+       freeze: true
+     encoder:
+       freeze: false
+     decoder:
+       shared_trunk_freeze: false
+       advantage:
+         freeze: false
+         mlp: { layers: 1 }
+       value:
+         freeze: false
+         mlp: { layers: 1 }
+
+``float_input_dim`` (int)
+   Computed at load from ``environment``; do not set in YAML unless you know the implications.
+
+**Reference YAML files** (``config_files/rl/``):
+
+- **IQN:** ``config_default.yaml``, ``config_btr.yaml`` — classic ``IQN_Network`` (``fusion_mode: none``). For **multimodal IQN**, use the same ``nn.fusion_mode`` / ``nn.encoder`` / ``nn.vis`` layout as PPO (e.g. ``config_ppo_post_concat_cnn_tf.yaml``, ``config_ppo_transformer.yaml``) with ``training.algorithm: iqn``. ``config_btr_post_concat_cnn_transformer.yaml`` — full **BTR** recipe (``btr:`` + Munchausen / NoisyNet / etc.) with ``post_concat`` + CNN vision + fusion ``TransformerEncoder`` (same IQN stack as other fusion configs).
+- **PPO:** ``config_ppo.yaml`` — full example (CNN default; comments for HF / fusion). ``config_ppo_cnn_mlp.yaml`` — minimal CNN + float MLP, ``fusion_mode: none``. ``config_ppo_transformer.yaml`` — ``post_concat`` multimodal with **HF** timm vision + **HF** fusion encoder (``token_sequence`` / ``per_feature`` floats; not ``vision_transformer`` mode). ``config_ppo_post_concat_cnn_tf.yaml`` — ``post_concat`` with ``nn.vis.cnn`` + native ``torch.nn.TransformerEncoder`` fusion. Native ``fusion_mode: vision_transformer`` (patch + fuse) has no separate reference YAML; derive from ``config_ppo.yaml`` by setting ``nn.fusion_mode`` and ``nn.vis.transformer`` with ``use_hf_backbone: false``.
+
+.. note::
+   **Implementation helpers** (avoid duplicating dicts in code): vision CNN kwargs for ``_build_img_head`` are centralized in ``trackmania_rl/nn_build/vis_cnn_head.py`` (``nn.vis.cnn`` after BTR merge). IQN head flags ``use_layer_norm`` / ``use_noisy_linear`` / ``noisy_sigma0`` from the flat loaded config are read via ``trackmania_rl/nn_build/iqn_btr_from_config.py`` for classic ``IQN_Network`` and ``IQNSharedBackboneNetwork``. Level 0 visual pretrain builds its 1-channel encoder from ``PretrainConfig.rl_config_path`` using the same vision kwargs when ``cnn_head_kw`` is set (see ``pretrain/models.py`` / ``pretrain/train.py``).
+
+.. _btr-yaml-reference:
+
+BTR block (``btr:``)
+--------------------
+
+Optional IQN enhancements (``config_files.config_schema.BTRConfig``). Same ``training.algorithm: iqn``; flags mainly affect **classic** ``IQN_Network`` (CNN / float / head wiring). Multimodal IQN still uses the same ``iqn_fc`` + dueling heads and shares LayerNorm / NoisyNet style with the decoder config where wired. See :doc:`models/btr_architecture`.
+
+**Fields** (all booleans unless noted):
+
+- ``use_munchausen``, ``munchausen_alpha``, ``munchausen_entropy_tau``, ``munchausen_lo`` — Munchausen-style targets.
+- ``use_impala_cnn``, ``impala_model_size``, ``use_adaptive_maxpool``, ``adaptive_maxpool_size``, ``use_spectral_norm`` — also mirrored for merge into ``nn.vis.cnn`` when those CNN keys are missing there; **canonical** place for vision CNN is ``nn.vis.cnn`` (see ``config_files/rl/config_btr.yaml``).
+- ``use_layer_norm`` — LayerNorm in float extractor / IQN heads where wired.
+- ``use_noisy_linear``, ``noisy_sigma0`` — factorized noisy layers in heads; rollouts use noise reset/disable.
+
+Flat access: ``get_config().use_munchausen``, etc., resolve from ``btr``. For code that builds IQN MLP heads, the same three dense-head toggles are grouped as ``iqn_btr_mlp_head_kw_from_config(get_config())`` in ``trackmania_rl/nn_build/iqn_btr_from_config.py`` (classic IQN, multimodal IQN wrapper, BC full-IQN).
 
 Environment Configuration
 ==========================
@@ -473,7 +598,7 @@ Game Settings
 Neural Network Configuration
 =============================
 
-Located in the ``neural_network`` section of the config YAML.
+Located in the ``nn`` section of the config YAML (schema: ``config_files/nn_schema.py``).
 
 Image Dimensions
 ----------------
@@ -540,7 +665,7 @@ Input Dimensions
    For a detailed mapping of each segment to game data (SimStateData) and a list of **game fields we do not use**, see :doc:`game_inputs_and_float_vector`.
 
 State Normalization (float_inputs_mean / float_inputs_std)
----------------------------------------------------------
+----------------------------------------------------------
 
 Defined in the ``state_normalization`` section of the config YAML (or built from defaults in the loader).
 
@@ -569,6 +694,9 @@ If you change the number or order of float features (e.g. waypoints, actions), t
 
 Network Architecture
 --------------------
+
+.. note::
+   Authoritative YAML paths for widths and vision are under ``nn:`` (:ref:`nn-yaml-reference`). The ``py:data`` entries below describe the **flat** names exposed on ``get_config()`` for backward compatibility.
 
 .. py:data:: float_hidden_dim
    :type: int
@@ -768,11 +896,130 @@ Run Identification
    
    **Example**: ``"uni_3"``, ``"A02_training"``, ``"experiment_v2"``
 
+.. py:data:: algorithm
+   :type: str
+   :value: "iqn"
+
+   **Which RL algorithm / wiring to run**
+
+   - ``iqn`` — Off-policy IQN (default): replay buffer, target network, two weight files. Exploration uses ``exploration.*`` schedules.
+   - ``ppo`` — On-policy PPO with actor-critic: no replay in the learner, no ``weights2.torch``. Stochastic policy from the network; collectors skip IQN ε schedules. Hyperparameters under ``ppo:`` (flat: ``get_config().gamma`` ← ``ppo.gamma``). Network routing: ``nn.fusion_mode`` + ``nn.vis`` + ``nn.float`` + ``nn.encoder`` (see :ref:`nn-yaml-reference`); flat ``get_config().transformers`` / ``get_config().fusion`` mirror ``NnConfig.to_multimodal()`` (``fusion_mode``, ``encoder.transformer``, ``init_from_pretrained``). See :ref:`ppo-config`.
+
+.. _ppo-config:
+
+PPO configuration (``ppo:``)
+------------------------------
+
+Used only when ``training.algorithm: ppo``. The IQN learner and replay buffer are not used; ``memory.*`` / n-step / priority settings have no effect on the PPO path.
+
+For diagrams of the actor-critic (CNN and optional HF backbone), see :doc:`models/ppo_architecture`.
+
+   Reference YAML: ``config_files/rl/config_ppo.yaml`` (general). Narrower baselines: ``config_ppo_cnn_mlp.yaml`` (CNN + float MLP only, ``nn.fusion_mode: none``), ``config_ppo_transformer.yaml`` (``post_concat`` + HF vision + HF fusion encoder), ``config_ppo_post_concat_cnn_tf.yaml`` (``post_concat`` + CNN vision + native fusion transformer). Those files trim IQN-only keys from ``training:`` (e.g. no ``batch_size``, ``gamma_schedule``, replay/pretrain paths). The shared ``nn.decoder`` / ``nn.iqn`` blocks remain in the schema for parity with IQN configs but are unused by the PPO forward path.
+
+**Flat access:** keys under ``ppo:`` are exposed on ``get_config()`` without a ``.ppo`` prefix (e.g. ``cfg.gamma`` is ``ppo.gamma`` in YAML).
+
+**Checkpoints**
+
+   ``weights1.torch`` (policy), ``optimizer1.torch``, and ``scaler.torch`` are written on each periodic save (see ``save_ppo_checkpoint`` in ``trackmania_rl/utilities.py``). When a HF vision backbone or native fusion transformer is enabled, ``hf_transformer_vis/`` and/or ``hf_transformer_fusion/`` are also updated in ``transformers`` layout. There is no target network file.
+
+**Fields under ``ppo:``** (class ``PPOConfig`` in ``config_files/config_schema.py`` — all are read by the PPO learner / loss)
+
+``rollout_steps_per_update`` (int)
+   Total number of **environment steps** the learner waits for (summed over all rollout queues) before running one PPO update. Collectors push variable-length rollouts; the learner concatenates them until at least this many steps are available, then trains and clears the buffer.
+
+``gamma`` (float)
+   Discount factor :math:`\gamma` for rewards and GAE bootstrap (see ``compute_gae`` in ``trackmania_rl/agents/policy_optimization/ppo.py``).
+
+``gae_lambda`` (float)
+   GAE :math:`\lambda` for advantage estimation (bias/variance tradeoff).
+
+``clip_coef`` (float)
+   PPO surrogate clip range :math:`\varepsilon` (ratio :math:`\pi/\pi_{\mathrm{old}}` is clipped to :math:`[1-\varepsilon, 1+\varepsilon]`).
+
+``vf_coef`` (float)
+   Coefficient for the value-function (critic) loss term in the combined PPO objective.
+
+``ent_coef`` (float)
+   Coefficient for the policy entropy bonus (encourages exploration via stochastic logits; there is **no** separate IQN-style ε-greedy on PPO — exploration comes from sampling + this term).
+
+``max_grad_norm`` (float)
+   Max norm for gradient clipping on the policy parameters after each optimizer minibatch.
+
+``update_epochs`` (int)
+   After each **environment data collection** phase, the learner has a fixed set of transitions (length ``T`` timesteps — see below). It runs the PPO loss **this many times** over that same data. Each epoch:
+
+   - builds a **random permutation** of all ``T`` indices (full shuffle, not sequential),
+   - steps through that order in chunks of size ``mb`` (see ``num_minibatches``).
+
+   So one PPO update performs about ``update_epochs × ceil(T / mb)`` optimizer steps on the **same** rollout batch (with different shuffles each epoch). **Higher** ``update_epochs`` → stronger use of each collected step (better sample efficiency *per environment step*) but a larger risk of **overfitting** that batch and **overshooting** the trust region PPO assumes (policy can move too far from ``π_old``). Typical values are small (e.g. 3–10).
+
+``num_minibatches`` (int)
+   Controls **minibatch size** for SGD inside one epoch. The learner sets ``mb = max(1, T // num_minibatches)`` (integer division) and, for each epoch, slices the shuffled indices with stride ``mb``. There is **no** YAML key named ``batch_steps``: the batch length is ``T``, the number of timesteps in the concatenated rollout tensor **after** the learner has accumulated at least ``rollout_steps_per_update`` steps (``T`` is usually **≥** that threshold and can be a bit larger depending on how rollouts arrive).
+
+   **Effect on training:** **Larger** ``num_minibatches`` (for fixed ``T``) → **smaller** ``mb`` → more, noisier gradient steps per epoch (more like SGD), lower peak GPU memory per step. **Smaller** ``num_minibatches`` → **larger** ``mb`` → fewer, smoother updates per epoch. If ``T`` is not divisible by ``num_minibatches``, the last chunk in an epoch can be shorter; you can occasionally get one extra partial minibatch.
+
+``normalize_advantages`` (bool)
+   If true, advantages are normalized to zero mean and unit variance **within each PPO update** before the policy loss.
+
+**Optional piecewise-linear schedules (under ``ppo:``)**
+
+   Same list shape as ``training.lr_schedule``: ``[[frame0, value0], [frame1, value1], ...]`` with cumulative **environment frames** on the first element. Values are **linearly** interpolated between knots (unlike ``lr_schedule``, which uses exponential interpolation in code).
+
+   Frame counts in these lists are multiplied by ``training.global_schedule_speed`` at load time (same as ``lr_schedule``).
+
+   If a schedule key is **omitted**, the scalar above is used for all time (equivalent to a single knot ``[[0, scalar]]``).
+
+   - ``ppo_gamma_schedule`` — discount :math:`\gamma` for **dense reward potential folding** and **GAE**. For IQN, the analogous schedule is ``training.gamma_schedule`` (different semantics); do not confuse the two.
+   - ``gae_lambda_schedule`` — GAE :math:`\lambda` per frame index.
+   - ``ent_coef_schedule`` — entropy bonus coefficient in the PPO loss.
+   - ``vf_coef_schedule`` — value-loss coefficient.
+
+   Flat access: ``get_config().ppo_gamma_schedule``, ``get_config().ent_coef_schedule``, etc. (YAML still under ``ppo:``).
+
+**``nn.vis`` (image branch)**
+
+   ``image_size`` (``width`` / ``height``; field aliases ``w`` / ``h``). Flat ``get_config().w_downsized`` / ``h_downsized`` read from ``vis.image_size``.
+
+   Exactly **one** image encoder: either ``cnn: { ... }`` **or** ``transformer: { ... }`` (``TransformersConfig`` — ViT/patch/HF). ``no_image: true`` means float-only.
+
+   ``freeze: true`` under ``vis`` freezes the vision stem during RL; see :ref:`nn-rl-parameter-freeze`.
+
+**``nn.fusion_mode`` / ``nn.init_from_pretrained`` (global PPO routing)**
+
+   Top-level under ``nn:`` (not under ``encoder``). ``fusion_mode``: ``none`` | ``vision_transformer`` | ``post_concat`` | ``unified`` (see :doc:`models/ppo_architecture`). ``init_from_pretrained`` is an optional Rulka ``save_pretrained`` dir when ``fusion_mode != none``. YAML that still lists these keys under ``nn.encoder`` is accepted and hoisted to ``nn`` at load. Flat ``get_config().fusion_mode`` / ``transformers`` / ``fusion`` still work via ``ConfigView``.
+
+**``nn.encoder`` (fusion trunk stack only)**
+
+   Optional ``mlp`` (float MLP override for fusion policies; else ``nn.float.mlp``) and ``transformer`` (stack ``TransformersConfig`` for the multimodal encoder). Scalar float width is ``nn.float.mlp.hidden_dim``. IQN ``decoder.advantage`` / ``decoder.value`` are **either** an ``mlp`` block (``hidden_dim`` / alias ``hidden``, ``layers`` / alias ``n_hidden_layers``) **or** a native ``transformer`` stack (``TransformerStackConfig``; ``use_hf_backbone`` is reserved / rejected until wired).
+
+   - **Wiring:** ``fusion_mode != none`` → fusion module; ``fusion_mode == none`` and ``vis.transformer.use_hf_backbone`` → ``HfActorCritic``; else CNN trunk from ``vis.cnn``.
+   - ``unified`` requires ``vis.transformer.d_model == encoder.transformer.d_model``.
+
+   IQN ignores this block except that the nested object exists in the schema.
+
+   Periodic PPO saves: ``hf_transformer_vis/`` when ``fusion_mode == none`` and ``vis.transformer.use_hf_backbone``; ``hf_transformer_fusion/`` when ``fusion_mode != none``.
+
+   Install when using HF::
+
+      pip install -e ".[policy]"
+
+   Keep ``nn.training.use_jit: false`` for standalone HF unless you have validated ``torch.compile`` for that backbone.
+
+**Pretrain / IQN-only scripts**
+
+   Encoder injection and BC-to-IQN helpers under ``scripts/`` apply to IQN. With ``algorithm: ppo``, ``train.py`` warns if IQN-only pretrain paths are set.
+
+   **Freezing** after loading pretrained weights is configured under ``nn`` (``vis.freeze``, ``decoder.advantage.freeze``, …), not under top-level ``training:``; see :ref:`nn-rl-parameter-freeze`.
+
 Schedules
 ---------
 
 All schedules are lists of ``(cumulative_frames, value)`` tuples.
-Values are linearly interpolated between schedule points.
+Values are linearly interpolated between schedule points unless noted otherwise
+(``training.lr_schedule`` uses exponential interpolation in ``from_exponential_schedule``).
+
+**PPO-only schedules** under ``ppo:`` (``ppo_gamma_schedule``, ``gae_lambda_schedule``,
+``ent_coef_schedule``, ``vf_coef_schedule``) use **linear** interpolation; see :ref:`ppo-config`.
 
 .. py:data:: global_schedule_speed
    :type: float
@@ -787,8 +1034,11 @@ Values are linearly interpolated between schedule points.
    - **1.0**: Normal speed
    - **>1.0**: Slower schedules (e.g. 4 → each step at 4× more frames)
    - **<1.0**: Faster schedules (e.g. 0.8 → each step at 0.8× frames)
-   
+
    Useful for adjusting training duration without editing all schedules.
+
+   **Also scaled** (first coordinate of each ``[frame, value]`` pair): ``ppo.ppo_gamma_schedule``,
+   ``ppo.gae_lambda_schedule``, ``ppo.ent_coef_schedule``, ``ppo.vf_coef_schedule`` (see :ref:`ppo-config`).
 
 Optimizer
 ---------
@@ -891,6 +1141,8 @@ Optimizer
    - Transition to 1.0 by 2.5M frames (undiscounted)
    
    **Rationale**: TrackMania benefits from long-term planning. Gamma=1.0 treats all future rewards equally.
+
+   **PPO:** scheduled discount for GAE and reward shaping uses ``ppo.ppo_gamma_schedule`` (see :ref:`ppo-config`). Do not confuse with this ``training.gamma_schedule``, which applies only to the IQN learner.
 
 N-Step Learning
 ---------------
@@ -1082,7 +1334,7 @@ See: `Schaul et al. 2015 - Prioritized Experience Replay <https://arxiv.org/abs/
 
 **Why Prioritized Experience Replay (PER)?**
 
-With uniform replay, all transitions are sampled with equal probability. Many of them are "easy": the network already predicts them well (low TD-error), and training on them adds little. PER uses a *priority* proportional to how wrong the network was on that transition (e.g. |Q_predicted − Q_target|). High-priority transitions are sampled more often, so the same buffer and the same number of batches are used mostly on transitions the agent still needs to learn from.
+With uniform replay, all transitions are sampled with equal probability. Many of them are "easy": the network already predicts them well (low TD-error), and training on them adds little. PER uses a *priority* proportional to how wrong the network was on that transition (e.g. absolute TD error between predicted and target Q). High-priority transitions are sampled more often, so the same buffer and the same number of batches are used mostly on transitions the agent still needs to learn from.
 
 **Benefits:** Better sample efficiency — less waste on trivial transitions, more updates on informative ones. Can speed up learning when the distribution of TD-errors is very uneven.
 

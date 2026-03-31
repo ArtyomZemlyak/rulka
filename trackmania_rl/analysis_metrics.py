@@ -1,6 +1,9 @@
 """
 This file contains functions to plot figures to help diagnose the agent's learning progress.
 Plotting can be enabled/disabled via configuration (e.g. make_highest_prio_figures).
+
+IQN-only: uses iqn_loss, iqn_k, and Inferer.infer_network quantile outputs. If training.algorithm
+gains non-IQN values, gate call sites in learner or add algorithm-specific modules.
 """
 
 import random

@@ -100,6 +100,7 @@ def main() -> None:
     cfg = raw
 
     from trackmania_rl.agents.iqn import IQN_Network, _build_img_head, calculate_conv_output_dim
+    from trackmania_rl.nn_build.vis_cnn_head import merge_vis_cnn_head_kw
 
     H, W = 64, 64
     float_input_dim = cfg.neural_network.float_input_dim
@@ -111,27 +112,39 @@ def main() -> None:
     batch_size = 32
 
     tmp_head = _build_img_head(
-        use_impala_cnn=True,
-        impala_model_size=2,
-        use_spectral_norm=True,
-        use_adaptive_maxpool=True,
-        adaptive_maxpool_size=6,
+        **merge_vis_cnn_head_kw(
+            {
+                "use_impala_cnn": True,
+                "impala_model_size": 2,
+                "use_spectral_norm": True,
+                "use_adaptive_maxpool": True,
+                "adaptive_maxpool_size": 6,
+            }
+        )
     )
     conv_dim = calculate_conv_output_dim(tmp_head, H, W)
 
     print(f"conv_dim={conv_dim} float_dim={float_input_dim} batch={batch_size} iqn_n={iqn_n}")
     print(f"steps={args.steps} (autocast fp16 + GradScaler + compile max-autotune-no-cudagraphs)\n")
 
+    from config_files.nn_schema import IqnDecoderConfig, IqnHeadSlotConfig
+
+    decoder = IqnDecoderConfig(
+        shared_input="post_tau",
+        dense_hidden_dimension=dense_hidden_dim,
+        advantage=IqnHeadSlotConfig(),
+        value=IqnHeadSlotConfig(),
+    )
     model = (
         IQN_Network(
             float_inputs_dim=float_input_dim,
             float_hidden_dim=float_hidden_dim,
             conv_head_output_dim=conv_dim,
-            dense_hidden_dimension=dense_hidden_dim,
             iqn_embedding_dimension=iqn_embed_dim,
             n_actions=n_actions,
             float_inputs_mean=np.zeros(float_input_dim, dtype=np.float32),
             float_inputs_std=np.ones(float_input_dim, dtype=np.float32),
+            decoder=decoder,
             use_impala_cnn=True,
             impala_model_size=2,
             use_adaptive_maxpool=True,

@@ -36,7 +36,7 @@ Run Analysis
 **Pretrain encoder source:** ``output/ptretrain/vis/v1``, trained with ``config_files/pretrain/vis/pretrain_config.yaml``:
   - Task: autoencoder (ae)
   - Framework: PyTorch Lightning
-  - Image size: 64×64 (matches IQN ``w_downsized`` / ``h_downsized``)
+  - Image size: 64×64 (matches RL ``nn.vis.image_size`` / flat ``w_downsized`` / ``h_downsized``)
   - Epochs: 50
   - Batch size: 4096
   - Final train_loss: 0.0112

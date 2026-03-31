@@ -12,26 +12,7 @@ from torchrl.data import ReplayBuffer
 
 from config_files.config_loader import get_config
 from trackmania_rl.experience_replay.experience_replay_interface import Experience
-
-
-def _state_float_slice_indices(cfg):
-    """Return (waypoint0_start, waypoint0_end, waypoint1_end, vel_start, vel_end, wheels_start, wheels_end) for state_float layout.
-
-    gear_and_wheels sub-layout: is_sliding(4), has_ground_contact(4), damper_absorb(4), gearbox/gear/rpm/counter(4), contact(4*n_c).
-    """
-    n_prev = cfg.n_prev_actions_in_inputs
-    n_c = cfg.n_contact_material_physics_behavior_types
-    prev_len = 4 * n_prev
-    gear_len = 16 + 4 * n_c
-    idx_gear_start = 1 + prev_len
-    idx_wheels_start = idx_gear_start + 4  # skip is_sliding(4)
-    idx_wheels_end = idx_gear_start + 8    # has_ground_contact(4)
-    idx_vel_start = idx_gear_start + gear_len + 3  # +3 ang_vel
-    idx_vel_end = idx_vel_start + 3
-    idx_waypoint0_start = idx_vel_end + 3  # +3 y_map
-    idx_waypoint0_end = idx_waypoint0_start + 3
-    idx_waypoint1_end = idx_waypoint0_end + 3
-    return idx_waypoint0_start, idx_waypoint0_end, idx_waypoint1_end, idx_vel_start, idx_vel_end, idx_wheels_start, idx_wheels_end
+from trackmania_rl.reward_vectorized import compute_rewards_into_and_potentials
 
 
 def fill_buffer_from_rollout_with_n_steps_rule(
@@ -93,82 +74,22 @@ def fill_buffer_from_rollout_with_n_steps_rule(
     gammas_arr = (gamma ** np.linspace(1, n_steps_max, n_steps_max)).astype(np.float32)
 
     # =========================================================================
-    # 2. Vectorized Step-by-Step Reward Calculation
+    # 2–3. Vectorized rewards + potentials (shared with PPO rollout_rewards)
     # =========================================================================
-    n_states = state_float.shape[0]
-    # Align length: frames and state_float can differ by 1 (e.g. T+1 frames vs T states)
-    n_mid = min(n_frames - 2, n_states - 2)
-    if n_mid < 0:
-        n_mid = 0
-
-    w0_s, w0_e, w1_e, vel_s, vel_e, wh_s, wh_e = _state_float_slice_indices(cfg)
-
-    rewards_into = torch.zeros(n_frames, dtype=torch.float32)
-
-    # Base constant reward (per decision step: one block when multi-action, one action when single)
-    rewards_into[1:-1] += cfg.constant_reward_per_ms * ms_per_step
-    if race_time_finished:
-        rewards_into[-1] += cfg.constant_reward_per_ms * (race_time - (n_frames - 2) * ms_per_step)
-    else:
-        rewards_into[-1] += cfg.constant_reward_per_ms * ms_per_step
-        
-    # Reward for meters advanced
-    rewards_into[1:] += (meters_advanced[1:] - meters_advanced[:-1]) * cfg.reward_per_m_advanced_along_centerline
-    
-    # Vectorized physics rewards (only applied to non-terminal frames: indices 1 to n_frames-2)
-    if n_mid > 0:
-        # V Forward diff
-        if cfg.final_speed_reward_per_m_per_s != 0:
-            vel_forward = state_float[1 : 1 + n_mid, vel_s + 2]  # forward component
-            vel_norm_curr = torch.linalg.norm(state_float[1 : 1 + n_mid, vel_s:vel_e], dim=1)
-            vel_norm_prev = torch.linalg.norm(state_float[:n_mid, vel_s:vel_e], dim=1)
-            fwd_mask = vel_forward > 0
-            rewards_into[1 : 1 + n_mid] += torch.where(fwd_mask, (vel_norm_curr - vel_norm_prev) * cfg.final_speed_reward_per_m_per_s, 0.0)
-
-        # Speedslide reward
-        if engineered_speedslide_reward != 0:
-            wheels_ground_mask = torch.all(state_float[1 : 1 + n_mid, wh_s:wh_e] > 0, dim=1)
-            lat = state_float[1 : 1 + n_mid, vel_s]
-            fwd = state_float[1 : 1 + n_mid, vel_s + 2]
-
-            ss_rewards = torch.zeros(n_mid, dtype=torch.float32)
-            if wheels_ground_mask.any():
-                from trackmania_rl.reward_shaping import speedslide_quality_tarmac_vectorized
-                lat_np = lat[wheels_ground_mask].numpy()
-                fwd_np = fwd[wheels_ground_mask].numpy()
-                ss_qualities = torch.from_numpy(speedslide_quality_tarmac_vectorized(lat_np, fwd_np).astype(np.float32))
-                ss_rewards[wheels_ground_mask] = engineered_speedslide_reward * torch.clamp(1.0 - torch.abs(ss_qualities - 1.0), min=0.0)
-            rewards_into[1 : 1 + n_mid] += ss_rewards
-
-        # Neoslide
-        if engineered_neoslide_reward != 0:
-            neo_mask = torch.abs(state_float[1 : 1 + n_mid, vel_s]) >= 2.0
-            rewards_into[1 : 1 + n_mid] += torch.where(neo_mask, engineered_neoslide_reward, 0.0)
-
-        # Kamikaze: penalize if ALL actions in block are gas-only (idx<=2) OR airborne
-        if engineered_kamikaze_reward != 0:
-            all_gas_only = torch.all(actions[1 : 1 + n_mid] <= 2, dim=1)
-            kamikaze_mask = all_gas_only | (torch.sum(state_float[1 : 1 + n_mid, wh_s:wh_e] > 0, dim=1) <= 1)
-            rewards_into[1 : 1 + n_mid] += torch.where(kamikaze_mask, engineered_kamikaze_reward, 0.0)
-
-        # Close to VCP
-        if engineered_close_to_vcp_reward != 0:
-            vcp_dist = torch.linalg.norm(state_float[1 : 1 + n_mid, w0_s:w0_e], dim=1)
-            clamped_dist = torch.clamp(vcp_dist, min=cfg.engineered_reward_min_dist_to_cur_vcp, max=cfg.engineered_reward_max_dist_to_cur_vcp)
-            rewards_into[1 : 1 + n_mid] += engineered_close_to_vcp_reward * clamped_dist
-
-    # =========================================================================
-    # 3. Vectorized Potentials
-    # =========================================================================
-    vcp_to_vcp = state_float[:, w0_e:w1_e] - state_float[:, w0_s:w0_e]
-    vcp_to_vcp_norm = vcp_to_vcp / (torch.linalg.norm(vcp_to_vcp, dim=1, keepdim=True) + 1e-8)
-    dist_cur_vcp = torch.linalg.norm(state_float[:, w0_s:w0_e], dim=1)
-    clamped_dist_potential = torch.clamp(dist_cur_vcp, min=cfg.shaped_reward_min_dist_to_cur_vcp, max=cfg.shaped_reward_max_dist_to_cur_vcp)
-    
-    potentials = (cfg.shaped_reward_dist_to_cur_vcp * clamped_dist_potential) + \
-                 (cfg.shaped_reward_point_to_vcp_ahead * (vcp_to_vcp_norm[:, 2] - 1.0))
-    if len(potentials) < n_frames:
-        potentials = torch.cat([potentials, torch.zeros(n_frames - len(potentials), dtype=torch.float32)])
+    rewards_into, potentials = compute_rewards_into_and_potentials(
+        state_float,
+        meters_advanced,
+        actions,
+        cfg,
+        n_frames,
+        race_time_finished,
+        float(race_time),
+        ms_per_step,
+        engineered_speedslide_reward,
+        engineered_neoslide_reward,
+        engineered_kamikaze_reward,
+        engineered_close_to_vcp_reward,
+    )
 
     # =========================================================================
     # 4. Extracting Experiences

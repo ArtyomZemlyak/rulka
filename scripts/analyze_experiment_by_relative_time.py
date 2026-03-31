@@ -12,7 +12,8 @@ console "Training hours" counter: it does **not** grow while the process is down
 do not inject fake "elapsed" time. Requires that scalar in TensorBoard (Rulka learner logs it).
 
 Race times (preferred):
-  - Per-race Race/eval_race_time_* and Race/explo_race_time_*.
+  - Per-race Race/eval_race_time_* and Race/explo_race_time_* (IQN logs these with a Race/ prefix).
+  - PPO learner logs eval_race_time_* / explo_race_time_* without the prefix; the script normalizes them to Race/* for comparison.
   - Each event is mapped to X via wall minutes OR via cumul_training_hours at that event's step.
   - At each checkpoint: best / mean / std, finish rate, first finish (same X semantics).
 
@@ -38,6 +39,7 @@ METRICS = {
     'hock_best_time_ms': 'alltime_min_ms_hock',   # best time so far (5-min scalar; use race events for richer view)
     'a01_best_time_ms': 'alltime_min_ms_A01',
     'loss': 'Training/loss',
+    'ppo_loss': 'Training/ppo_loss',  # PPO learner (on-policy); not comparable numerically to IQN TD loss
     'avg_q': 'RL/avg_Q_trained_A01',
     'training_pct': 'Performance/learner_percentage_training',  # 0..1
 }
@@ -49,10 +51,36 @@ CUMUL_TRAINING_HOURS_TAG = "cumul_training_hours"
 SUFFIXES = ["", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9", "_10"]
 
 # Per-race event tags: best/mean/std at checkpoint = min/mean/std of events up to that time
-RACE_TIME_PREFIXES = ("Race/eval_race_time_", "Race/explo_race_time_")
+# IQN logs Race/eval_race_time_*; PPO learner logs eval_race_time_* (no Race/ prefix) — normalized on load.
+RACE_TIME_PREFIXES = (
+    "Race/eval_race_time_",
+    "Race/explo_race_time_",
+    "eval_race_time_",
+    "explo_race_time_",
+)
 # Exclude "race_time_finished" (subset) so we get every race
 RACE_TIME_EXCLUDE = ("race_time_finished",)
-RACE_FINISHED_PREFIXES = ("Race/eval_race_finished_", "Race/explo_race_finished_")
+RACE_FINISHED_PREFIXES = (
+    "Race/eval_race_finished_",
+    "Race/explo_race_finished_",
+    "eval_race_finished_",
+    "explo_race_finished_",
+)
+
+
+def _normalize_race_event_tag(tag: str) -> str:
+    """Unify PPO TensorBoard tags with IQN-style Race/* names for cross-algorithm comparison."""
+    if tag.startswith("Race/"):
+        return tag
+    for bare in (
+        "eval_race_time_",
+        "explo_race_time_",
+        "eval_race_finished_",
+        "explo_race_finished_",
+    ):
+        if tag.startswith(bare):
+            return "Race/" + tag
+    return tag
 
 
 def discover_run_paths(base_dir: Path, run_name: str) -> List[Path]:
@@ -202,12 +230,14 @@ def load_race_events_from_paths(
             for tag in time_tags:
                 events = ea.Scalars(tag)
                 if events:
-                    lst = raw_time.setdefault(tag, [])
+                    norm = _normalize_race_event_tag(tag)
+                    lst = raw_time.setdefault(norm, [])
                     lst.extend([(e.wall_time, e.step, e.value) for e in events])
             for tag in finished_tags:
                 events = ea.Scalars(tag)
                 if events:
-                    lst = raw_finished.setdefault(tag, [])
+                    norm = _normalize_race_event_tag(tag)
+                    lst = raw_finished.setdefault(norm, [])
                     lst.extend([(e.wall_time, e.step, e.value) for e in events])
         except Exception as e:
             print(f"Error loading race events from {run_path}: {e}")
@@ -481,6 +511,11 @@ def compute_comparison_data(
             multi_chunk_runs.append(name)
         cache[name] = load_run_metrics_from_paths(paths, tags_to_load=tags_to_load)
         race_time[name], race_finished[name] = load_race_events_from_paths(paths)
+        if not cache[name] and not race_time[name]:
+            raise ValueError(
+                f"No TensorBoard data found for run {name!r} (looked under {base_dir}). "
+                "Pass --logdir to the directory that contains the run folder, e.g. tensorboard."
+            )
 
     if time_axis == "wall_minutes" and multi_chunk_runs:
         print(

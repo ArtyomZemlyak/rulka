@@ -24,8 +24,12 @@ The ``config_files/`` folder holds configuration loaded from **YAML** at startup
 **Core Files:**
 
     - ``config_default.yaml``: Default configuration (versioned). Use ``scripts/train.py --config config_files/rl/config_default.yaml``. You can add more YAML files (e.g. ``config_uni18.yaml``) in ``config_files/rl/`` and pass them with ``--config``.
+    - ``config_ppo.yaml``: PPO example (CNN by default; comments for HF ViT / fusion). ``ppo:`` block; no replay.
+    - ``config_ppo_cnn_mlp.yaml``: PPO baseline — ``nn.vis.cnn`` + ``nn.float.mlp``, ``nn.fusion_mode: none``.
+    - ``config_ppo_transformer.yaml``: PPO ``post_concat`` multimodal (HF timm vision + HF fusion encoder; see file header).
+    - ``config_btr.yaml``: IQN + full BTR bundle; CNN under ``nn.vis.cnn``. See :ref:`ppo-config`, :ref:`nn-yaml-reference`, :ref:`btr-yaml-reference` in :doc:`configuration_guide`.
     - ``config_loader.py``: Loads YAML, validates with Pydantic, and exposes ``load_config(path)``, ``get_config()``, and ``set_config(cfg)``. Config is loaded once per process and cached; there is no hot-reload.
-    - ``config_schema.py``: Pydantic models for all config sections (environment, neural_network, training, memory, exploration, rewards, map_cycle, performance, state_normalization, user from ``.env``).
+    - ``config_schema.py``: Pydantic models for most config sections; hierarchical ``nn`` (network) lives in ``nn_schema.py`` (environment, training, memory, exploration, rewards, map_cycle, performance, state_normalization, user from ``.env``, ``ppo`` for PPO-only hyperparameters).
 
 **Supporting Files:**
 
@@ -45,14 +49,15 @@ save
 
 The ``save/`` folder contains information collected during training.
 
-    - ``save/{run_name}/weights1.torch`` and ``weights2.torch`` and ``scaler.torch`` and ``optimizer1.torch`` are checkpoints containing the latest version of the neural network.
+    - **IQN (default):** ``save/{run_name}/weights1.torch`` (online network), ``weights2.torch`` (target network), plus ``scaler.torch`` and ``optimizer1.torch``.
+    - **PPO:** ``weights1.torch`` (single policy), ``optimizer1.torch``, ``scaler.torch`` — there is **no** ``weights2.torch`` (no target network).
     - ``save/{run_name}/accumulated_stats.joblib`` a dictionary containing various stats for this run (number of frames, number of batches, training duration, best racing time, etc...)
     - ``save/{run_name}/best_runs/{map_name}_{time}/config.bak.py`` contains a backup copy of the training hyperparameters used for this run.
     - ``save/{run_name}/best_runs/{map_name}_{time}/{map_name}_{time}.inputs`` is a text file that contains the inputs to replay that run. It can be loaded in the TMInterface in-game console.
     - ``save/{run_name}/best_runs/{map_name}_{time}/q_values.joblib`` is a joblib dump of q_values expected by the agent during the run. They are typically used to produce the visual input widget in trackmania_rl.run_to_video.make_widget_video_from_q_values()
-    - ``save/{run_name}/best_runs/weights1.torch`` and ``weights2.torch`` and ``scaler.torch`` and ``optimizer1.torch`` are checkpoints saved anytime the agent improves its personal best.
+    - ``save/{run_name}/best_runs/`` IQN checkpoints on personal best: ``weights1.torch`` / ``weights2.torch`` (PPO best-runs naming may mirror ``weights1`` only where applicable).
 
-When the script ``scripts/train.py`` is launched, it attempts to load the checkpoint saved in ``save/{run_name}/``. To resume training from a given checkpoint, paste the ``*.torch`` files in ``save/{run_name}``.
+When the script ``scripts/train.py`` is launched, collectors and the learner load checkpoints from ``save/{run_name}/`` when present. To resume, place the expected ``*.torch`` files for your algorithm (IQN: both weights files; PPO: ``weights1`` only) in ``save/{run_name}``.
 
 scripts
 -------
@@ -71,12 +76,13 @@ The ``trackmania_rl/`` folder contains the core project code, which is intended 
 
 The main modules are listed here:
 
-    - ``agents/``: Contains implementations of reinforcement learning agents. Currently contains only IQN.py, but has contained various agents such as DDQN or SAC-Discrete.
+    - ``agents/``: RL agents and wiring. ``iqn.py`` implements IQN; ``algorithms/registry.py`` maps ``training.algorithm`` (``iqn`` | ``ppo``) to ``iqn_wiring`` / ``ppo_wiring``. ``policy_models/`` holds discrete policies: ``ppo_actor_critic``, optional ``hf_actor_critic``, and ``multimodal_torch_fusion`` (``TorchMultimodalActorCritic``) when ``nn.fusion_mode != none`` (shared IQN backbone without heads). ``policy_optimization/`` holds on-policy PPO math (GAE, clipped loss).
     - ``buffer_management.py``: Implements ``fill_buffer_from_rollout_with_n_steps_rule()``, the function that creates and stores transitions in a replay buffer given a ``rollout_results`` object provided by the method ``GameInstanceManager.rollout()``.
     - ``buffer_utilities.py``: Implements ``buffer_collate_function()``, used to customize torchrl's ``ReplayBuffer.sample()`` method. The most important customization is our implementation of *mini-races*, a trick to define Q values as the *expected sum of undiscounted rewards in the next 7 seconds*.
     - ``experience_replay/experience_replay_interface.py``: Defines the structure of transitions stored in a ReplayBuffer.
     - ``multiprocess/collector_process.py``: Implements the behavior of a single process that handles a game instance, and feeds ``rollout_results`` objects to the learner process. Multiple collector processes may run in parallel.
-    - ``multiprocess/learner_process.py``: Implements the behavior of the (unique) learner process. It receives ``rollout_results`` objects from collector_processes, via a ``multiprocessing.Queue`` object. It sends updated neural network weights to collector processes weights ``torch.nn.Module.share_memory()``
+    - ``multiprocess/learner_process.py``: IQN learner (replay buffer, target network, priorities). If ``training.algorithm == "ppo"``, training is delegated to ``learner_ppo.py`` (on-policy updates, no replay).
+    - ``multiprocess/learner_ppo.py``: PPO learner loop (rollout aggregation, GAE, minibatch PPO updates).
     - ``tmi_interaction/game_instance_manager.py``: This file implements the main logic to interact with the game, via the GameInstanceManager class. There is a lot of legacy code, implemented when only TMInterface 1.4.3 was available.
     - ``tmi_interaction/tminterface2.py``: Implements the TMInterface class. It is designed to (mostly) reproduce the original Python client provided by Donadigo to communicate with TMInterface 1.4.3 via memory-mapping.
 

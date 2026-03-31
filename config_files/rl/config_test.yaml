@@ -24,29 +24,44 @@ environment:
   game_camera_number: 2
   sync_virtual_and_real_checkpoints: true
 
-neural_network:
-  w_downsized: 64
-  h_downsized: 64
-  float_hidden_dim: 256
-  dense_hidden_dimension: 1024
-  iqn_embedding_dimension: 128
-  iqn_n: 8
-  iqn_k: 32
-  iqn_kappa: 0.005
-  use_ddqn: true
-  clip_grad_value: 1000
-  clip_grad_norm: 30
-  number_memories_trained_on_between_target_network_updates: 128
-  soft_update_tau: 0.02
-  target_self_loss_clamp_ratio: 4
-  single_reset_flag: 0
-  reset_every_n_frames_generated: 40000000000000
-  additional_transition_after_reset: 1600000
-  last_layer_reset_factor: 0.8
-  overall_reset_mul_factor: 0.01
-  use_jit: true
-  # Set to false to train IQN without image head (float features only).
-  use_iqn_image_head: false
+nn:
+  vis:
+    no_image: true
+    image_size:
+      width: 64
+      height: 64
+  float:
+    mlp:
+      hidden_dim: 256
+  fusion_mode: none
+  encoder: {}
+  iqn:
+    embedding_dimension: 128
+    n: 8
+    k: 32
+    kappa: 0.005
+  decoder:
+    shared_input: post_tau
+    dense_hidden_dimension: 1024
+    advantage:
+      mlp:
+        layers: 1
+    value:
+      mlp:
+        layers: 1
+  training:
+    use_jit: true
+    use_ddqn: true
+    clip_grad_value: 1000
+    clip_grad_norm: 30
+    number_memories_trained_on_between_target_network_updates: 128
+    soft_update_tau: 0.02
+    target_self_loss_clamp_ratio: 4
+    single_reset_flag: 0
+    reset_every_n_frames_generated: 40000000000000
+    additional_transition_after_reset: 1600000
+    last_layer_reset_factor: 0.8
+    overall_reset_mul_factor: 0.01
 
 training:
   run_name: "test_buffer_performance"
@@ -109,12 +124,6 @@ training:
   # pretrain_actions_head_path: "output/ptretrain/bc/v2_multi_offset_ahead_dropout_inner/actions_head.pt"
 
   # Freeze pretrain parts during RL (default: false).
-  pretrain_encoder_freeze: false
-  pretrain_float_head_freeze: false
-  pretrain_iqn_fc_freeze: false
-  pretrain_actions_head_freeze: false
-  pretrain_V_head_freeze: false
-
 memory:
   memory_size_schedule:
     - [0, [50000, 20000]]
@@ -178,7 +187,6 @@ performance:
   frames_before_save_best_runs: 1500000
   threshold_to_save_all_runs_ms: -1
   running_speed: 32
-  force_window_focus_on_input: false
 
 inputs:
   actions:

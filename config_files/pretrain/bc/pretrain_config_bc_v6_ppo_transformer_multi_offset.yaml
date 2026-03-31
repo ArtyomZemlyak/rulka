@@ -1,0 +1,143 @@
+# =============================================================================
+# Level 1 BC — full config (no _base_).
+#
+# Same PPO topology as config_files/rl/config_ppo_transformer.yaml
+# (post_concat + HF ViT + BERT fusion). Multi-offset: N BC linear heads on shared trunk.
+#
+# bc_use_rl_architecture: true  → build PPO fusion actor-critic (not legacy BC CNN / IQN BC).
+# bc_offset_weights = 1/N → mean CE over offsets; for RL transfer: average bc_heads → policy_head
+#   (or one head); full weights in ppo_policy_bc.pt.
+#
+# Requires: pip install -e ".[policy]" (timm + transformers). Lightning is a core project dependency — run pip install -e . if BC fails on import.
+# encoder_init_path ignored for PPO rl-arch — use bc_resume_run_dir + ppo_policy_bc.pt / .ckpt.
+#
+# Schema: config_files/pretrain_bc_schema.py
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+data_dir: maps/img
+output_dir: output/ptretrain/bc
+run_name: v6_ppo_transformer_multi_avg
+
+
+# ---------------------------------------------------------------------------
+# Preprocessed cache
+# ---------------------------------------------------------------------------
+
+preprocess_cache_dir: cache/v2
+cache_load_in_ram: false
+cache_build_workers: 4
+
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+
+n_stack: 1
+# "01" typical for ViT; use "iqn" only if cache / pipeline match IQN-style norm end-to-end.
+image_normalization: "01"
+
+
+# ---------------------------------------------------------------------------
+# BC mode
+# ---------------------------------------------------------------------------
+
+bc_mode: backbone
+bc_target: current_tick
+
+bc_time_offsets_ms: [0, 10, 20, 30, 40]
+# Mean CE over offsets (sum = 1.0); length must match bc_time_offsets_ms.
+bc_offset_weights: [0.2, 0.2, 0.2, 0.2, 0.2]
+
+encoder_init_path: null
+
+
+# ---------------------------------------------------------------------------
+# RL alignment (loaded from rl_config_path)
+# ---------------------------------------------------------------------------
+
+use_floats: true
+save_float_head: true
+rl_config_path: config_files/rl/config_ppo_transformer.yaml
+
+bc_use_rl_architecture: true
+
+use_actions_head: false
+save_actions_head: true
+
+use_full_iqn: false
+full_iqn_random_tau: false
+
+# IQN-only; ignored for PPO, kept explicit.
+bc_multi_offset_mode: separate_heads
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+batch_size: 512
+epochs: 3
+lr: 0.0001
+weight_decay: 0.02
+grad_clip: 1.0
+
+
+# ---------------------------------------------------------------------------
+# DataLoader
+# ---------------------------------------------------------------------------
+
+workers: 4
+pin_memory: true
+prefetch_factor: 4
+
+
+# ---------------------------------------------------------------------------
+# Split
+# ---------------------------------------------------------------------------
+
+val_fraction: 0.1
+seed: 42
+
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+
+use_tqdm: true
+
+
+# ---------------------------------------------------------------------------
+# PyTorch Lightning
+# ---------------------------------------------------------------------------
+
+lightning:
+
+  tensorboard: true
+  tensorboard_dir: tensorboard
+
+  csv_logger: true
+  csv_dir: csv
+
+  checkpoint_dir: checkpoints
+  save_top_k: 1
+  checkpoint_monitor: auto
+
+  early_stopping: false
+  patience: 10
+  min_delta: 0.0
+
+  accelerator: auto
+  precision: auto
+  devices: null
+
+  log_every_n_steps: 50
+
+  deterministic: false
+  enable_model_summary: true
+  profiler: null
+  float32_matmul_precision: medium

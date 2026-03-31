@@ -58,6 +58,17 @@ This single command will:
     - Install all dependencies from `pyproject.toml`
     - Install `trackmania_rl` package in editable mode
 
+**Optional: PPO with Hugging Face backbone**
+
+For ``training.algorithm: ppo`` and HF vision (``nn.vis.transformer.use_hf_backbone: true`` with ``nn.fusion_mode: none``, or ``vision_transformer`` with HF), install the extra dependency group::
+
+    uv sync --extra policy
+
+(or ``pip install -e ".[policy]"``). This adds ``transformers`` and ``accelerate``.
+
+.. note::
+   **uv on Windows:** ``pyproject.toml`` pins ``tool.uv.environments`` to **Windows x64** so ``uv lock`` / ``uv sync`` do not try to resolve PyTorch cu128 **Linux** nightlies (those require Linux ``triton`` wheels that are missing from the indexes uv uses, which used to make ``uv sync --extra policy`` fail with “unsatisfiable”). On Linux or WSL, use ``pip install -e ".[policy]"`` with a PyTorch install from `pytorch.org <https://pytorch.org>`_ for your CUDA version, or maintain a separate lock strategy.
+
 **3. Activate the environment**
 
 .. code-block:: bash

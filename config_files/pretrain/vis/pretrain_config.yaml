@@ -92,7 +92,7 @@ framework: lightning
 # ---------------------------------------------------------------------------
 # Image / temporal stacking
 # ---------------------------------------------------------------------------
-# image_size loaded from rl_config_path (neural_network.w_downsized).
+# image_size loaded from rl_config_path (nn.vis.image_size width / w_downsized).
 
 rl_config_path: config_files/rl/config_default.yaml
 

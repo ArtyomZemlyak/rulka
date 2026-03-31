@@ -23,6 +23,8 @@ from trackmania_rl.pretrain.preprocess import (
     is_bc_cache_valid,
     is_bc_cache_valid_except_float_signature,
 )
+from trackmania_rl.nn_build.iqn_btr_from_config import iqn_btr_mlp_head_kw_from_config
+from trackmania_rl.nn_build.vis_cnn_head import vis_cnn_head_kw_from_nn_vis
 from trackmania_rl.pretrain.train import create_lightning_trainer
 
 log = logging.getLogger(__name__)
@@ -81,7 +83,7 @@ def train_bc(cfg) -> Path:
     iqn_embedding_dimension = rl_cfg.iqn_embedding_dimension
 
     if cache_dir is not None:
-        use_floats = cfg.use_floats or cfg.use_full_iqn
+        use_floats = cfg.use_floats or cfg.use_full_iqn or cfg.bc_use_rl_architecture
         cache_valid = is_bc_cache_valid(
             cache_dir,
             data_dir,
@@ -133,10 +135,21 @@ def train_bc(cfg) -> Path:
                     log.info("BC cache valid but floats missing. Building float inputs...")
                     build_bc_cache_floats_only(cache_dir, data_dir, rl_cfg)
 
-    enc_dim = get_enc_dim(1, image_size)
-    float_dim = int(rl_cfg.float_input_dim) if (cfg.use_floats or cfg.use_full_iqn) else 0
+    enc_dim = get_enc_dim(1, image_size, cnn_head_kw=vis_cnn_head_kw_from_nn_vis(rl_cfg.vis))
+    float_dim = int(rl_cfg.float_input_dim) if (cfg.use_floats or cfg.use_full_iqn or cfg.bc_use_rl_architecture) else 0
 
-    if cfg.use_full_iqn:
+    if cfg.bc_use_rl_architecture:
+        from trackmania_rl.pretrain.rl_policy_factory import build_rl_policy_for_bc
+
+        model = build_rl_policy_for_bc(
+            n_bc_offsets=len(cfg.bc_time_offsets_ms),
+            bc_multi_offset_mode=str(getattr(cfg, "bc_multi_offset_mode", "separate_heads")),
+        )
+        log.info(
+            "BC model from RL config: algorithm=%s (bc_use_rl_architecture)",
+            rl_cfg.algorithm,
+        )
+    elif cfg.use_full_iqn:
         from trackmania_rl.pretrain.models import build_iqn_for_bc, IQN_BC_MultiOffset
         n_offsets = len(cfg.bc_time_offsets_ms)
         use_fused = n_offsets > 1 and getattr(cfg, "bc_multi_offset_mode", "separate_heads") == "fused"
@@ -150,14 +163,8 @@ def train_bc(cfg) -> Path:
             float_inputs_mean=rl_cfg.float_inputs_mean.tolist(),
             float_inputs_std=rl_cfg.float_inputs_std.tolist(),
             n_actions_per_block=n_offsets if use_fused else 1,
-            use_impala_cnn=rl_cfg.use_impala_cnn,
-            impala_model_size=rl_cfg.impala_model_size,
-            use_adaptive_maxpool=rl_cfg.use_adaptive_maxpool,
-            adaptive_maxpool_size=rl_cfg.adaptive_maxpool_size,
-            use_spectral_norm=rl_cfg.use_spectral_norm,
-            use_layer_norm=rl_cfg.use_layer_norm,
-            use_noisy_linear=rl_cfg.use_noisy_linear,
-            noisy_sigma0=rl_cfg.noisy_sigma0,
+            **vis_cnn_head_kw_from_nn_vis(rl_cfg.vis),
+            **iqn_btr_mlp_head_kw_from_config(rl_cfg),
         )
         if n_offsets > 1 and not use_fused:
             model = IQN_BC_MultiOffset(iqn, n_offsets)
@@ -183,12 +190,40 @@ def train_bc(cfg) -> Path:
             action_head_dropout=getattr(cfg, "action_head_dropout", 0.0),
             in_channels=1,
             image_size=image_size,
+            cnn_head_kw=vis_cnn_head_kw_from_nn_vis(rl_cfg.vis),
         )
 
     # Load full BC model from a previous run (fine-tune) or only encoder (init)
     bc_resume_dir = Path(cfg.bc_resume_run_dir) if getattr(cfg, "bc_resume_run_dir", None) else None
-    is_fused = cfg.use_full_iqn and len(cfg.bc_time_offsets_ms) > 1 and getattr(cfg, "bc_multi_offset_mode", "separate_heads") == "fused"
-    if bc_resume_dir and bc_resume_dir.exists() and cfg.use_full_iqn:
+    is_fused = (
+        (cfg.use_full_iqn or cfg.bc_use_rl_architecture)
+        and rl_cfg.algorithm == "iqn"
+        and len(cfg.bc_time_offsets_ms) > 1
+        and getattr(cfg, "bc_multi_offset_mode", "separate_heads") == "fused"
+    )
+    if bc_resume_dir and bc_resume_dir.exists() and cfg.bc_use_rl_architecture and rl_cfg.algorithm == "ppo":
+        ckpt_dir = bc_resume_dir / "checkpoints"
+        ckpt_path = None
+        if ckpt_dir.is_dir():
+            ckpts = sorted(ckpt_dir.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if ckpts:
+                ckpt_path = ckpts[0]
+        if ckpt_path is not None:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            state_dict = ckpt.get("state_dict", ckpt)
+            prefix = "model."
+            if any(k.startswith(prefix) for k in state_dict):
+                state_dict = {k[len(prefix) :]: v for k, v in state_dict.items() if k.startswith(prefix)}
+            model.load_state_dict(state_dict, strict=False)
+            log.info("Loaded PPO BC model from Lightning checkpoint %s", ckpt_path)
+        else:
+            ppo_pt = bc_resume_dir / "ppo_policy_bc.pt"
+            if ppo_pt.exists():
+                model.load_state_dict(torch.load(ppo_pt, map_location="cpu", weights_only=True), strict=False)
+                log.info("Loaded PPO BC from %s", ppo_pt)
+    elif bc_resume_dir and bc_resume_dir.exists() and (
+        cfg.use_full_iqn or (cfg.bc_use_rl_architecture and rl_cfg.algorithm == "iqn")
+    ):
         # Prefer Lightning .ckpt (has full state including all A_heads); fallback to iqn_bc.pt
         ckpt_dir = bc_resume_dir / "checkpoints"
         ckpt_path = None
@@ -254,7 +289,7 @@ def train_bc(cfg) -> Path:
                     log.warning("bc_resume: keys not in checkpoint (left as init): %s", sorted(missing)[:10])
                 log.info("Loaded full BC model from %s for fine-tuning", iqn_pt)
     elif cfg.encoder_init_path and Path(cfg.encoder_init_path).exists():
-        if cfg.use_full_iqn:
+        if cfg.use_full_iqn or (cfg.bc_use_rl_architecture and rl_cfg.algorithm == "iqn"):
             from trackmania_rl.pretrain.export import average_first_layer_to_1ch
             from trackmania_rl.pretrain.contract import META_FILE
             enc_pt = Path(cfg.encoder_init_path)
@@ -267,6 +302,11 @@ def train_bc(cfg) -> Path:
                     state_dict = average_first_layer_to_1ch(state_dict)
             model.img_head.load_state_dict(state_dict, strict=True)
             log.info("Loaded encoder init into IQN img_head from %s", enc_pt)
+        elif cfg.bc_use_rl_architecture and rl_cfg.algorithm == "ppo":
+            log.warning(
+                "encoder_init_path is ignored for bc_use_rl_architecture + PPO "
+                "(use bc_resume_run_dir + ppo_policy_bc.pt or Lightning .ckpt to resume)."
+            )
         else:
             load_encoder_into_bc(Path(cfg.encoder_init_path), model)
 
@@ -283,6 +323,8 @@ def train_bc(cfg) -> Path:
         n_offsets=len(cfg.bc_time_offsets_ms),
         offset_weights=cfg.bc_offset_weights,
         bc_time_offsets_ms=cfg.bc_time_offsets_ms if len(cfg.bc_time_offsets_ms) > 1 else None,
+        use_rl_architecture=cfg.bc_use_rl_architecture,
+        n_actions_per_block=int(rl_cfg.n_actions_per_block),
     )
 
     if cache_dir is not None:
@@ -323,7 +365,7 @@ def train_bc(cfg) -> Path:
     n_val = data_module.n_val_samples
 
     # Confirm model + dataset alignment after cache build (user-visible checkpoint)
-    if cache_dir is not None and (cfg.use_floats or cfg.use_full_iqn):
+    if cache_dir is not None and (cfg.use_floats or cfg.use_full_iqn or cfg.bc_use_rl_architecture):
         meta_path = Path(cache_dir) / "cache_meta.json"
         has_floats = False
         if meta_path.exists():
@@ -392,8 +434,13 @@ def train_bc(cfg) -> Path:
     }
     if cfg.bc_offset_weights is not None:
         meta["bc_offset_weights"] = cfg.bc_offset_weights
-    if cfg.use_full_iqn:
-        meta["use_full_iqn"] = True
+    if cfg.bc_use_rl_architecture:
+        meta["bc_use_rl_architecture"] = True
+        meta["rl_algorithm"] = rl_cfg.algorithm
+        meta["rl_config_path"] = str(rl_path)
+    if cfg.use_full_iqn or (cfg.bc_use_rl_architecture and rl_cfg.algorithm == "iqn"):
+        if cfg.use_full_iqn:
+            meta["use_full_iqn"] = True
         meta["full_iqn_random_tau"] = cfg.full_iqn_random_tau
         meta["dense_hidden_dimension"] = dense_hidden_dimension
         meta["iqn_embedding_dimension"] = iqn_embedding_dimension
@@ -415,6 +462,12 @@ def train_bc(cfg) -> Path:
             torch.save(model.state_dict(), full_iqn_path)
         meta["full_iqn_file"] = "iqn_bc.pt"
         log.info("Saved full IQN state dict → %s (for RL transfer)", full_iqn_path)
+    if cfg.bc_use_rl_architecture and rl_cfg.algorithm == "ppo":
+        ppo_bc_path = run_dir / "ppo_policy_bc.pt"
+        torch.save(model.state_dict(), ppo_bc_path)
+        meta["ppo_policy_bc_file"] = "ppo_policy_bc.pt"
+        meta["primary_policy_checkpoint"] = "ppo_policy_bc.pt"
+        log.info("Saved PPO policy state dict → %s (copy/rename to weights1.torch or load in learner)", ppo_bc_path)
     if cfg.use_floats and cfg.save_float_head and getattr(model, "float_head", None) is not None:
         float_head_path = run_dir / "float_head.pt"
         torch.save(model.float_head.state_dict(), float_head_path)

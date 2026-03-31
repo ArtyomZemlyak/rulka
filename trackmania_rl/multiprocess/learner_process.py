@@ -23,8 +23,8 @@ from torchrl.data.replay_buffers import PrioritizedSampler
 
 from config_files.config_loader import get_config
 from trackmania_rl import buffer_management, utilities
-from trackmania_rl.agents import iqn as iqn
-from trackmania_rl.agents.iqn import make_untrained_iqn_network
+from trackmania_rl.agents.algorithms import get_wiring
+# IQN-only: quantile forward, iqn_loss, inferer.infer_network contract. Guard if training.algorithm != iqn.
 from trackmania_rl.analysis_metrics import (
     distribution_curves,
     highest_prio_transitions,
@@ -49,33 +49,17 @@ def _mean_action_gap_from_rollout(q_values):
 
 
 def _get_frozen_param_prefixes():
-    """Return parameter name prefixes to freeze (e.g. 'img_head.') from config _freeze flags."""
-    cfg = get_config()
-    prefixes = []
-    if getattr(cfg, "pretrain_encoder_freeze", False):
-        prefixes.append("img_head.")
-    if getattr(cfg, "pretrain_float_head_freeze", False):
-        prefixes.append("float_feature_extractor.")
-    if getattr(cfg, "pretrain_iqn_fc_freeze", False):
-        prefixes.append("iqn_fc.")
-    if getattr(cfg, "pretrain_actions_head_freeze", False):
-        prefixes.append("A_head.")
-    if getattr(cfg, "pretrain_V_head_freeze", False):
-        prefixes.append("V_head.")
-    return prefixes
+    return get_wiring().freeze_prefixes_from_config(get_config())
 
 
 def _apply_pretrain_freeze(network):
-    """Set requires_grad=False for parameters whose name starts with a frozen prefix."""
+    from trackmania_rl.param_freeze import apply_frozen_prefixes, prefixes_that_match_module
+
     prefixes = _get_frozen_param_prefixes()
-    if not prefixes:
-        return
-    for name, param in network.named_parameters():
-        if any(name.startswith(p) for p in prefixes):
-            param.requires_grad = False
-    frozen_count = sum(1 for n, p in network.named_parameters() if not p.requires_grad)
-    if frozen_count:
-        print(f"[OK] Pretrain freeze: {frozen_count} parameter tensors frozen (prefixes: {prefixes})")
+    n = apply_frozen_prefixes(network, prefixes)
+    if n:
+        active = prefixes_that_match_module(network, prefixes)
+        print(f"[OK] Parameter freeze: {n} tensors frozen — active prefixes: {active}")
 
 
 def learner_process_fn(
@@ -87,6 +71,19 @@ def learner_process_fn(
     save_dir: Path,
     tensorboard_base_dir: Path,
 ):
+    if get_config().algorithm == "ppo":
+        from trackmania_rl.multiprocess.learner_ppo import learner_ppo_process_fn
+
+        return learner_ppo_process_fn(
+            rollout_queues,
+            uncompiled_shared_network,
+            shared_network_lock,
+            shared_steps,
+            base_dir,
+            save_dir,
+            tensorboard_base_dir,
+        )
+
     layout_version = "lay_mono"
     SummaryWriter(log_dir=str(tensorboard_base_dir / layout_version)).add_custom_scalars(
         {
@@ -161,8 +158,9 @@ def learner_process_fn(
     # Create new stuff
     # ========================================================
 
-    online_network, uncompiled_online_network = make_untrained_iqn_network(get_config().use_jit, is_inference=False)
-    target_network, _ = make_untrained_iqn_network(get_config().use_jit, is_inference=False)
+    wiring = get_wiring()
+    online_network, uncompiled_online_network = wiring.make_network(get_config().use_jit, is_inference=False)
+    target_network, _ = wiring.make_network(get_config().use_jit, is_inference=False)
 
     print("\n" + "="*80)
     print("  NETWORK ARCHITECTURE")
@@ -185,15 +183,18 @@ def learner_process_fn(
     # Load existing stuff
     # ========================================================
     def _state_dict_for_model(loaded_sd: dict, model: torch.nn.Module) -> dict:
-        """Remap checkpoint keys if it was saved without torch.compile (no _orig_mod. prefix)."""
+        """Remap checkpoint keys for torch.compile ``_orig_mod.`` vs plain checkpoints."""
         model_keys = list(model.state_dict().keys())
         loaded_keys = list(loaded_sd.keys())
         if not loaded_keys or not model_keys:
             return loaded_sd
-        model_has_prefix = model_keys[0].startswith("_orig_mod.")
-        loaded_has_prefix = loaded_keys[0].startswith("_orig_mod.")
+        model_has_prefix = any(k.startswith("_orig_mod.") for k in model_keys)
+        loaded_has_prefix = any(k.startswith("_orig_mod.") for k in loaded_keys)
         if model_has_prefix and not loaded_has_prefix:
             return {"_orig_mod." + k: v for k, v in loaded_sd.items()}
+        if loaded_has_prefix and not model_has_prefix:
+            p = "_orig_mod."
+            return {k[len(p) :]: v for k, v in loaded_sd.items() if k.startswith(p)}
         return loaded_sd
 
     w1_path = save_dir / "weights1.torch"
@@ -281,20 +282,15 @@ def learner_process_fn(
     # ========================================================
     # Make the trainer
     # ========================================================
-    trainer = iqn.Trainer(
-        online_network=online_network,
-        target_network=target_network,
-        optimizer=optimizer1,
-        scaler=scaler,
-        batch_size=get_config().batch_size,
-        iqn_n=get_config().iqn_n,
+    trainer = wiring.make_trainer(
+        online_network,
+        target_network,
+        optimizer1,
+        scaler,
+        get_config().batch_size,
     )
 
-    inferer = iqn.Inferer(
-        inference_network=online_network,
-        iqn_k=get_config().iqn_k,
-        tau_epsilon_boltzmann=get_config().tau_epsilon_boltzmann,
-    )
+    inferer = wiring.make_inferer(online_network)
 
     # ================================================================
     #   PHASE 3: IngestThread — offload rollout ingestion to background
@@ -588,7 +584,7 @@ def learner_process_fn(
             single_reset_flag = get_config().single_reset_flag
             accumulated_stats["cumul_number_single_memories_should_have_been_used"] += get_config().additional_transition_after_reset
 
-            _, untrained_iqn_network = make_untrained_iqn_network(get_config().use_jit, False)
+            _, untrained_iqn_network = wiring.make_network(get_config().use_jit, False)
             frozen_prefixes = _get_frozen_param_prefixes()
             utilities.soft_copy_param(
                 online_network, untrained_iqn_network, get_config().overall_reset_mul_factor,
@@ -621,11 +617,11 @@ def learner_process_fn(
                             layer.bias, layer_untrained.bias, factor,
                         )
 
-                if not get_config().pretrain_actions_head_freeze:
+                if not get_config().decoder.advantage.freeze:
                     a_last = online_network.A_head_multi if online_network.A_head_multi is not None else online_network.A_head[-1]
                     a_last_untrained = untrained_iqn_network.A_head_multi if untrained_iqn_network.A_head_multi is not None else untrained_iqn_network.A_head[-1]
                     _reset_last_layer(a_last, a_last_untrained, get_config().last_layer_reset_factor)
-                if not get_config().pretrain_V_head_freeze:
+                if not get_config().decoder.value.freeze:
                     _reset_last_layer(
                         online_network.V_head[-1], untrained_iqn_network.V_head[-1],
                         get_config().last_layer_reset_factor,

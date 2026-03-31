@@ -370,7 +370,7 @@ A: Reduce memory usage:
 - Decrease ``batch_size`` in the ``training`` section
 - Decrease ``memory_size_schedule`` in the ``memory`` section
 - Reduce ``gpu_collectors_count`` in the ``performance`` section
-- Lower image resolution (``w_downsized``, ``h_downsized``) in the ``neural_network`` section
+- Lower image resolution (``nn.vis.image_size`` / flat ``w_downsized``, ``h_downsized``)
 
 **Q: Game crashes / TMInterface connection lost**
 

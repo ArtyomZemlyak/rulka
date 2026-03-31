@@ -11,7 +11,7 @@ Key improvements over the original ImageFolderFrames:
   split_track_ids     — train/val split is done at the *track level*, not at random
                         frame indices, so the same track never appears in both splits.
 
-  ReplayFrameDataModule — Lightning DataModule wrapper (requires pip install lightning).
+  ReplayFrameDataModule — Lightning DataModule wrapper (requires lightning or pytorch-lightning).
 
   CachedPretrainDataset — backed by a preprocessed .npy cache file produced by
                           ``build_cache`` (see ``preprocess.py``).  Supports
@@ -36,6 +36,12 @@ log = logging.getLogger(__name__)
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+from trackmania_rl.pretrain.lightning_compat import (
+    INSTALL_HINT,
+    LIGHTNING_AVAILABLE as _LIGHTNING_AVAILABLE,
+    LightningDataModule as _LightningDataModuleBase,
+)
 
 IMAGE_EXTS = frozenset((".jpg", ".jpeg", ".png", ".bmp", ".npy"))
 
@@ -487,19 +493,12 @@ class _EmptyBCDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Lightning DataModule (optional — requires pip install lightning)
+# Lightning DataModule (optional — lightning or pytorch-lightning)
 # ---------------------------------------------------------------------------
 
-try:
-    import lightning as L  # noqa: F401  (import tested here; used below)
-    _LIGHTNING_AVAILABLE = True
-except ImportError:
-    _LIGHTNING_AVAILABLE = False
-
 if _LIGHTNING_AVAILABLE:
-    import lightning as L  # type: ignore[no-redef]
 
-    class ReplayFrameDataModule(L.LightningDataModule):
+    class ReplayFrameDataModule(_LightningDataModuleBase):
         """Lightning DataModule wrapping ReplayFrameDataset with train/val split.
 
         The split is performed at the track level (see ``split_track_ids``).
@@ -607,15 +606,12 @@ else:
     # Stub so imports don't fail when Lightning is absent
     class ReplayFrameDataModule:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
-            raise ImportError(
-                "ReplayFrameDataModule requires lightning. "
-                "Install it with: pip install lightning"
-            )
+            raise ImportError(f"ReplayFrameDataModule requires PyTorch Lightning. {INSTALL_HINT}")
 
 
 if _LIGHTNING_AVAILABLE:
 
-    class CachedPretrainDataModule(L.LightningDataModule):  # type: ignore[misc]
+    class CachedPretrainDataModule(_LightningDataModuleBase):  # type: ignore[misc]
         """Lightning DataModule for preprocessed ``.npy`` cache directories.
 
         The train/val split is already materialised in ``train.npy`` and
@@ -753,7 +749,7 @@ if _LIGHTNING_AVAILABLE:
     # BC Lightning DataModules (Level 1)
     # -----------------------------------------------------------------------
 
-    class CachedBCDataModule(L.LightningDataModule):  # type: ignore[misc]
+    class CachedBCDataModule(_LightningDataModuleBase):  # type: ignore[misc]
         """Lightning DataModule for BC preprocessed cache (train.npy + train_actions.npy, etc.)."""
 
         def __init__(
@@ -904,7 +900,7 @@ if _LIGHTNING_AVAILABLE:
         def has_val(self) -> bool:
             return self._has_val
 
-    class BCReplayDataModule(L.LightningDataModule):  # type: ignore[misc]
+    class BCReplayDataModule(_LightningDataModuleBase):  # type: ignore[misc]
         """Lightning DataModule for BC from replay dirs (split_track_ids + BCReplayDataset)."""
 
         def __init__(
@@ -1022,19 +1018,12 @@ if _LIGHTNING_AVAILABLE:
 else:
     class CachedPretrainDataModule:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
-            raise ImportError(
-                "CachedPretrainDataModule requires lightning. "
-                "Install it with: pip install lightning"
-            )
+            raise ImportError(f"CachedPretrainDataModule requires PyTorch Lightning. {INSTALL_HINT}")
 
     class CachedBCDataModule:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
-            raise ImportError(
-                "CachedBCDataModule requires lightning. Install it with: pip install lightning"
-            )
+            raise ImportError(f"CachedBCDataModule requires PyTorch Lightning. {INSTALL_HINT}")
 
     class BCReplayDataModule:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
-            raise ImportError(
-                "BCReplayDataModule requires lightning. Install it with: pip install lightning"
-            )
+            raise ImportError(f"BCReplayDataModule requires PyTorch Lightning. {INSTALL_HINT}")
