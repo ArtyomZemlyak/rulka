@@ -49,21 +49,17 @@ def _mean_action_gap_from_rollout(q_values):
 
 
 def _get_frozen_param_prefixes():
-    """IQN pretrain freeze prefixes; delegated to iqn_wiring (single source of truth)."""
-    return get_wiring("iqn").freeze_prefixes_from_config(get_config())
+    return get_wiring().freeze_prefixes_from_config(get_config())
 
 
 def _apply_pretrain_freeze(network):
-    """Set requires_grad=False for parameters whose name starts with a frozen prefix."""
+    from trackmania_rl.param_freeze import apply_frozen_prefixes, prefixes_that_match_module
+
     prefixes = _get_frozen_param_prefixes()
-    if not prefixes:
-        return
-    for name, param in network.named_parameters():
-        if any(name.startswith(p) for p in prefixes):
-            param.requires_grad = False
-    frozen_count = sum(1 for n, p in network.named_parameters() if not p.requires_grad)
-    if frozen_count:
-        print(f"[OK] Pretrain freeze: {frozen_count} parameter tensors frozen (prefixes: {prefixes})")
+    n = apply_frozen_prefixes(network, prefixes)
+    if n:
+        active = prefixes_that_match_module(network, prefixes)
+        print(f"[OK] Parameter freeze: {n} tensors frozen — active prefixes: {active}")
 
 
 def learner_process_fn(
@@ -75,6 +71,19 @@ def learner_process_fn(
     save_dir: Path,
     tensorboard_base_dir: Path,
 ):
+    if get_config().algorithm == "ppo":
+        from trackmania_rl.multiprocess.learner_ppo import learner_ppo_process_fn
+
+        return learner_ppo_process_fn(
+            rollout_queues,
+            uncompiled_shared_network,
+            shared_network_lock,
+            shared_steps,
+            base_dir,
+            save_dir,
+            tensorboard_base_dir,
+        )
+
     layout_version = "lay_mono"
     SummaryWriter(log_dir=str(tensorboard_base_dir / layout_version)).add_custom_scalars(
         {
@@ -174,15 +183,18 @@ def learner_process_fn(
     # Load existing stuff
     # ========================================================
     def _state_dict_for_model(loaded_sd: dict, model: torch.nn.Module) -> dict:
-        """Remap checkpoint keys if it was saved without torch.compile (no _orig_mod. prefix)."""
+        """Remap checkpoint keys for torch.compile ``_orig_mod.`` vs plain checkpoints."""
         model_keys = list(model.state_dict().keys())
         loaded_keys = list(loaded_sd.keys())
         if not loaded_keys or not model_keys:
             return loaded_sd
-        model_has_prefix = model_keys[0].startswith("_orig_mod.")
-        loaded_has_prefix = loaded_keys[0].startswith("_orig_mod.")
+        model_has_prefix = any(k.startswith("_orig_mod.") for k in model_keys)
+        loaded_has_prefix = any(k.startswith("_orig_mod.") for k in loaded_keys)
         if model_has_prefix and not loaded_has_prefix:
             return {"_orig_mod." + k: v for k, v in loaded_sd.items()}
+        if loaded_has_prefix and not model_has_prefix:
+            p = "_orig_mod."
+            return {k[len(p) :]: v for k, v in loaded_sd.items() if k.startswith(p)}
         return loaded_sd
 
     w1_path = save_dir / "weights1.torch"
@@ -605,11 +617,11 @@ def learner_process_fn(
                             layer.bias, layer_untrained.bias, factor,
                         )
 
-                if not get_config().pretrain_actions_head_freeze:
+                if not get_config().decoder.advantage.freeze:
                     a_last = online_network.A_head_multi if online_network.A_head_multi is not None else online_network.A_head[-1]
                     a_last_untrained = untrained_iqn_network.A_head_multi if untrained_iqn_network.A_head_multi is not None else untrained_iqn_network.A_head[-1]
                     _reset_last_layer(a_last, a_last_untrained, get_config().last_layer_reset_factor)
-                if not get_config().pretrain_V_head_freeze:
+                if not get_config().decoder.value.freeze:
                     _reset_last_layer(
                         online_network.V_head[-1], untrained_iqn_network.V_head[-1],
                         get_config().last_layer_reset_factor,

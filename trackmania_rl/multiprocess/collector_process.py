@@ -58,9 +58,22 @@ def collector_process_fn(
         w1_path = save_dir / "weights1.torch"
         if w1_path.exists():
             sd = torch.load(f=w1_path, weights_only=False)
-            model_keys = list(inference_network.state_dict().keys())
-            if model_keys and sd and not list(sd.keys())[0].startswith("_orig_mod.") and model_keys[0].startswith("_orig_mod."):
-                sd = {"_orig_mod." + k: v for k, v in sd.items()}
+            if config.algorithm == "ppo":
+                _slice = bool(getattr(config, "pretrain_ppo_policy_slice_head_to_model", False))
+                sd = utilities.prepare_ppo_policy_state_dict_for_load(
+                    sd, inference_network, slice_policy_head_to_model=_slice
+                )
+            else:
+                model_keys = list(inference_network.state_dict().keys())
+                loaded_keys = list(sd.keys()) if sd else []
+                if model_keys and loaded_keys:
+                    mk_pref = any(k.startswith("_orig_mod.") for k in model_keys)
+                    ld_pref = any(k.startswith("_orig_mod.") for k in loaded_keys)
+                    if mk_pref and not ld_pref:
+                        sd = {"_orig_mod." + k: v for k, v in sd.items()}
+                    elif ld_pref and not mk_pref:
+                        p = "_orig_mod."
+                        sd = {k[len(p) :]: v for k, v in sd.items() if k.startswith(p)}
             inference_network.load_state_dict(sd, strict=True)
         else:
             raise FileNotFoundError(f"{w1_path} not found")
@@ -76,7 +89,10 @@ def collector_process_fn(
     # ========================================================
     # Training loop
     # ========================================================
-    inference_network.train()
+    if config.algorithm == "ppo":
+        inference_network.eval()
+    else:
+        inference_network.train()
 
     # Initialize map cycle
     print(f"[Collector {process_number}] Initializing map cycle...")
@@ -105,10 +121,16 @@ def collector_process_fn(
     with game_spawning_lock:
         print(f"[Collector {process_number}] Benchmarking/Warmup...")
         for _ in range(5):
-            inferer.infer_network(
-                np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
-                np.random.rand(config.float_input_dim).astype(np.float32),
-            )
+            if config.algorithm == "ppo":
+                inferer.get_exploration_action(
+                    np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
+                    np.random.rand(config.float_input_dim).astype(np.float32),
+                )
+            else:
+                inferer.infer_network(
+                    np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
+                    np.random.rand(config.float_input_dim).astype(np.float32),
+                )
     # game_instance_manager.update_current_zone_idx(0, zone_centers, np.zeros(3))
 
     time_since_last_queue_push = time.perf_counter()
@@ -149,9 +171,10 @@ def collector_process_fn(
         map_name, map_path, zone_centers_filename, is_explo, fill_buffer = next_map_tuple
         map_status = "trained" if map_name in set_maps_trained else "blind"
 
-        inferer.epsilon = utilities.from_exponential_schedule(config.epsilon_schedule, shared_steps.value)
-        inferer.epsilon_boltzmann = utilities.from_exponential_schedule(config.epsilon_boltzmann_schedule, shared_steps.value)
-        inferer.tau_epsilon_boltzmann = config.tau_epsilon_boltzmann
+        if config.algorithm != "ppo":
+            inferer.epsilon = utilities.from_exponential_schedule(config.epsilon_schedule, shared_steps.value)
+            inferer.epsilon_boltzmann = utilities.from_exponential_schedule(config.epsilon_boltzmann_schedule, shared_steps.value)
+            inferer.tau_epsilon_boltzmann = config.tau_epsilon_boltzmann
         inferer.is_explo = is_explo
 
         # ===============================================
@@ -160,10 +183,11 @@ def collector_process_fn(
 
         rollout_start_time = time.perf_counter()
 
-        if inference_network.training and not is_explo:
-            inference_network.eval()
-        elif is_explo and not inference_network.training:
-            inference_network.train()
+        if config.algorithm != "ppo":
+            if inference_network.training and not is_explo:
+                inference_network.eval()
+            elif is_explo and not inference_network.training:
+                inference_network.train()
 
         update_network()
 

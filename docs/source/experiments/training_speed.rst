@@ -15,7 +15,7 @@ This document covers experiments on **batch_size** and **running_speed**. Baseli
 Results
 -------
 
-**Important:** Experiments had different durations (uni_5 ~160 min, uni_7 ~86 min, etc.), so comparing by “last value” is meaningless. All findings below are based on **aligned time checkpoints** from ``analyze_experiment_by_relative_time.py``. With default ``--time-axis auto``, those checkpoints are **cumulative training hours** when the scalar is logged (same idea as console ``Training hours``); for these short **single-session** ``uni_*`` runs that is usually **close** to wall-clock minutes from the first TB event. If a run was restarted, use ``scripts/audit_tensorboard_training_timeline.py`` and see :doc:`experiments/index`. Metrics are compared at the same checkpoints up to when the shortest run ends.
+**Important:** Experiments had different durations (uni_5 ~160 min, uni_7 ~86 min, etc.), so comparing by “last value” is meaningless. All findings below are based on **aligned time checkpoints** from ``analyze_experiment_by_relative_time.py``. With default ``--time-axis auto``, those checkpoints are **cumulative training hours** when the scalar is logged (same idea as console ``Training hours``); for these short **single-session** ``uni_*`` runs that is usually **close** to wall-clock minutes from the first TB event. If a run was restarted, use ``scripts/audit_tensorboard_training_timeline.py`` and see :doc:`index`. Metrics are compared at the same checkpoints up to when the shortest run ends.
 
 **Data source:** All numbers below are from ``scripts/analyze_experiment_by_relative_time.py`` (per-race tables for race times: **Hock** = long track ~55–70 s, **A01** = short track ~24–25 s). Reproduce: ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 ... --interval 5`` (``--logdir <path>`` if needed).
 
@@ -63,9 +63,9 @@ Detailed TensorBoard Metrics Analysis
 
 Metrics below are from TensorBoard logs (``tensorboard\uni_<N>``). Baseline is uni_5 (2048 batch, 160 speed). The figures below show comparison plots (one metric per graph, runs as lines, by relative time) for the main comparisons.
 
-**Methodology — Aligned time checkpoints:** Experiments had different durations (see Run Analysis), so comparing by “last value” is invalid. Default **auto** uses **cumulative training hours**; for these short ``uni_*`` runs the minute labels below still match historical checkpoints (≈ wall time). Comparison runs only until the shortest run ends. Race times: **per-race events** or ``alltime_min_ms_*``. Loss / Q / GPU %: **last value at that checkpoint**. Regenerate: ``python scripts/analyze_experiment_by_relative_time.py <runs>`` (``--interval-training-hours 0.0833`` ≈ 5 min, or ``--time-axis wall_minutes --interval 5``). See :doc:`experiments/index`.
+**Methodology — Aligned time checkpoints:** Experiments had different durations (see Run Analysis), so comparing by “last value” is invalid. Default **auto** uses **cumulative training hours**; for these short ``uni_*`` runs the minute labels below still match historical checkpoints (≈ wall time). Comparison runs only until the shortest run ends. Race times: **per-race events** or ``alltime_min_ms_*``. Loss / Q / GPU %: **last value at that checkpoint**. Regenerate: ``python scripts/analyze_experiment_by_relative_time.py <runs>`` (``--interval-training-hours 0.0833`` ≈ 5 min, or ``--time-axis wall_minutes --interval 5``). See :doc:`index`.
 
-**Key metrics** (aligned with :doc:`tensorboard_metrics`): Per-race: ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` (best/mean/std, finish rate). Scalars: ``alltime_min_ms_{map}``, ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``. Also: ``Performance/transitions_learned_per_second``, ``Gradients/norm_before_clip_max``. For interpretation see that file.
+**Key metrics** (aligned with :doc:`../tensorboard_metrics`): Per-race: ``Race/eval_race_time_*``, ``Race/explo_race_time_*`` (best/mean/std, finish rate). Scalars: ``alltime_min_ms_{map}``, ``Training/loss``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``. Also: ``Performance/transitions_learned_per_second``, ``Gradients/norm_before_clip_max``. For interpretation see that file.
 
 Larger batch: uni_5 vs uni_6 (relative time, common window up to 160 min)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -145,7 +145,7 @@ uni_12 — same batch_size 512 and running_speed 512 as uni_7, but map cycle **6
 .. image:: ../_static/exp_training_speed_uni7_uni12_loss.jpg
    :alt: Training loss by relative time (uni_7 vs uni_12)
 
-Other metrics (from :doc:`tensorboard_metrics`)
+Other metrics (from :doc:`../tensorboard_metrics`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When comparing batch/speed setups, also check in TensorBoard or via ``scripts/extract_tensorboard_data.py``:
@@ -153,7 +153,7 @@ When comparing batch/speed setups, also check in TensorBoard or via ``scripts/ex
 - **Performance/transitions_learned_per_second** — training throughput; higher is better; reflects efficiency of the pipeline.
 - **Gradients/norm_before_clip_max** — training stability; spikes >100 indicate gradient explosion; should stay relatively stable. Compare runs to ensure no setup introduces instability.
 
-Full interpretation and “what to watch for” for all metrics: :doc:`tensorboard_metrics`.
+Full interpretation and “what to watch for” for all metrics: :doc:`../tensorboard_metrics`.
 
 Configuration Changes
 ----------------------
@@ -218,4 +218,4 @@ Recommendations
 - **By relative time** (compare at the same minutes from start; **2+ runs**): ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_7 --interval 5`` or ``python scripts/analyze_experiment_by_relative_time.py uni_5 uni_6 uni_7 uni_10 uni_11 uni_12 --interval 5`` (``--logdir "<path>"`` if not from project root). Output: per-race tables (best/mean/std, finish rate, first finish) then scalar metrics.
 - By “last value” (less meaningful when durations differ): ``python scripts/analyze_experiment.py uni_5 uni_6 uni_7 ...``
 - ``scripts/extract_tensorboard_data.py`` — selective metrics (``Gradients/norm_before_clip_max``, ``Performance/transitions_learned_per_second``, etc.).
-- **Key metrics** (see :doc:`tensorboard_metrics`): Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Gradients/norm_before_clip_max`` (stability).
+- **Key metrics** (see :doc:`../tensorboard_metrics`): Per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars ``Training/loss``, ``alltime_min_ms_{map}``, ``RL/avg_Q_*``, ``Performance/learner_percentage_training``, ``Gradients/norm_before_clip_max`` (stability).

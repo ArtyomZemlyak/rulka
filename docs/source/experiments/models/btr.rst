@@ -146,7 +146,7 @@ Training / network setup differences between baseline and BTR runs:
 
 2) BTR enabled — ``A01_as20_long_v4_btr`` and ``A01_as20_long_v4.1_btr``
 
-- BTR flags enabled (all under ``btr:``): ``use_munchausen = true``, ``use_impala_cnn = true``, ``use_adaptive_maxpool = true``, ``use_spectral_norm = true``, ``use_layer_norm = true``, ``use_noisy_linear = true``
+- BTR bundle: ``nn.vis.cnn`` IMPALA + maxpool + spectral norm on; ``btr:`` munchausen + layer norm + NoisyNet (``use_munchausen``, ``use_layer_norm``, ``use_noisy_linear``, etc.)
 - ``dense_hidden_dimension = 1024``, ``iqn_embedding_dimension = 128``
 - ``use_ddqn = true``, ``clip_grad_norm = 30``
 - ``weight_decay_lr_ratio = 0.1``
@@ -160,7 +160,7 @@ Training / network setup differences between baseline and BTR runs:
 - ``use_ddqn = false``, ``clip_grad_norm = 10``
 - ``weight_decay_lr_ratio = 0``
 - ``global_schedule_speed = 1``
-- same BTR flags enabled as above.
+- same BTR + vision bundle as above (reference ``config_btr.yaml``).
 
 Hardware
 --------

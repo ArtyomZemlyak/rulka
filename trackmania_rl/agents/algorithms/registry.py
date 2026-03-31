@@ -12,6 +12,7 @@ from typing import Optional
 
 _ALGORITHM_MODULES: dict[str, str] = {
     "iqn": "trackmania_rl.agents.algorithms.iqn_wiring",
+    "ppo": "trackmania_rl.agents.algorithms.ppo_wiring",
 }
 
 

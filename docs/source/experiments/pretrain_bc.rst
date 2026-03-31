@@ -24,7 +24,7 @@ Stages for the first variant:
 Results
 -------
 
-**Important (time axis):** Numeric **minute** checkpoints in the sections below are **TensorBoard wall-clock** minutes on merged logs (5-minute grid, ``--time-axis wall_minutes``), as in the original write-up. **Cumulative training hours** for the main quartet (audited): baseline **~8.2 h**, vis_pretrained **~4.6 h**, bc_pretrained **~4.4 h**, bc_ah **~4.1 h** — wall span and training time are **close** (ratio ~1), so the old minute tables are still **roughly** comparable to training progress. **Exceptions:** ``full_iqn_bc`` and ``full_iqn_bc_2`` have **wall ≫ training** (see :doc:`experiments/time_axis_conventions`); narrative that uses “~1020 min” or “~770 min” there is **calendar TB time**, not hours the learner trained. Use **BY STEP** or **cumul_training_hours** for those. Comparing by “last value” across different run lengths is invalid. Common **wall** window for the first four runs: **up to ~244 min** (shortest = bc_ah).
+**Important (time axis):** Numeric **minute** checkpoints in the sections below are **TensorBoard wall-clock** minutes on merged logs (5-minute grid, ``--time-axis wall_minutes``), as in the original write-up. **Cumulative training hours** for the main quartet (audited): baseline **~8.2 h**, vis_pretrained **~4.6 h**, bc_pretrained **~4.4 h**, bc_ah **~4.1 h** — wall span and training time are **close** (ratio ~1), so the old minute tables are still **roughly** comparable to training progress. **Exceptions:** ``full_iqn_bc`` and ``full_iqn_bc_2`` have **wall ≫ training** (see :doc:`time_axis_conventions`); narrative that uses “~1020 min” or “~770 min” there is **calendar TB time**, not hours the learner trained. Use **BY STEP** or **cumul_training_hours** for those. Comparing by “last value” across different run lengths is invalid. Common **wall** window for the first four runs: **up to ~244 min** (shortest = bc_ah).
 
 **Key Findings:**
 
@@ -64,7 +64,7 @@ Detailed TensorBoard Metrics Analysis
 **Methodology — Wall-minute tables vs training hours:** Main quartet + freeze sections use the historical **5, 10, … wall-minute** grid (``--time-axis wall_minutes --interval 5``). For **full_iqn_bc / _2 / _3**, reinterpret long “minute” narratives as **TB wall** time or switch to **BY STEP** / ``cumul_training_hours``. Figures from ``generate_experiment_plots.py`` use default **auto** (training hours on X when logged). Step checkpoints: 50k, 100k, … as before.
 
 A01 Map Performance (common window up to 244 min for all four runs)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **Baseline (A01_as20_long):** at 35 min — 25.02s; at 85 min — 24.71s; at 150 min — 24.59s; at 240 min — 24.53s. First eval finish ~8.3 min.
 - **Vis pretrained (A01_as20_long_vis_pretrained):** at 35 min — 24.79s; at 85 min — 24.55s; at 150 min — 24.50s; at 240 min — **24.47s**. First eval finish ~11.2 min.
@@ -101,7 +101,7 @@ GPU Utilization
 Experiment: Encoder freeze (bc_ah vs enc_freeze)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Goal:** Compare **A01_as20_long_vis_bc_ah_pretrained** (encoder + A_head from v2_multi_offset_ahead_dropout_inner, **encoder trainable**) with **A01_as20_long_vis_bc_ah_pretrained_enc_freeze** (same pretrain, **img_head frozen** during RL). Only difference: ``pretrain_encoder_freeze: true`` in enc_freeze.
+**Goal:** Compare **A01_as20_long_vis_bc_ah_pretrained** (encoder + A_head from v2_multi_offset_ahead_dropout_inner, **encoder trainable**) with **A01_as20_long_vis_bc_ah_pretrained_enc_freeze** (same pretrain, **img_head frozen** during RL). Only difference: ``nn.vis.freeze: true`` in enc_freeze (legacy runs used ``pretrain_encoder_freeze`` under ``training``, now removed).
 
 **Common window:** Up to **158 min** (shortest run = enc_freeze). All comparisons below are by relative time over this window.
 
@@ -131,17 +131,44 @@ Experiment: Encoder freeze (bc_ah vs enc_freeze)
 Experiment: Encoder + A_head freeze (three-way: bc_ah vs enc_freeze vs enc_ah_freeze)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Goal:** Compare all three freeze variants with the same BC+AH pretrain: (1) **bc_ah** — both encoder and A_head trainable; (2) **enc_freeze** — encoder frozen, A_head trainable; (3) **enc_ah_freeze** — **both** encoder and A_head frozen (only float_feature_extractor, iqn_fc, V_head trainable).
+**Goal:** Compare all three freeze variants with the same BC+AH pretrain: (1) **bc_ah** — both encoder and A_head trainable; (2) **enc_freeze** — encoder frozen, A_head trainable; (3) **enc_ah_freeze** — **both** encoder and A_head frozen (only float_feature_extractor, iqn_fc, V_head trainable). In current configs this maps to ``nn.vis.freeze`` and ``nn.decoder.advantage.freeze`` (see :ref:`nn-rl-parameter-freeze` in :doc:`../configuration_guide`).
 
 **Common window:** Up to **158 min** (shortest = enc_freeze). All three runs have data up to 155 min.
 
 **A01 map performance (at 155 min):**
 
-| Run | Encoder | A_head | Best time (155 min) | First eval finish | Eval finish rate (155 min) | Loss (155 min) |
-|-----|---------|--------|---------------------|-------------------|----------------------------|----------------|
-| **bc_ah** | trainable | trainable | **24.50s** | 15.2 min | 66% | 57.29 |
-| **enc_freeze** | frozen | trainable | **24.55s** | **4.1 min** | 64% | 63.33 |
-| **enc_ah_freeze** | frozen | frozen | **24.97s** | 8.9 min | 22% | 279.12 |
+.. list-table::
+   :header-rows: 1
+   :widths: 10 12 12 14 16 18 12
+
+   * - Run
+     - Encoder
+     - A_head
+     - Best time (155 min)
+     - First eval finish
+     - Eval finish rate (155 min)
+     - Loss (155 min)
+   * - **bc_ah**
+     - trainable
+     - trainable
+     - **24.50s**
+     - 15.2 min
+     - 66%
+     - 57.29
+   * - **enc_freeze**
+     - frozen
+     - trainable
+     - **24.55s**
+     - **4.1 min**
+     - 64%
+     - 63.33
+   * - **enc_ah_freeze**
+     - frozen
+     - frozen
+     - **24.97s**
+     - 8.9 min
+     - 22%
+     - 279.12
 
 **Conclusions (what to freeze):**
 
@@ -167,16 +194,31 @@ Experiment: Resume from enc_ah_freeze (unfreeze + lower lr and epsilon)
 
 **Goal:** Take enc_ah_freeze checkpoint (both encoder and A_head frozen during RL; best 24.97s, 22% finish rate), **resume** training with everything **unfrozen** and **reduced lr/epsilon**. Hypothesis: gentle fine-tuning of the pretrained parts will recover or improve performance.
 
-**Setup:** Load weights from enc_ah_freeze; set ``pretrain_encoder_freeze: false``, ``pretrain_actions_head_freeze: false``; lr_schedule: 5e-5 (0–500k), 1e-4 (500k–3M), 5e-5 (3M+); epsilon: 0.1 at start (vs 1.0 in enc_ah_freeze), 0.5 at 300k, 0.03 by 3M.
+**Setup:** Load weights from enc_ah_freeze; set ``nn.vis.freeze: false``, ``nn.decoder.advantage.freeze: false``; lr_schedule: 5e-5 (0–500k), 1e-4 (500k–3M), 5e-5 (3M+); epsilon: 0.1 at start (vs 1.0 in enc_ah_freeze), 0.5 at 300k, 0.03 by 3M.
 
 **Common window:** Up to **228 min** (shortest = enc_ah_freeze). enc_ah_freeze_resume ran ~259 min.
 
 **A01 map performance (by relative time):**
 
-| Run | Best time (225 min) | First eval finish | Eval finish rate (225 min) | Loss (225 min) |
-|-----|---------------------|-------------------|----------------------------|----------------|
-| **enc_ah_freeze** | **24.97s** | 8.9 min | 29% | 229.71 |
-| **enc_ah_freeze_resume** | **24.51s** | **6.0 min** | **56%** | 73.39 |
+.. list-table::
+   :header-rows: 1
+   :widths: 22 18 18 22 20
+
+   * - Run
+     - Best time (225 min)
+     - First eval finish
+     - Eval finish rate (225 min)
+     - Loss (225 min)
+   * - **enc_ah_freeze**
+     - **24.97s**
+     - 8.9 min
+     - 29%
+     - 229.71
+   * - **enc_ah_freeze_resume**
+     - **24.51s**
+     - **6.0 min**
+     - **56%**
+     - 73.39
 
 **By steps (at 9.65M steps, common for both):** enc_ah_freeze best 24.97s; enc_ah_freeze_resume best **24.51s** (460 ms better).
 
@@ -326,15 +368,25 @@ Configuration Changes
 
    # BC + A_head with encoder freeze (enc_freeze run; only difference: freeze img_head during RL)
    # pretrain_encoder_path and pretrain_actions_head_path same as above
-   pretrain_encoder_freeze: true
+   nn:
+     vis:
+       freeze: true
 
    # BC + A_head with encoder AND A_head freeze (enc_ah_freeze run)
-   pretrain_encoder_freeze: true
-   pretrain_actions_head_freeze: true
+   nn:
+     vis:
+       freeze: true
+     decoder:
+       advantage:
+         freeze: true
 
    # enc_ah_freeze_resume: unfreeze and use lower lr/epsilon
-   pretrain_encoder_freeze: false
-   pretrain_actions_head_freeze: false
+   nn:
+     vis:
+       freeze: false
+     decoder:
+       advantage:
+         freeze: false
    lr_schedule: [[0, 0.00005], [500000, 0.0001], [3000000, 0.00005], ...]
    # epsilon_schedule: [[0, 0.1], [50000, 0.1], [300000, 0.5], [3000000, 0.03]]
 
@@ -390,7 +442,7 @@ Recommendations
 
 - **For best final A01 performance (current experiments):** Use **visual pretrain only** (``pretrain_encoder_path: "output/ptretrain/vis/v1/encoder.pt"``) or **BC + A_head (bc_ah)** — both reach 24.47s. Do not add the encoder-only BC stage (v1.1) if the goal is best final time; bc_ah matches vis and is better than encoder-only BC.
 - **If you need fastest early convergence (e.g. for debugging):** BC pretrain (v1.1) gives the earliest first finish (5.1 min) and a good initial time in the first 10–20 min; then consider switching to vis-only or bc_ah for long runs.
-- **BC + A_head (bc_ah):** Use ``pretrain_encoder_path`` and ``pretrain_actions_head_path`` from v2_multi_offset_ahead_dropout_inner; reaches 24.47s (tied with vis-only). To freeze encoder: ``pretrain_encoder_freeze: true`` (enc_freeze); **do not freeze A_head** — enc_ah_freeze performs poorly. If you have an enc_ah_freeze checkpoint, **resume with unfreeze + lower lr/epsilon** (enc_ah_freeze_resume) to recover to ~24.51s.
+- **BC + A_head (bc_ah):** Use ``pretrain_encoder_path`` and ``pretrain_actions_head_path`` from v2_multi_offset_ahead_dropout_inner; reaches 24.47s (tied with vis-only). To freeze encoder: ``nn.vis.freeze: true`` (enc_freeze); **do not freeze A_head** (``nn.decoder.advantage.freeze``) — enc_ah_freeze performs poorly. If you have an enc_ah_freeze checkpoint, **resume with unfreeze + lower lr/epsilon** (enc_ah_freeze_resume) to recover to ~24.51s.
 
 **Suggested RL variations to better understand pretrain contribution:**
 

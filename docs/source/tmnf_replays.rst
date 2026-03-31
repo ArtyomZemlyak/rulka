@@ -119,7 +119,7 @@ Pipeline (--track-ids)
 Resume: ``replays-dir/.replay_progress`` stores the next track index. Ctrl+C stops and saves progress.
 
 Filter tracks (step 3): filter_track_ids_no_respawn.py
------------------------------------------------------
+------------------------------------------------------
 
 **scripts/filter_track_ids_no_respawn.py** reads a track ID list (e.g. ``maps/track_ids.txt``) and replays in ``--replays-dir`` (or ``-r``), detects tracks where any replay respawns, and writes a new list (e.g. ``maps/track_ids_no_respawn.txt``) containing only tracks with no respawn. Use this list in step 4 for more stable capture (no respawns during replay). Arguments: ``--input``, ``--output``, ``-r`` / ``--replays-dir``, ``--workers``.
 
@@ -143,35 +143,38 @@ Example:
    python scripts/filter_track_ids_custom_maptype.py --input maps/track_ids_no_respawn.txt --output maps/track_ids_standard.txt --tracks-dir maps/tracks --jobs 16
 
 Main arguments (download)
-------------------------
+-------------------------
 
-+---------------------------+------------------------------------------------------------------+
-| Argument                  | Effect                                                           |
-+===========================+==================================================================+
-| ``--list-popular``        | Fetch popular track list, write to ``--output``.                  |
-+---------------------------+------------------------------------------------------------------+
-| ``--track-ids <file>``     | Run pipeline from file.                                          |
-+---------------------------+------------------------------------------------------------------+
-| ``--output``              | Output file for track ID list (``--list-popular``).              |
-+---------------------------+------------------------------------------------------------------+
-| ``--output-dir``          | Replay directory for single track (default ``replays_tmnf``).   |
-+---------------------------+------------------------------------------------------------------+
-| ``--replays-dir``         | Replay directory (layout ``replays-dir/track_id/...``).         |
-+---------------------------+------------------------------------------------------------------+
-| ``--tracks-dir``          | Map directory for ``--extract-tracks-from-replays``.            |
-+---------------------------+------------------------------------------------------------------+
-| ``--per-page``            | Tracks per page (e.g. 1000, 10000).                              |
-+---------------------------+------------------------------------------------------------------+
-| ``--top``                 | Top replays per track (default 50).                             |
-+---------------------------+------------------------------------------------------------------+
-| ``--workers``             | Parallel download and map workers.                               |
-+---------------------------+------------------------------------------------------------------+
-| ``--api-workers``         | Parallel API requests for replay lists (0 = use ``--workers``).  |
-+---------------------------+------------------------------------------------------------------+
-| ``--extract-tracks-from-replays`` | Extract map from replays (requires pygbx).                |
-+---------------------------+------------------------------------------------------------------+
-| ``--dry-run``             | List what would be downloaded; no files written.                 |
-+---------------------------+------------------------------------------------------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 65
+
+   * - Argument
+     - Effect
+   * - ``--list-popular``
+     - Fetch popular track list, write to ``--output``.
+   * - ``--track-ids <file>``
+     - Run pipeline from file.
+   * - ``--output``
+     - Output file for track ID list (``--list-popular``).
+   * - ``--output-dir``
+     - Replay directory for single track (default ``replays_tmnf``).
+   * - ``--replays-dir``
+     - Replay directory (layout ``replays-dir/track_id/...``).
+   * - ``--tracks-dir``
+     - Map directory for ``--extract-tracks-from-replays``.
+   * - ``--per-page``
+     - Tracks per page (e.g. 1000, 10000).
+   * - ``--top``
+     - Top replays per track (default 50).
+   * - ``--workers``
+     - Parallel download and map workers.
+   * - ``--api-workers``
+     - Parallel API requests for replay lists (0 = use ``--workers``).
+   * - ``--extract-tracks-from-replays``
+     - Extract map from replays (requires pygbx).
+   * - ``--dry-run``
+     - List what would be downloaded; no files written.
 
 Extracting map from replay
 --------------------------
@@ -179,7 +182,7 @@ Extracting map from replay
 A TMNF replay GBX embeds the map. With ``--extract-tracks-from-replays``, the map is extracted into ``--tracks-dir`` as ``{TrackId}.Challenge.Gbx`` using **pygbx** (project dependency).
 
 Frame capture (capture_replays_tmnf.py)
---------------------------------------
+---------------------------------------
 
 **scripts/capture_replays_tmnf.py** runs replays from ``maps/replays`` (layout: ``replays_dir/track_id/*.replay.gbx``) via TMInterface, captures screenshots at a given FPS and resolution, and saves frames with timing and metadata. Maps are expected in ``--tracks-dir`` (default ``maps/tracks``): ``tracks-dir/track_id/*.Challenge.Gbx`` or ``tracks-dir/*.Challenge.Gbx`` — same layout as the download pipeline with ``--extract-tracks-from-replays``.
 
@@ -194,40 +197,42 @@ Frame capture (capture_replays_tmnf.py)
 
 **Main arguments (capture_replays_tmnf):**
 
-+----------------------------------+----------------------------------------------------------------------------------+
-| Argument                         | Effect                                                                           |
-+==================================+==================================================================================+
-| ``--replays-dir``                | Directory with ``track_id/*.replay.gbx`` (default ``maps/replays``).             |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--output-dir``                 | Output root: ``output_dir/track_id/replay_name/`` (default ``capture_frames_out``)|
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--tracks-dir``                 | Extracted challenges (default ``maps/tracks``).                                  |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--vcp-dir``                    | VCP (zone) files dir; enables meta for BC float inputs (default ``maps/vcp``).   |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--skip-bad-float-samples``     | Validate each frame before write; skip bad frames, replays with none valid,      |
-|                                  | and tracks with no replays saved. Requires ``--vcp-dir``.                        |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--exclude-respawn-maps``       | Skip tracks that have at least one replay with respawn events.                   |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--exclude-enter-maps``         | Skip track IDs listed in file (e.g. maps that need "Press Enter").               |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--write-enter-maps``           | Append track IDs that did not start to file; use with ``--exclude-enter-maps``.  |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--track-ids``, ``--track-id``  | Track list file or single ID.                                                    |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--max-replays-per-track``      | Limit replays per track (top N by filename).                                     |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--width``, ``--height``        | Frame size (default from config).                                                |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--fps``                        | Frames per simulation second (default 10).                                       |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--running-speed``              | Override running_speed from config (e.g. 4–16).                                  |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--workers``                    | Number of game instances (use 1 for now).                                        |
-+----------------------------------+----------------------------------------------------------------------------------+
-| ``--config``                     | Config YAML (default RL config).                                                 |
-+----------------------------------+----------------------------------------------------------------------------------+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 62
+
+   * - Argument
+     - Effect
+   * - ``--replays-dir``
+     - Directory with ``track_id/*.replay.gbx`` (default ``maps/replays``).
+   * - ``--output-dir``
+     - Output root: ``output_dir/track_id/replay_name/`` (default ``capture_frames_out``).
+   * - ``--tracks-dir``
+     - Extracted challenges (default ``maps/tracks``).
+   * - ``--vcp-dir``
+     - VCP (zone) files dir; enables meta for BC float inputs (default ``maps/vcp``).
+   * - ``--skip-bad-float-samples``
+     - Validate each frame before write; skip bad frames, replays with none valid, and tracks with no replays saved. Requires ``--vcp-dir``.
+   * - ``--exclude-respawn-maps``
+     - Skip tracks that have at least one replay with respawn events.
+   * - ``--exclude-enter-maps``
+     - Skip track IDs listed in file (e.g. maps that need "Press Enter").
+   * - ``--write-enter-maps``
+     - Append track IDs that did not start to file; use with ``--exclude-enter-maps``.
+   * - ``--track-ids``, ``--track-id``
+     - Track list file or single ID.
+   * - ``--max-replays-per-track``
+     - Limit replays per track (top N by filename).
+   * - ``--width``, ``--height``
+     - Frame size (default from config).
+   * - ``--fps``
+     - Frames per simulation second (default 10).
+   * - ``--running-speed``
+     - Override running_speed from config (e.g. 4–16).
+   * - ``--workers``
+     - Number of game instances (use 1 for now).
+   * - ``--config``
+     - Config YAML (default RL config).
 
 **FPS and simulation time (time_ms in filenames):** ``--fps`` is **frames per simulation second** (per second of race time). The interval between captures in sim time is ``1000 / fps`` ms. So with ``--fps 64`` you get ~15.6 ms between frames (e.g. ``frame_00000_0ms.jpeg``, ``frame_00001_20ms.jpeg``, …). ``--running-speed`` does not change this interval; it only affects how fast the race runs in real time.
 
@@ -240,7 +245,7 @@ Frame capture (capture_replays_tmnf.py)
 **Connection handling:** If TMInterface disconnects (e.g. game closed), the script clears the connection and the next replay will reconnect automatically.
 
 Examples (from project root)
----------------------------
+----------------------------
 
 .. code-block:: bash
 
@@ -263,7 +268,7 @@ Examples (from project root)
    python scripts/capture_replays_tmnf.py --track-id 12345 --replays-dir maps/replays --output-dir out
 
 Level 0 visual pretraining on captured frames
-----------------------------------------------
+---------------------------------------------
 
 After capturing frames to ``maps/img/``, run the Level 0 pretraining pipeline:
 

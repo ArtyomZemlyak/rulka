@@ -12,13 +12,18 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Any, Optional
 
 from trackmania_rl.agents.iqn import IQN_Network, calculate_conv_output_dim, _build_img_head
 
 
-def build_iqn_encoder(in_channels: int = 1, image_size: int = 64) -> nn.Sequential:
-    """Build CNN encoder matching IQN_Network.img_head exactly.
+def build_iqn_encoder(
+    in_channels: int = 1,
+    image_size: int = 64,
+    *,
+    cnn_head_kw: dict[str, Any] | None = None,
+) -> nn.Sequential:
+    """Build CNN encoder matching IQN_Network.img_head.
 
     Parameters
     ----------
@@ -28,7 +33,20 @@ def build_iqn_encoder(in_channels: int = 1, image_size: int = 64) -> nn.Sequenti
         loading into IQN, see ``export.average_first_layer_to_1ch``).
     image_size:
         Square input resolution (e.g. 64 for the default IQN setup).
+    cnn_head_kw:
+        If set (``in_channels`` must be 1), build via ``_build_img_head`` with
+        :func:`trackmania_rl.nn_build.vis_cnn_head.merge_vis_cnn_head_kw` so RL ``nn.vis.cnn``
+        matches BC / pretrain. If ``None``, use the legacy fixed 4-conv stack (backward compatible
+        with older encoder.pt artifacts).
     """
+    if cnn_head_kw is not None:
+        if in_channels != 1:
+            raise ValueError(
+                "build_iqn_encoder: cnn_head_kw requires in_channels==1 (use legacy encoder for multi-channel stack)."
+            )
+        from trackmania_rl.nn_build.vis_cnn_head import merge_vis_cnn_head_kw
+
+        return _build_img_head(**merge_vis_cnn_head_kw(cnn_head_kw))
     return nn.Sequential(
         nn.Conv2d(in_channels, 16, kernel_size=(4, 4), stride=2),
         nn.LeakyReLU(inplace=True),
@@ -131,9 +149,9 @@ def build_encoder_from_meta(meta: dict) -> nn.Sequential:
     )
 
 
-def get_enc_dim(in_channels: int, image_size: int) -> int:
+def get_enc_dim(in_channels: int, image_size: int, *, cnn_head_kw: dict[str, Any] | None = None) -> int:
     """Return the output dimension of an IQN-compatible encoder."""
-    encoder = build_iqn_encoder(in_channels=in_channels, image_size=image_size)
+    encoder = build_iqn_encoder(in_channels=in_channels, image_size=image_size, cnn_head_kw=cnn_head_kw)
     return calculate_conv_output_dim(encoder, image_size, image_size)
 
 
@@ -252,13 +270,14 @@ def build_bc_network(
     action_head_dropout: float = 0.0,
     in_channels: int = 1,
     image_size: int = 64,
+    cnn_head_kw: dict[str, Any] | None = None,
 ) -> BCNetwork:
     """Build BC model: IQN-compatible encoder + optional float head + action head(s).
 
     When n_offsets > 1, one Linear head per offset. When n_offsets == 1 and use_actions_head
     is True, action head has the same layout as IQN A_head for RL transfer.
     """
-    encoder = build_iqn_encoder(in_channels=in_channels, image_size=image_size)
+    encoder = build_iqn_encoder(in_channels=in_channels, image_size=image_size, cnn_head_kw=cnn_head_kw)
     mean_ten = torch.tensor(float_inputs_mean, dtype=torch.float32) if float_inputs_mean else None
     std_ten = torch.tensor(float_inputs_std, dtype=torch.float32) if float_inputs_std else None
     return BCNetwork(
@@ -316,7 +335,7 @@ def build_iqn_for_bc(
     float_inputs_dim, float_hidden_dim, n_actions : int
         Must match RL config.
     dense_hidden_dimension, iqn_embedding_dimension : int
-        Must match RL neural_network config.
+        Must match RL ``nn.decoder`` / ``nn.iqn`` (flat ``neural_network`` after load).
     float_inputs_mean, float_inputs_std : list[float] or None
         Same as RL state_normalization; length must equal float_inputs_dim.
         If None, use zeros and ones (no normalization).
@@ -339,15 +358,23 @@ def build_iqn_for_bc(
             f"float_inputs_mean/std length must be float_inputs_dim={float_inputs_dim}, "
             f"got {len(mean_arr)} and {len(std_arr)}"
         )
+    from config_files.nn_schema import IqnDecoderConfig, IqnHeadSlotConfig
+
+    decoder = IqnDecoderConfig(
+        shared_input="post_tau",
+        dense_hidden_dimension=dense_hidden_dimension,
+        advantage=IqnHeadSlotConfig(),
+        value=IqnHeadSlotConfig(),
+    )
     return IQN_Network(
         float_inputs_dim=float_inputs_dim,
         float_hidden_dim=float_hidden_dim,
         conv_head_output_dim=conv_head_output_dim,
-        dense_hidden_dimension=dense_hidden_dimension,
         iqn_embedding_dimension=iqn_embedding_dimension,
         n_actions=n_actions,
         float_inputs_mean=mean_arr,
         float_inputs_std=std_arr,
+        decoder=decoder,
         n_actions_per_block=n_actions_per_block,
         use_impala_cnn=use_impala_cnn,
         impala_model_size=impala_model_size,
@@ -390,7 +417,6 @@ class IQN_BC_MultiOffset(nn.Module):
         """Return (B, n_offsets, n_actions) for BC multi-offset; tau is ignored for shape compatibility."""
         batch_size = img.shape[0]
         device = img.device
-        dtype = img.dtype
         img_out = self.img_head(img)
         float_norm = (float_inputs - self.float_inputs_mean.to(device)) / self.float_inputs_std.to(device).clamp(min=1e-6)
         float_out = self.float_feature_extractor(float_norm)
@@ -443,3 +469,27 @@ class IQN_BC_MultiOffset(nn.Module):
                     if idx != "0":
                         sd["A_head_offset_" + idx + "." + key] = param
         return sd
+
+
+class PpoPolicyBcMultiOffset(nn.Module):
+    """BC-only: shared PPO trunk (``forward_features``) and N linear heads for temporal multi-offset.
+
+    Base must expose ``forward_features`` and ``policy_head`` (CNN, HF vision, or multimodal fusion actor-critic).
+    """
+
+    def __init__(self, base: nn.Module, n_offsets: int, n_actions: int) -> None:
+        super().__init__()
+        if not hasattr(base, "forward_features"):
+            raise TypeError(f"PpoPolicyBcMultiOffset requires base.forward_features(); got {type(base)}")
+        ph = getattr(base, "policy_head", None)
+        if ph is None or not hasattr(ph, "in_features"):
+            raise TypeError("base must have policy_head.in_features")
+        h_dim = int(ph.in_features)
+        self.base = base
+        self.n_offsets = int(n_offsets)
+        self.n_actions = int(n_actions)
+        self.bc_heads = nn.ModuleList([nn.Linear(h_dim, n_actions) for _ in range(n_offsets)])
+
+    def forward(self, img: torch.Tensor, float_inputs: torch.Tensor) -> torch.Tensor:
+        h = self.base.forward_features(img, float_inputs)
+        return torch.stack([self.bc_heads[i](h) for i in range(self.n_offsets)], dim=1)

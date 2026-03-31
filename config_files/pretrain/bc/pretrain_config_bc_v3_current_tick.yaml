@@ -48,7 +48,7 @@ cache_build_workers: 4
 # ---------------------------------------------------------------------------
 # Image
 # ---------------------------------------------------------------------------
-# image_size loaded from rl_config_path (neural_network.w_downsized).
+# image_size loaded from rl_config_path (nn.vis.image_size width / w_downsized).
 
 # Number of consecutive frames per sample (1 = single frame).
 n_stack: 1

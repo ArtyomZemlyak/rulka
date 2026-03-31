@@ -58,6 +58,14 @@ from trackmania_rl.pretrain.export import save_encoder_artifact
 log = logging.getLogger(__name__)
 
 
+def _pretrain_1ch_cnn_head_kw(cfg: PretrainConfig) -> dict[str, Any]:
+    """Match RL ``nn.vis.cnn`` from ``cfg.rl_config_path`` for 1-channel encoder / enc_dim."""
+    from config_files.config_loader import load_config
+    from trackmania_rl.nn_build.vis_cnn_head import vis_cnn_head_kw_from_nn_vis
+
+    return vis_cnn_head_kw_from_nn_vis(load_config(cfg.rl_config_path).vis)
+
+
 # ---------------------------------------------------------------------------
 # Run-directory versioning
 # ---------------------------------------------------------------------------
@@ -109,7 +117,8 @@ def _make_encoder_and_loader(
     )
     from trackmania_rl.pretrain.preprocess import CACHE_TRAIN_FILE
 
-    single_enc_dim = get_enc_dim(1, image_size)
+    stem_kw = _pretrain_1ch_cnn_head_kw(cfg)
+    single_enc_dim = get_enc_dim(1, image_size, cnn_head_kw=stem_kw)
 
     if cfg.n_stack > 1:
         if cfg.stack_mode == "channel":
@@ -119,12 +128,12 @@ def _make_encoder_and_loader(
         else:  # concat
             in_channels = 1
             stacked_concat = True
-            enc1 = build_iqn_encoder(1, image_size)
+            enc1 = build_iqn_encoder(1, image_size, cnn_head_kw=stem_kw)
             encoder = StackedEncoderConcat(enc1, cfg.n_stack, single_enc_dim).to(device)
     else:
         in_channels = 1
         stacked_concat = False
-        encoder = build_iqn_encoder(1, image_size).to(device)
+        encoder = build_iqn_encoder(1, image_size, cnn_head_kw=stem_kw).to(device)
 
     # --- Dataset selection ---
     if cache_dir is not None:
@@ -395,16 +404,20 @@ def create_lightning_trainer(
     -------
     (trainer, metrics_cb, monitor_key)
     """
-    try:
-        import lightning as L
-        from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-        from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
-    except ImportError as exc:
-        raise ImportError(
-            "PyTorch Lightning is required. Install it with: pip install lightning"
-        ) from exc
-
+    from trackmania_rl.pretrain.lightning_compat import (
+        CSVLogger,
+        EarlyStopping,
+        ModelCheckpoint,
+        LIGHTNING_AVAILABLE,
+        TensorBoardLogger,
+        Trainer,
+    )
     from trackmania_rl.pretrain.tasks import MetricsCollector
+
+    if not LIGHTNING_AVAILABLE:
+        from trackmania_rl.pretrain.lightning_compat import lightning_import_debug_message
+
+        raise ImportError("PyTorch Lightning is required.\n" + lightning_import_debug_message())
 
     if lc.checkpoint_monitor == "auto":
         monitor_key = "val_loss" if has_val else "train_loss"
@@ -480,7 +493,7 @@ def create_lightning_trainer(
     if lc.profiler is not None:
         trainer_kwargs["profiler"] = lc.profiler
 
-    trainer = L.Trainer(**trainer_kwargs)
+    trainer = Trainer(**trainer_kwargs)
 
     log.info(
         "Lightning Trainer: accelerator=%s  precision=%s  max_epochs=%d  "
@@ -603,7 +616,7 @@ def _train_lightning(
 # ---------------------------------------------------------------------------
 
 def _get_image_size_from_rl(cfg: PretrainConfig) -> int:
-    """Load RL config and return w_downsized (image_size)."""
+    """Load RL config and return square image side (``nn.vis.image_size.width`` → ``w_downsized``)."""
     from config_files.config_loader import load_config, set_config, get_config
     rl_path = Path(cfg.rl_config_path).resolve()
     if not rl_path.exists():
@@ -688,7 +701,8 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
             )
             log.info("Cache build complete.  Starting training from cache...")
 
-    enc_dim = get_enc_dim(1, image_size)
+    stem_kw = _pretrain_1ch_cnn_head_kw(cfg)
+    enc_dim = get_enc_dim(1, image_size, cnn_head_kw=stem_kw)
 
     # --- Lightning path ---
     if cfg.framework == "lightning":
@@ -699,12 +713,12 @@ def train_pretrain(cfg: PretrainConfig) -> Path:
         elif cfg.n_stack > 1 and cfg.stack_mode == "concat":
             in_channels = 1
             stacked_concat = True
-            enc1 = build_iqn_encoder(1, image_size)
+            enc1 = build_iqn_encoder(1, image_size, cnn_head_kw=stem_kw)
             encoder = StackedEncoderConcat(enc1, cfg.n_stack, enc_dim)
         else:
             in_channels = 1
             stacked_concat = False
-            encoder = build_iqn_encoder(1, image_size)
+            encoder = build_iqn_encoder(1, image_size, cnn_head_kw=stem_kw)
 
         metrics_rows, n_train, n_val = _train_lightning(
             cfg, image_size, encoder, in_channels, stacked_concat, run_dir, cache_dir=cache_dir,

@@ -13,7 +13,7 @@ To **reproduce the classic 5-minute wall grid** printed in older write-ups, run 
 
 Several TensorBoard folders usually mean a **long** run with suffix rotation; they are **not** proof of restarts. Use ``python scripts/audit_tensorboard_training_timeline.py`` to see whether wall span and ``cumul_training_hours`` diverge.
 
-See also :doc:`experiments/index` and the “Merged log folders” section in :doc:`tensorboard_metrics`.
+See also :doc:`index` and the “Merged log folders” section in :doc:`../tensorboard_metrics`.
 
 Audit snapshot (documented runs, local ``tensorboard/``)
 --------------------------------------------------------

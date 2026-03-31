@@ -288,10 +288,10 @@ class PretrainConfig(BaseSettings):
             "Only has effect when the cache needs to be (re)built."
         ),
     )
-    # Path to RL config. image_size (w_downsized) is loaded from it.
+    # Path to RL config. image_size (nn.vis.image_size width / w_downsized) is loaded from it.
     rl_config_path: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parent / "rl" / "config_default.yaml",
-        description="Path to RL config; image_size is loaded from neural_network.w_downsized.",
+        description="Path to RL config; image_size is loaded from nn.vis.image_size width (flat w_downsized after load).",
     )
 
     # ---------- Task ----------
@@ -313,7 +313,7 @@ class PretrainConfig(BaseSettings):
     )
 
     # ---------- Image / stacking ----------
-    # image_size loaded from rl_config_path (neural_network.w_downsized).
+    # image_size loaded from rl_config_path (nn.vis.image_size width / w_downsized).
     image_normalization: Literal["01", "iqn"] = Field(
         default="01",
         description="01 = [0,1] (default); iqn = (x-0.5)/0.5 for IQN/BC transfer alignment.",

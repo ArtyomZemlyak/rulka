@@ -161,13 +161,21 @@ def _load_existing_pair(save_dir: Path) -> tuple | None:
 
 
 def _inject_encoder(networks: tuple, encoder_sd: dict) -> None:
-    """Load encoder_sd into img_head of both online and target networks."""
+    """Load encoder_sd into CNN img_head of both online and target networks."""
+    from trackmania_rl.pretrain.export import iqn_cnn_img_head_module
+
     online, target = networks
-    # Move to CUDA (same device as IQN)
     encoder_sd_cuda = {k: v.to("cuda") for k, v in encoder_sd.items()}
-    online.img_head.load_state_dict(encoder_sd_cuda, strict=True)
-    target.img_head.load_state_dict(encoder_sd_cuda, strict=True)
-    log.info("Injected encoder weights into online and target img_head.")
+    for name, net in (("online", online), ("target", target)):
+        head = iqn_cnn_img_head_module(net)
+        if head is None:
+            log.error(
+                "No CNN img_head on %s network (HF vision or float-only). encoder.pt targets fusion CNN only.",
+                name,
+            )
+            sys.exit(1)
+        head.load_state_dict(encoder_sd_cuda, strict=True)
+    log.info("Injected encoder weights into online and target CNN img_head.")
 
 
 def _save(networks: tuple, save_dir: Path) -> None:

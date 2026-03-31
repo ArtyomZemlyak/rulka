@@ -11,6 +11,14 @@ import numpy as np
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config_files.nn_schema import (
+    MultimodalTransformersConfig,
+    NeuralNetworkConfig,
+    TransformersConfig,
+)
+
+MultimodalFusionModeLiteral = Literal["none", "vision_transformer", "post_concat", "unified"]
+
 
 def _parse_deck_height(v: Any) -> float:
     if isinstance(v, str) and v.lower() in ("-inf", "-infty"):
@@ -105,59 +113,29 @@ class EnvironmentConfig(BaseModel):
         return self
 
 
-# --- Neural Network ---
-class NeuralNetworkConfig(BaseModel):
-    w_downsized: int = 256
-    h_downsized: int = 256
-    float_hidden_dim: int = 256
-    dense_hidden_dimension: int = 1024
-    iqn_embedding_dimension: int = 128
-    iqn_n: int = 8
-    iqn_k: int = 32
-    iqn_kappa: float = 5e-3
-    use_ddqn: bool = True
-    clip_grad_value: float = 1000
-    clip_grad_norm: float = 30
-    number_memories_trained_on_between_target_network_updates: int = 2048
-    soft_update_tau: float = 0.02
-    target_self_loss_clamp_ratio: float = 4
-    single_reset_flag: int = 0
-    reset_every_n_frames_generated: int = 400_000_00000000
-    additional_transition_after_reset: int = 1_600_000
-    last_layer_reset_factor: float = 0.8
-    overall_reset_mul_factor: float = 0.01
-    use_jit: bool = True
-    # If False, IQN uses only float features (no CNN image head). Useful for ablation or float-only training.
-    use_iqn_image_head: bool = True
-
-    # Computed by loader (depends on environment)
-    float_input_dim: int = 0
-
-
 # --- Training ---
 class TrainingConfig(BaseModel):
     run_name: str = "uni_18"
-    # RL stack key for get_wiring (train / learner / collector). Network shape comes from neural_network + btr + environment, not from this field.
+    # RL stack key for get_wiring (train / learner / collector). Network shape comes from nn (flat neural_network) + btr + environment, not from this field.
     # Checkpoints under save/<run_name>/ must match the same algorithm + architecture as the run that wrote them.
-    algorithm: Literal["iqn"] = "iqn"
+    algorithm: Literal["iqn", "ppo"] = "iqn"
     pretrain_encoder_path: Optional[str] = None
     # Optional: path to BC run dir or to iqn_bc.pt to load full IQN state into checkpoints.
     # All matching parts are loaded: img_head, float_feature_extractor, iqn_fc, A_head, V_head.
     # Applied on fresh run (after encoder injection if set). Requires iqn_bc.pt from BC with use_full_iqn.
     pretrain_bc_heads_path: Optional[str] = None
 
+    # PPO only: BC run directory (contains ppo_policy_bc.pt) or path to .pt from bc_use_rl_architecture.
+    # On a fresh save/<run_name>/ (no weights1.torch), writes weights1.torch with key remap (multi-offset bc_heads → policy_head).
+    pretrain_ppo_policy_path: Optional[str] = None
+    # PPO only: if True, when BC policy_head has more outputs than the RL policy (same in_features), load only the
+    # leading rows (logits 0..N-1). Assumes action indices match between BC and RL configs (e.g. RL is a prefix of BC).
+    pretrain_ppo_policy_slice_head_to_model: bool = False
+
     # Optional: path to float_head.pt (BC run dir or file) to load only float_feature_extractor.
     pretrain_float_head_path: Optional[str] = None
     # Optional: path to actions_head.pt (BC run dir or file) to load only A_head.
     pretrain_actions_head_path: Optional[str] = None
-
-    # Freeze pretrain parts during RL training (default: false). Only parameters of the
-    # corresponding module are excluded from the optimizer and from resets/weight decay.
-    pretrain_encoder_freeze: bool = False
-    pretrain_float_head_freeze: bool = False
-    pretrain_iqn_fc_freeze: bool = False
-    pretrain_actions_head_freeze: bool = False
-    pretrain_V_head_freeze: bool = False
 
     batch_size: int = 512
     adam_epsilon: float = 1e-4
@@ -298,7 +276,6 @@ class PerformanceConfig(BaseModel):
     frames_before_save_best_runs: int = 1_500_000
     threshold_to_save_all_runs_ms: int = -1
     running_speed: int = 512
-    force_window_focus_on_input: bool = False
     # Pin each game client (TmForever.exe) to specific logical CPUs after launch.
     # collector_process_fn passes process_number as collector_index; see game_instance_manager.launch_game.
     pin_tm_forever_cpu_affinity: bool = False
@@ -364,12 +341,40 @@ class UserConfig(BaseSettings):
         return platform in ["linux", "linux2"]
 
 
+# --- PPO (used when training.algorithm == "ppo"; IQN ignores this block) ---
+class PPOConfig(BaseModel):
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_coef: float = 0.2
+    # None = MSE(V, returns) only; float ε = PPO2-style clip V to V_old ± ε then max of two squared errors.
+    clip_coef_vf: Optional[float] = None
+    ent_coef: float = 0.01
+    vf_coef: float = 0.5
+    max_grad_norm: float = 0.5
+    update_epochs: int = 4
+    num_minibatches: int = 4
+    normalize_advantages: bool = True
+    rollout_steps_per_update: int = 2048
+    # Optional [[frame, value], ...] schedules; linear interpolation vs cumul_number_frames_played
+    # (same step axis as training.lr_schedule). If omitted, the scalar above is used (implicit [[0, scalar]]).
+    # Named ppo_gamma_schedule: training.gamma_schedule is IQN n-step discount, flat cfg resolves training first.
+    ppo_gamma_schedule: Optional[list[ScheduleStepFloat]] = None
+    gae_lambda_schedule: Optional[list[ScheduleStepFloat]] = None
+    ent_coef_schedule: Optional[list[ScheduleStepFloat]] = None
+    vf_coef_schedule: Optional[list[ScheduleStepFloat]] = None
+
+
 # --- BTR (Beyond The Rainbow) ---
 class BTRConfig(BaseModel):
     """Optional IQN enhancements from the BTR paper — not a separate RL algorithm or wiring key.
 
     Same ``training.algorithm`` (iqn) and same ``IQN_Network`` class; flags only change internals
-    (encoder, heads, loss path). Pair with :class:`NeuralNetworkConfig` for widths / IQN hyperparams.
+    (backbone, ``nn.decoder``, loss path). Vision CNN knobs belong in ``nn.vis.cnn``; the CNN fields
+    below duplicate that block for backward compatibility and for :func:`config_files.config_loader._merge_btr_cnn_into_vis`
+    (fills omitted ``nn.vis.cnn`` keys at load).
+
+    LayerNorm / NoisyNet / ``noisy_sigma0`` are applied to IQN MLP heads using
+    :func:`trackmania_rl.nn_build.iqn_btr_from_config.iqn_btr_mlp_head_kw_from_config` on the flat loaded config.
     """
 
     # Munchausen IQN: soft-policy targets instead of hard max
@@ -413,5 +418,6 @@ class RulkaConfig(BaseModel):
     )
     user: UserConfig = Field(default_factory=UserConfig)
     btr: BTRConfig = Field(default_factory=BTRConfig)
+    ppo: PPOConfig = Field(default_factory=PPOConfig)
 
     model_config = {"arbitrary_types_allowed": True}

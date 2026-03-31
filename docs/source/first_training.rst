@@ -62,6 +62,8 @@ We are ready to start training.
 
    python scripts/train.py --config config_files/rl/config_default.yaml
 
+For **PPO** instead of IQN, pick a YAML under ``config_files/rl/``: ``config_ppo.yaml`` (general), ``config_ppo_cnn_mlp.yaml`` (CNN + float MLP only), ``config_ppo_post_concat_cnn_tf.yaml`` (CNN + native fusion transformer), or ``config_ppo_transformer.yaml`` (``post_concat`` + HF vision + HF fusion). See :ref:`ppo-config` and :ref:`nn-yaml-reference` in :doc:`configuration_guide`. To keep a pretrained vision trunk fixed while RL trains the rest, set flags under ``nn`` (:ref:`nn-rl-parameter-freeze` in :doc:`configuration_guide`).
+
 Upon running this command, it is expected that a :doc:`wall of text appears in your terminal <wall_text>`. *Don't worry, this is normal.*
 
 A few seconds after running this command, two instances of the game will be launched in windowed mode. 
@@ -101,7 +103,7 @@ The tab "Custom Scalars" at the top is preconfigured with a default layout. Grap
 - **Race/eval_race_time_robust**: Best evaluation times (primary performance metric)
 
 Early training
-..............
+~~~~~~~~~~~~~~
 
 This part focuses on the initial training phase, during the first 3 to 5 million steps.
 
@@ -131,7 +133,7 @@ Focusing on the ``loss`` graph, the loss increases during the first 500k steps. 
   :align: center
 
 End of training
-...............
+~~~~~~~~~~~~~~~
 
 After relatively quick progress during the first 3-5M steps, the AI typically reaches a time in the low 54 seconds on ESL-Hockolicious. Progress now slows down, and can be monitored with the ``eval_race_time_robust`` graph.
 

@@ -18,13 +18,34 @@ from config_files.config_schema import (
     MapCycleConfig,
     MapCycleEntry,
     MemoryConfig,
-    NeuralNetworkConfig,
+    PPOConfig,
     PerformanceConfig,
     RewardsConfig,
+    RulkaConfig,
     StateNormalizationConfig,
     TrainingConfig,
     UserConfig,
 )
+from config_files.nn_schema import NnConfig
+
+
+def _merge_btr_cnn_into_vis(nn_dict: dict[str, Any], btr: dict[str, Any]) -> None:
+    """If ``nn.vis.cnn`` exists and omits BTR fields, fill from top-level ``btr:``."""
+    vis = nn_dict.get("vis")
+    if not isinstance(vis, dict) or vis.get("no_image"):
+        return
+    cnn = vis.get("cnn")
+    if not isinstance(cnn, dict):
+        return
+    for k in (
+        "use_impala_cnn",
+        "impala_model_size",
+        "use_adaptive_maxpool",
+        "adaptive_maxpool_size",
+        "use_spectral_norm",
+    ):
+        if k not in cnn and k in btr:
+            cnn[k] = btr[k]
 
 
 def _apply_schedule_speed(schedule: list, speed: int) -> list:
@@ -81,8 +102,6 @@ def _build_float_inputs_mean_std(
     margin_std = margin_mean / 2.0
 
     n_prev_actions = n_prev * 4
-    n_gear = 4 + 4 + 4 + 1 + 1 + 1 + 1 + 4 * n_contact
-    n_waypoints = n * 3
 
     prev_actions_mean = [0.8, 0.2, 0.3, 0.3] * n_prev
     prev_actions_std = [0.5] * n_prev_actions
@@ -157,7 +176,7 @@ class ConfigView:
     Provides config_copy.xxx style attribute access.
     """
 
-    def __init__(self, cfg: "RulkaConfig"):
+    def __init__(self, cfg: RulkaConfig):
         self._cfg = cfg
 
     def __getattr__(self, name: str) -> Any:
@@ -200,6 +219,9 @@ class ConfigView:
         # Neural network
         if hasattr(n, name):
             return getattr(n, name)
+        tr = n.transformers
+        if hasattr(tr, name):
+            return getattr(tr, name)
         # Training
         if hasattr(t, name):
             return getattr(t, name)
@@ -221,6 +243,9 @@ class ConfigView:
         # State normalization
         if hasattr(sn, name):
             return getattr(sn, name)
+        # PPO (flat: clip_coef, gamma, … — unique names vs other sections; multimodal stack is YAML ``nn`` / cfg.transformers)
+        if hasattr(m.ppo, name):
+            return getattr(m.ppo, name)
         # BTR
         if hasattr(m.btr, name):
             return getattr(m.btr, name)
@@ -264,13 +289,24 @@ def load_config(config_path: Path | str) -> ConfigView:
         data["training"]["gamma_schedule"] = _apply_schedule_speed(
             data["training"]["gamma_schedule"], speed
         )
+    for key in (
+        "ppo_gamma_schedule",
+        "gae_lambda_schedule",
+        "ent_coef_schedule",
+        "vf_coef_schedule",
+    ):
+        if key in data.get("ppo", {}):
+            data["ppo"][key] = _apply_schedule_speed(data["ppo"][key], speed)
     if "memory_size_schedule" in data.get("memory", {}):
         data["memory"]["memory_size_schedule"] = _apply_schedule_speed(
             data["memory"]["memory_size_schedule"], speed
         )
 
     env = EnvironmentConfig.model_validate(data.get("environment", {}))
-    neural = NeuralNetworkConfig.model_validate(data.get("neural_network", {}))
+    btr_raw = data.get("btr", {}) or {}
+    nn_dict: dict[str, Any] = dict(data.get("nn") or {})
+    _merge_btr_cnn_into_vis(nn_dict, btr_raw)
+    neural = NnConfig.model_validate(nn_dict)
     training = TrainingConfig.model_validate(data.get("training", {}))
     memory = MemoryConfig.model_validate(data.get("memory", {}))
     exploration = ExplorationConfig.model_validate(data.get("exploration", {}))
@@ -321,6 +357,7 @@ def load_config(config_path: Path | str) -> ConfigView:
     )
 
     btr = BTRConfig.model_validate(data.get("btr", {}))
+    ppo = PPOConfig.model_validate(data.get("ppo", {}))
     user = UserConfig()
 
     from config_files.config_schema import RulkaConfig
@@ -338,6 +375,7 @@ def load_config(config_path: Path | str) -> ConfigView:
         state_normalization=state_norm,
         user=user,
         btr=btr,
+        ppo=ppo,
     )
     return ConfigView(cfg)
 

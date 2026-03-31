@@ -55,6 +55,7 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from tqdm import tqdm
@@ -372,7 +373,7 @@ def build_cache(
         Directory to write cache files into (created if absent).
     image_size:
         Target square resolution in pixels.  Must match the ``image_size``
-        in ``PretrainConfig`` and the IQN ``w_downsized`` / ``h_downsized``.
+        in ``PretrainConfig`` and the RL ``nn.vis.image_size`` (flat ``w_downsized`` / ``h_downsized``).
     n_stack:
         Number of consecutive frames per sample (temporal stack depth).
     val_fraction:

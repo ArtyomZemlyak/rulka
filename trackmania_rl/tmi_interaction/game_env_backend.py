@@ -18,6 +18,7 @@ API:
 - run_until_next_decision_point() -> (obs, reward, terminated, truncated, info): block until next tick.
 """
 
+import logging
 import math
 import socket
 import time
@@ -29,6 +30,8 @@ import numpy.typing as npt
 
 from config_files.config_loader import get_config
 from trackmania_rl import map_loader
+
+_log = logging.getLogger(__name__)
 from trackmania_rl.float_inputs import (
     build_float_vector,
     prev_actions_flat_from_indices,
@@ -303,7 +306,7 @@ class GameEnvBackend:
                                 self._pending_time = -3000
                             gim.start_states[map_path] = gim.iface.get_simulation_state()
                             map_name = map_path.split("/")[-1].strip('"')
-                            print(f"[OK] Start state saved for {map_name} - future runs will be automatic!")
+                            _log.debug("Start state saved for %s — future runs automatic", map_name)
                         if (not give_up_signal_has_been_sent) and (map_path != gim.latest_map_path_requested):
                             gim.request_map(map_path, zone_centers)
                             map_change_requested_time = _time

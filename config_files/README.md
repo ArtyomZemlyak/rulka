@@ -61,7 +61,7 @@ make html
 The default YAML is organized into sections:
 
 - **environment** – Timing, spatial params, timeouts, game settings
-- **neural_network** – Image size, layer sizes, IQN params, gradient clipping
+- **nn** – Vision (`vis`: `image_size`, `cnn` / `transformer`), float MLP width, PPO `fusion_mode`, IQN quantiles (`iqn`), dueling heads (`decoder`), IQN training ops (`nn.training`), etc. (full tree in the [Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html) under *Neural network YAML*). After load, the same fields also appear on the flat object `RulkaConfig.neural_network` for code that uses `cfg.neural_network.*`.
 - **training** – run_name, batch_size, lr_schedule, gamma_schedule, n_steps, etc.
 - **memory** – Buffer size schedule, PER (prio_*), usage control
 - **exploration** – Epsilon and Boltzmann schedules

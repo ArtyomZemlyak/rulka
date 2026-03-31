@@ -1,7 +1,7 @@
 .. _btr_architecture:
 
 BTR options (IQN + paper extras)
-===============================
+================================
 
 This page describes how BTR is implemented in this project.
 
@@ -70,6 +70,12 @@ The table below maps each BTR feature to the implementation location and effect.
      - ``FactorizedNoisyLinear`` and action selection in ``trackmania_rl/agents/iqn.py``
      - Uses trainable parameter noise; when enabled, rollout action logic does not use epsilon/Boltzmann branches.
 
+Config resolution in code
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **Vision CNN** (IMPALA, adaptive pool, spectral norm): YAML **canonical** block is ``nn.vis.cnn``; omitted keys can be filled from ``btr:`` at load (``config_loader._merge_btr_cnn_into_vis``). All call sites that build ``_build_img_head`` (classic IQN, PPO CNN, multimodal CNN branch, BC, pretrain) resolve kwargs through ``trackmania_rl/nn_build/vis_cnn_head.py``.
+- **LayerNorm / NoisyNet / ``noisy_sigma0``** on IQN MLP heads (classic and shared-backbone IQN): read from the flat loaded config in ``trackmania_rl/nn_build/iqn_btr_from_config.py`` as ``iqn_btr_mlp_head_kw_from_config``.
+
 BTR data flow vs baseline IQN
 -----------------------------
 
@@ -118,9 +124,9 @@ similar value.
 
 These three options modify only the image branch:
 
-- ``use_impala_cnn`` selects residual IMPALA-style encoder.
-- ``use_adaptive_maxpool`` changes spatial reduction to fixed size.
-- ``use_spectral_norm`` wraps conv layers for spectral normalization.
+- ``nn.vis.cnn.use_impala_cnn`` selects residual IMPALA-style encoder.
+- ``nn.vis.cnn.use_adaptive_maxpool`` changes spatial reduction to fixed size.
+- ``nn.vis.cnn.use_spectral_norm`` wraps conv layers for spectral normalization.
 
 The rest of IQN pipeline (float branch, quantile fusion, dueling heads,
 replay/training loop) remains unchanged.
@@ -183,17 +189,17 @@ exploration better than a fixed epsilon schedule.
 Configuration section
 ---------------------
 
-BTR options live in ``config_files/rl/*.yaml`` under ``btr:``:
+**Vision CNN** (canonical): ``nn.vis.cnn`` — ``use_impala_cnn``, ``impala_model_size``,
+``use_adaptive_maxpool``, ``adaptive_maxpool_size``, ``use_spectral_norm``.
+The loader can copy missing CNN keys from ``btr:`` into ``nn.vis.cnn`` for backward-compatible minimal YAML; **IQN** and **PPO Variant A** read the merged ``nn.vis.cnn``. Multimodal fusion ``post_concat`` still uses its **own** fixed CNN in ``multimodal_torch_fusion.py``.
+
+**BTR-only flags** (under ``btr:`` in YAML, ``BTRConfig`` in code):
 
 - ``use_munchausen``, ``munchausen_alpha``, ``munchausen_entropy_tau``, ``munchausen_lo``
-- ``use_impala_cnn``, ``impala_model_size``
-- ``use_adaptive_maxpool``, ``adaptive_maxpool_size``
-- ``use_spectral_norm``
 - ``use_layer_norm``
 - ``use_noisy_linear``, ``noisy_sigma0``
 
-These are validated in ``config_files/config_schema.py`` and exposed through
-the flat config view in ``config_files/config_loader.py``.
+``BTRConfig`` still lists the CNN fields for schema/merge; prefer setting them on ``nn.vis.cnn`` in new configs to avoid duplication.
 
 Practical recommendations
 -------------------------
@@ -209,4 +215,4 @@ See also
 
 - :doc:`iqn_architecture` — baseline model that BTR augments.
 - :doc:`../experiments/models/iqn` — IQN experiment pages.
-- :doc:`../configuration_guide` — full config reference.
+- :doc:`../configuration_guide` — full config reference; YAML trees :ref:`nn-yaml-reference` and :ref:`btr-yaml-reference`.

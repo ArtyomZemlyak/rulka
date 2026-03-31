@@ -97,7 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- Image ---
     ap.add_argument("--rl-config-path", type=Path, default=None, dest="rl_config_path",
                     metavar="PATH",
-                    help="Path to RL config; image_size is loaded from neural_network.w_downsized.")
+                    help="Path to RL config; image_size is loaded from nn.vis.image_size (flat w_downsized after load).")
     ap.add_argument("--image-normalization", type=str, default=None, dest="image_normalization",
                     choices=["01", "iqn"],
                     help="01 = [0,1]; iqn = (x-0.5)/0.5 for IQN/BC transfer (default from config).")

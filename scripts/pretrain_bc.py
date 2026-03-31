@@ -60,6 +60,13 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Restrict to these track IDs only (e.g. --track-ids A01-Race). Uses on-the-fly loading.")
     ap.add_argument("--bc-resume-run-dir", type=Path, default=None, dest="bc_resume_run_dir",
                     help="Path to previous BC run dir (e.g. output/ptretrain/bc/v3_multi_offset) to load iqn_bc.pt for fine-tuning.")
+    ap.add_argument(
+        "--bc-use-rl-architecture",
+        action="store_true",
+        default=None,
+        dest="bc_use_rl_architecture",
+        help="Build the same policy topology as RL (from rl_config_path): IQN_Network or PPO CNN/HF/fusion. Requires use_floats.",
+    )
     return ap
 
 
@@ -79,6 +86,7 @@ def main() -> None:
         "n_stack", "image_normalization", "epochs", "batch_size", "lr",
         "workers", "val_fraction", "seed", "grad_clip", "prefetch_factor",
         "preprocess_cache_dir", "cache_build_workers", "track_ids", "bc_resume_run_dir",
+        "bc_use_rl_architecture",
     ):
         val = getattr(args, field, None)
         if val is not None:
@@ -99,6 +107,15 @@ def main() -> None:
     if not rl_path.exists():
         raise FileNotFoundError(f"rl_config_path {rl_path} not found")
     set_config(load_config(rl_path))
+
+    from trackmania_rl.pretrain.lightning_compat import LIGHTNING_AVAILABLE, lightning_import_debug_message
+
+    if not LIGHTNING_AVAILABLE:
+        log.error(
+            "PyTorch Lightning is not installed for this interpreter (BC needs it before training).\n%s",
+            lightning_import_debug_message(),
+        )
+        raise SystemExit(1)
 
     from trackmania_rl.pretrain.train_bc import train_bc
 

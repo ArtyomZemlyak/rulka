@@ -21,6 +21,7 @@ our attention elsewhere, because "If it works don't touch it.".
 Contributions are welcome to simplify this part of the code.
 """
 
+import logging
 import math
 import os
 import socket
@@ -37,12 +38,28 @@ import psutil
 
 from config_files.config_loader import get_config
 from trackmania_rl import map_loader
+
+_log = logging.getLogger(__name__)
 from trackmania_rl.float_inputs import (
     build_float_vector,
     prev_actions_flat_from_indices,
     state_dict_from_sim_state,
 )
 from trackmania_rl.tmi_interaction.tminterface2 import MessageType, TMInterface
+
+
+def _unpack_exploration_result(res):
+    """IQN returns a 4-tuple; PPO returns a dict (includes log_prob for on-policy training)."""
+    if isinstance(res, dict):
+        return (
+            res["action"],
+            res["action_was_greedy"],
+            res["value"],
+            res["q_values"],
+            res.get("log_prob"),
+        )
+    action_or_block, action_was_greedy, q_value, q_values = res
+    return action_or_block, action_was_greedy, q_value, q_values, None
 
 
 def _apply_tm_forever_cpu_affinity(tm_pid: int, collector_index: int | None) -> None:
@@ -616,6 +633,9 @@ class GameInstanceManager:
             "state_float": [],
             "furthest_zone_idx": 0,
         }
+        if get_config().algorithm == "ppo":
+            rollout_results["ppo_log_probs"] = []
+            rollout_results["ppo_values"] = []
 
         last_progress_improvement_ms = 0
         _use_image_head = get_config().use_iqn_image_head
@@ -747,7 +767,7 @@ class GameInstanceManager:
                     if _time == 0 and (map_path not in self.start_states):
                         self.start_states[map_path] = self.iface.get_simulation_state()
                         map_name = map_path.split('/')[-1].strip('"')
-                        print(f"[OK] Start state saved for {map_name} - future runs will be automatic!")
+                        _log.debug("Start state saved for %s — future runs automatic", map_name)
 
                     if (not give_up_signal_has_been_sent) and (map_path != self.latest_map_path_requested):
                         self.request_map(map_path, zone_centers)
@@ -878,7 +898,8 @@ class GameInstanceManager:
                                     action_was_greedy,
                                     q_value,
                                     q_values,
-                                ) = exploration_policy(_dummy_frame, floats)
+                                    ppo_log_prob,
+                                ) = _unpack_exploration_result(exploration_policy(_dummy_frame, floats))
 
                                 pc6 = time.perf_counter_ns()
                                 instrumentation__exploration_policy += pc6 - pc5
@@ -913,6 +934,9 @@ class GameInstanceManager:
                                 rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
                                 rollout_results["q_values"].append(q_values)
                                 rollout_results["state_float"].append(floats)
+                                if ppo_log_prob is not None and "ppo_log_probs" in rollout_results:
+                                    rollout_results["ppo_log_probs"].append(ppo_log_prob)
+                                    rollout_results["ppo_values"].append(q_value)
 
                                 n_th_action_we_compute += 1
                                 instrumentation__request_inputs_and_speed += time.perf_counter_ns() - pc6
@@ -1044,7 +1068,8 @@ class GameInstanceManager:
                             action_was_greedy,
                             q_value,
                             q_values,
-                        ) = exploration_policy(rollout_results["frames"][-1], floats)
+                            ppo_log_prob,
+                        ) = _unpack_exploration_result(exploration_policy(rollout_results["frames"][-1], floats))
 
                         pc8 = time.perf_counter_ns()
                         instrumentation__exploration_policy += pc8 - pc7
@@ -1085,6 +1110,9 @@ class GameInstanceManager:
                         rollout_results["car_gear_and_wheels"].append(sim_state_car_gear_and_wheels)
                         rollout_results["q_values"].append(q_values)
                         rollout_results["state_float"].append(floats)
+                        if ppo_log_prob is not None and "ppo_log_probs" in rollout_results:
+                            rollout_results["ppo_log_probs"].append(ppo_log_prob)
+                            rollout_results["ppo_values"].append(q_value)
 
                         compute_action_asap = False
                         n_th_action_we_compute += 1

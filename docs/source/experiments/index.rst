@@ -24,6 +24,7 @@ Contents
    temporal_mini_race_duration
    exploration
    global_schedule_speed
+   ppo_vs_iqn_baseline
    multi_action_prediction
    iqn_modernization_plan
    network_size_long_training

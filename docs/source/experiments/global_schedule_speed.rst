@@ -13,7 +13,7 @@ We compared five runs from the A01_as20_long_v2 series. **global_schedule_speed*
 Results
 -------
 
-**Important:** If run durations differed, interpret **by-time** tables using the script’s time axis (default **auto** → **cumulative training hours** when logged, not raw wall minutes across merged TB chunks). Use ``scripts/analyze_experiment_by_relative_time.py`` and optionally ``scripts/audit_tensorboard_training_timeline.py``; see :doc:`experiments/index`.
+**Important:** If run durations differed, interpret **by-time** tables using the script’s time axis (default **auto** → **cumulative training hours** when logged, not raw wall minutes across merged TB chunks). Use ``scripts/analyze_experiment_by_relative_time.py`` and optionally ``scripts/audit_tensorboard_training_timeline.py``; see :doc:`index`.
 
 **Key findings:**
 
@@ -48,7 +48,7 @@ Detailed TensorBoard Metrics Analysis
 
 **Methodology — By time and by steps:** Prefer cumulative-training-hour checkpoints (``--time-axis auto``) or BY STEP tables. Race times from per-race ``Race/eval_race_time_*``, ``Race/explo_race_time_*``; scalars (loss, Q, GPU %) = last value at that checkpoint. The figures below use the same default as ``generate_experiment_plots.py`` (training hours on X when the scalar exists).
 
-**Runs v2 / v2.1 / v2.4:** v2 and v2.1 show **wall ≫ training** (~2.4–2.7×); v2.4 is ~1× (short run). See :doc:`experiments/time_axis_conventions` audit table. Fill subsections from script output (**cumul_training_hours** or BY STEP). Example command:
+**Runs v2 / v2.1 / v2.4:** v2 and v2.1 show **wall ≫ training** (~2.4–2.7×); v2.4 is ~1× (short run). See :doc:`time_axis_conventions` audit table. Fill subsections from script output (**cumul_training_hours** or BY STEP). Example command:
 
 ::
 

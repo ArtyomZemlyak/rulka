@@ -32,19 +32,10 @@ def make_inferer(network):
 
 
 def freeze_prefixes_from_config(cfg):
-    """Parameter name prefixes for pretrain freeze (IQN module names)."""
-    prefixes = []
-    if getattr(cfg, "pretrain_encoder_freeze", False):
-        prefixes.append("img_head.")
-    if getattr(cfg, "pretrain_float_head_freeze", False):
-        prefixes.append("float_feature_extractor.")
-    if getattr(cfg, "pretrain_iqn_fc_freeze", False):
-        prefixes.append("iqn_fc.")
-    if getattr(cfg, "pretrain_actions_head_freeze", False):
-        prefixes.append("A_head.")
-    if getattr(cfg, "pretrain_V_head_freeze", False):
-        prefixes.append("V_head.")
-    return prefixes
+    """Parameter-name prefixes from ``nn.*.freeze`` (see ``trackmania_rl.param_freeze``)."""
+    from trackmania_rl.param_freeze import collect_frozen_prefixes
+
+    return collect_frozen_prefixes(cfg, wiring_algorithm="iqn")
 
 
 def warmup_compile(config) -> None:
