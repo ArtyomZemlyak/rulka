@@ -3,7 +3,9 @@
 NN topology catalog (supported stacks)
 =======================================
 
-This page lists **every routing path** the training code can build from YAML ``nn`` + ``training.algorithm`` + (IQN only) ``btr:``. It complements the narrative pages :doc:`iqn_architecture`, :doc:`ppo_architecture`, :doc:`btr_architecture` and the field-by-field :ref:`nn-yaml-reference` in :doc:`../configuration_guide`.
+This page lists **every routing path** the training code can build from YAML ``nn`` + ``training.algorithm`` + (IQN only) ``btr:``. It complements the narrative pages :doc:`iqn_architecture`, :doc:`ppo_architecture`, :doc:`grpo_architecture`, :doc:`btr_architecture` and the field-by-field :ref:`nn-yaml-reference` in :doc:`../configuration_guide`.
+
+**DPO** and **GRPO** reuse the **same** ``nn`` routing and built modules as **PPO** (``get_wiring("dpo" | "grpo")`` → ``ppo_wiring``). For training semantics, see :doc:`../configuration_guide` (:ref:`dpo-config`, :ref:`grpo-config`) and :doc:`grpo_architecture`.
 
 **Authoritative schema:** ``config_files/nn_schema.py`` (``NnConfig``). **Factory:** ``trackmania_rl/agents/policy_models/multimodal_torch_fusion.py`` (``TorchMultimodalActorCritic``, ``build_multimodal_fusion_uncompiled``), ``ppo_wiring.py``, ``iqn.py`` (``build_iqn_network_uncompiled``), ``hf_actor_critic.py``.
 
@@ -187,6 +189,7 @@ See also
 
 - :doc:`iqn_architecture` — IQN routing and tensors
 - :doc:`ppo_architecture` — PPO variants A/B/C
+- :doc:`grpo_architecture` — GRPO training (same stacks as PPO)
 - :doc:`btr_architecture` — BTR flags on IQN
 - :ref:`nn-yaml-reference` in :doc:`../configuration_guide`
 - ``config_files/nn_schema.py`` — validators for mutually exclusive options and geometry

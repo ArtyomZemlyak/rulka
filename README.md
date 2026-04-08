@@ -1,6 +1,6 @@
 # TrackMania RL
 
-Reinforcement Learning for training AI in TrackMania Nations Forever using IQN (Implicit Quantile Networks).
+Reinforcement Learning for training AI in TrackMania Nations Forever: **IQN** (Implicit Quantile Networks), **PPO**, **DPO** (direct preference optimization), and **GRPO** (group-relative policy optimization), all driven from YAML (`training.algorithm`).
 
 > Personal fork of [Linesight](https://github.com/pb4git/linesight) adapted for RL experimentation.
 
@@ -46,13 +46,23 @@ source .venv/bin/activate  # Linux/macOS
 ### Training
 
 ```bash
+# Off-policy IQN (default stack)
 python scripts/train.py --config config_files/rl/config_default.yaml
+
+# On-policy PPO
+python scripts/train.py --config config_files/rl/config_ppo.yaml
+
+# DPO / GRPO (same actor-critic wiring as PPO; see docs for YAML knobs)
+python scripts/train.py --config config_files/rl/config_dpo.yaml
+python scripts/train.py --config config_files/rl/config_grpo.yaml
 
 # Monitor (in separate terminal)
 tensorboard --logdir=tensorboard
 python -m tensorboard.main --logdir=tensorboard
 # Open http://localhost:6006
 ```
+
+Parameter reference: [Configuration Guide](https://artyomzemlyak.github.io/rulka/configuration_guide.html) (`algorithm`, `ppo:`, `dpo:`, `grpo:`). Offline DPO pairs: `scripts/dpo_append_offline_pair.py`.
 
 ## Key Changes
 
@@ -191,7 +201,10 @@ Activate the environment first (Windows: `.\.venv\Scripts\activate`; Linux/macOS
 rulka/
 ├── config_files/
 │   ├── rl/
-│   │   └── config_default.yaml       # RL training config
+│   │   ├── config_default.yaml       # IQN RL config
+│   │   ├── config_ppo.yaml           # PPO example
+│   │   ├── config_dpo.yaml           # DPO example
+│   │   └── config_grpo.yaml          # GRPO example
 │   ├── pretrain/
 │   │   ├── vis/                      # Level 0 pretrain (AE, SimCLR): pretrain_config.yaml, etc.
 │   │   └── bc/                       # Level 1 BC: pretrain_config_bc.yaml, etc.

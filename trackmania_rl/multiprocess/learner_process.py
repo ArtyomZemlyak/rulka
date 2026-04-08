@@ -71,10 +71,35 @@ def learner_process_fn(
     save_dir: Path,
     tensorboard_base_dir: Path,
 ):
-    if get_config().algorithm == "ppo":
+    alg = get_config().algorithm
+    if alg == "ppo":
         from trackmania_rl.multiprocess.learner_ppo import learner_ppo_process_fn
 
         return learner_ppo_process_fn(
+            rollout_queues,
+            uncompiled_shared_network,
+            shared_network_lock,
+            shared_steps,
+            base_dir,
+            save_dir,
+            tensorboard_base_dir,
+        )
+    if alg == "dpo":
+        from trackmania_rl.multiprocess.learner_dpo import learner_dpo_process_fn
+
+        return learner_dpo_process_fn(
+            rollout_queues,
+            uncompiled_shared_network,
+            shared_network_lock,
+            shared_steps,
+            base_dir,
+            save_dir,
+            tensorboard_base_dir,
+        )
+    if alg == "grpo":
+        from trackmania_rl.multiprocess.learner_grpo import learner_grpo_process_fn
+
+        return learner_grpo_process_fn(
             rollout_queues,
             uncompiled_shared_network,
             shared_network_lock,

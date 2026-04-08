@@ -1,4 +1,4 @@
-"""PPO learner: on-policy rollout aggregation, GAE, clipped objective (no IQN replay)."""
+"""GRPO learner: K rollouts per group, group-relative advantages, policy-gradient + entropy."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import joblib
-import numpy as np
 import torch
 from torch import multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
@@ -20,22 +19,14 @@ from torch.utils.tensorboard import SummaryWriter
 from config_files.config_loader import get_config
 from trackmania_rl import utilities
 from trackmania_rl.agents.algorithms import get_wiring
-from trackmania_rl.agents.policy_optimization.ppo import compute_gae, ppo_loss_components
+from trackmania_rl.agents.policy_optimization.grpo import grpo_policy_objective, group_relative_advantages
 from trackmania_rl.multiprocess.policy_rollout_batch import (
     build_policy_rollout_tensors,
-    ppo_scheduled_float,
-    scheduled_rollout_shaping_gamma,
+    grpo_scheduled_float,
 )
 
 
-def _concat_batches(parts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    out: dict[str, torch.Tensor] = {}
-    for k in parts[0]:
-        out[k] = torch.cat([p[k] for p in parts], dim=0)
-    return out
-
-
-def learner_ppo_process_fn(
+def learner_grpo_process_fn(
     rollout_queues,
     uncompiled_shared_network,
     shared_network_lock,
@@ -48,6 +39,11 @@ def learner_ppo_process_fn(
     wiring = get_wiring()
     device = torch.device("cuda")
 
+    group_size = int(cfg.grpo_group_size)
+    normalize_group = str(cfg.grpo_normalize_group)
+    update_epochs = max(1, int(cfg.grpo_update_epochs))
+    ref_sync_every = max(1, int(cfg.grpo_ref_sync_every_updates))
+
     policy, uncompiled_local = wiring.make_network(cfg.use_jit, is_inference=False)
 
     w1_path = save_dir / "weights1.torch"
@@ -57,30 +53,28 @@ def learner_ppo_process_fn(
             sd = torch.load(f=w1_path, weights_only=False)
             _slice = bool(getattr(cfg, "pretrain_ppo_policy_slice_head_to_model", False))
             policy.load_state_dict(
-                utilities.prepare_ppo_policy_state_dict_for_load(
-                    sd, policy, slice_policy_head_to_model=_slice
-                ),
+                utilities.prepare_ppo_policy_state_dict_for_load(sd, policy, slice_policy_head_to_model=_slice),
                 strict=True,
             )
             uncompiled_local.load_state_dict(
-                utilities.prepare_ppo_policy_state_dict_for_load(
-                    sd, uncompiled_local, slice_policy_head_to_model=_slice
-                ),
+                utilities.prepare_ppo_policy_state_dict_for_load(sd, uncompiled_local, slice_policy_head_to_model=_slice),
                 strict=True,
             )
             loaded_from_file = True
-            print("[OK] PPO: loaded weights1.torch")
+            print("[OK] GRPO: loaded weights1.torch")
     except Exception as e:
-        print(f"[INFO] PPO: no usable checkpoint ({e}); will align to shared init from train.py")
+        print(f"[INFO] GRPO: no usable checkpoint ({e}); will align to shared init from train.py")
 
-    # Collectors read `shared_state_dict` from the parent-built network before learner starts.
-    # Without this, learner would use a new random init and overwrite shared → on-policy mismatch.
     if not loaded_from_file:
         with shared_network_lock:
             uncompiled_local.load_state_dict(uncompiled_shared_network.state_dict())
 
     with shared_network_lock:
         uncompiled_shared_network.load_state_dict(uncompiled_local.state_dict())
+
+    ref_policy = copy.deepcopy(uncompiled_local).eval()
+    for p in ref_policy.parameters():
+        p.requires_grad = False
 
     accumulated_stats: defaultdict[str, Any] = defaultdict(int)
     accumulated_stats["alltime_min_ms"] = {}
@@ -91,9 +85,9 @@ def learner_ppo_process_fn(
         loaded = joblib.load(save_dir / "accumulated_stats.joblib")
         accumulated_stats.update(loaded)
         shared_steps.value = int(accumulated_stats.get("cumul_number_frames_played", 0))
-        print(f"[OK] PPO: resumed stats frames={shared_steps.value:,}")
+        print(f"[OK] GRPO: resumed stats frames={shared_steps.value:,}")
     except Exception:
-        print("[INFO] PPO: fresh accumulated_stats")
+        print("[INFO] GRPO: fresh accumulated_stats")
 
     if "cumul_training_hours" not in accumulated_stats:
         accumulated_stats["cumul_training_hours"] = 0.0
@@ -104,7 +98,6 @@ def learner_ppo_process_fn(
 
     frames_at_last_periodic_save = int(accumulated_stats.get("cumul_number_frames_played", 0))
 
-    # Fusion: start from full trainability, then apply ``nn.*.freeze``.
     if cfg.transformers.fusion_mode != "none":
         utilities.enable_all_parameters_trainable(uncompiled_local)
 
@@ -115,10 +108,7 @@ def learner_ppo_process_fn(
     n_p = apply_frozen_prefixes(policy, freeze_pfx)
     if freeze_pfx and (n_u or n_p):
         active = prefixes_that_match_module(uncompiled_local, freeze_pfx)
-        print(
-            f"[OK] PPO parameter freeze: {n_u} (uncompiled) / {n_p} (policy) tensors "
-            f"— active prefixes: {active}"
-        )
+        print(f"[OK] GRPO parameter freeze: {n_u} / {n_p} tensors — prefixes: {active}")
 
     optimizer = torch.optim.RAdam(
         [p for p in policy.parameters() if p.requires_grad],
@@ -131,7 +121,7 @@ def learner_ppo_process_fn(
     try:
         optimizer.load_state_dict(torch.load(save_dir / "optimizer1.torch", weights_only=False))
         scaler.load_state_dict(torch.load(save_dir / "scaler.torch", weights_only=False))
-        print("[OK] PPO: loaded optimizer/scaler")
+        print("[OK] GRPO: loaded optimizer/scaler")
     except Exception:
         pass
 
@@ -141,17 +131,11 @@ def learner_ppo_process_fn(
     rollout_queue_readers = [q._reader for q in rollout_queues]
     queue_order = list(range(len(rollout_queues)))
 
-    pending: list[dict[str, torch.Tensor]] = []
-    pending_steps = 0
-    # One schedule anchor for the whole mega-batch: cumul frames *before* the first rollout
-    # in this batch. Keeps γ in reward potential folding aligned with GAE γ for this update.
-    pending_sched_step: int | None = None
+    group_batches: list[dict[str, torch.Tensor]] = []
+    sched_step_anchor: int | None = None
     update_count = 0
     previous_alltime_min: dict[str, float] | None = None
-    last_ppo_loss: float | None = None
-    last_ppo_kl: float | None = None
-    last_ppo_clipfrac: float | None = None
-    last_ppo_vf_clipfrac: float | None = None
+    last_loss: float | None = None
     last_lr: float | None = None
 
     policy.train()
@@ -178,8 +162,8 @@ def learner_ppo_process_fn(
             queue_order.append(idx)
 
             n_frames = len(rollout_results.get("frames", []))
-            if pending_steps == 0:
-                pending_sched_step = int(shared_steps.value)
+            if sched_step_anchor is None:
+                sched_step_anchor = int(shared_steps.value)
             accumulated_stats["cumul_number_frames_played"] += n_frames
             shared_steps.value = int(accumulated_stats["cumul_number_frames_played"])
 
@@ -188,11 +172,10 @@ def learner_ppo_process_fn(
                 end_race_stats,
                 cfg,
                 device,
-                pending_sched_step if pending_sched_step is not None else int(shared_steps.value),
+                sched_step_anchor,
             )
             if batch is not None:
-                pending.append(batch)
-                pending_steps += batch["actions"].shape[0]
+                group_batches.append(batch)
 
             if end_race_stats.get("race_time") is not None:
                 rt_ms = float(end_race_stats["race_time"])
@@ -219,107 +202,62 @@ def learner_ppo_process_fn(
                 old_best = accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
                 if rt_ms < old_best:
                     accumulated_stats["alltime_min_ms"][map_name] = rt_ms
-                    race_time_s = rt_ms / 1000.0
-                    race_finished_str = "FINISH" if race_finished else "DNF"
-                    explo_str = "EXPLO" if is_explo else "EVAL"
-                    if old_best < 99999999:
-                        improvement = (old_best - rt_ms) / 1000.0
-                        print(
-                            f"\n>>> NEW RECORD! [{explo_str}] [{race_finished_str}] {map_name:15} "
-                            f"{race_time_s:6.2f}s (improved by {improvement:.3f}s) <<<\n"
-                        )
-                    else:
-                        print(f"\n>>> FIRST FINISH! [{explo_str}] {map_name:15} {race_time_s:6.2f}s <<<\n")
 
-        need = cfg.rollout_steps_per_update
-        if pending_steps < need:
+        if len(group_batches) < group_size:
             time.sleep(0.02)
             continue
 
-        mega = _concat_batches(pending)
-        pending.clear()
-        pending_steps = 0
-        sched_step = pending_sched_step if pending_sched_step is not None else int(shared_steps.value)
-        pending_sched_step = None
+        batches = group_batches[:group_size]
+        group_batches = group_batches[group_size:]
+        sched_step = sched_step_anchor if sched_step_anchor is not None else int(shared_steps.value)
+        sched_step_anchor = None
 
-        rewards = mega["rewards"]
-        dones = mega["dones"]
-        old_vals = mega["old_values"]
-        old_logp = mega["old_logp"]
-        obs_img = mega["obs_img"]
-        obs_fl = mega["obs_float"]
-        actions = mega["actions"]
+        ent_coef = grpo_scheduled_float(cfg, "grpo_ent_coef", "grpo_ent_coef_schedule", sched_step)
+        max_grad_norm = grpo_scheduled_float(cfg, "grpo_max_grad_norm", "grpo_max_grad_norm_schedule", sched_step)
+        ref_kl_coef = grpo_scheduled_float(cfg, "grpo_ref_kl_coef", "grpo_ref_kl_coef_schedule", sched_step)
 
-        gamma_t = scheduled_rollout_shaping_gamma(cfg, sched_step)
-        gae_lambda_t = ppo_scheduled_float(cfg, "gae_lambda", "gae_lambda_schedule", sched_step)
-        ent_coef_t = ppo_scheduled_float(cfg, "ent_coef", "ent_coef_schedule", sched_step)
-        vf_coef_t = ppo_scheduled_float(cfg, "vf_coef", "vf_coef_schedule", sched_step)
-
-        T = rewards.shape[0]
-        next_value = torch.zeros((), device=device, dtype=rewards.dtype)
-        advantages, returns = compute_gae(
-            rewards,
-            old_vals,
-            dones,
-            next_value,
-            gamma_t,
-            gae_lambda_t,
-        )
-        if cfg.normalize_advantages:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        n_mb = max(1, cfg.num_minibatches)
-        mb = max(1, T // n_mb)
-        update_epochs = cfg.update_epochs
+        returns_list = [b["rewards"].sum() for b in batches]
+        returns_t = torch.stack(returns_list)
+        advantages = group_relative_advantages(returns_t, normalize_group)
 
         total_loss_acc = 0.0
-        metrics_acc: dict[str, float] = defaultdict(float)
         opt_steps = 0
 
         for _ in range(update_epochs):
-            idx = torch.randperm(T, device=device)
-            for start in range(0, T, mb):
-                sel = idx[start : start + mb]
-                ob_i = obs_img[sel]
-                of_i = obs_fl[sel]
-                act_i = actions[sel]
-                ol_i = old_logp[sel]
-                adv_i = advantages[sel]
-                ret_i = returns[sel]
-                ov_i = old_vals[sel]
-
-                optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            optimizer.zero_grad(set_to_none=True)
+            traj_logps: list[torch.Tensor] = []
+            ent_list: list[torch.Tensor] = []
+            kl_list: list[torch.Tensor] = []
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                for b in batches:
                     if not hasattr(policy, "evaluate_actions"):
-                        raise RuntimeError("PPO policy must implement evaluate_actions")
-                    logp, ent, vals, _ = policy.evaluate_actions(ob_i, of_i, act_i)
-                    loss, m = ppo_loss_components(
-                        logp,
-                        ol_i,
-                        adv_i,
-                        vals,
-                        ret_i,
-                        ent,
-                        cfg.clip_coef,
-                        vf_coef_t,
-                        ent_coef_t,
-                        old_values=ov_i,
-                        clip_coef_vf=getattr(cfg, "clip_coef_vf", None),
-                    )
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                        raise RuntimeError("GRPO policy must implement evaluate_actions")
+                    logp, ent, _vals, _ = policy.evaluate_actions(b["obs_img"], b["obs_float"], b["actions"])
+                    traj_logps.append(logp.sum())
+                    ent_list.append(ent.mean())
+                    if ref_kl_coef > 0.0:
+                        with torch.no_grad():
+                            logp_r, _, _, _ = ref_policy.evaluate_actions(b["obs_img"], b["obs_float"], b["actions"])
+                        kl_list.append((logp - logp_r.detach()).mean())
 
-                opt_steps += 1
-                total_loss_acc += float(loss.detach())
-                for k, v in m.items():
-                    metrics_acc[k] += float(v.detach())
+                traj_logps_t = torch.stack(traj_logps)
+                loss_pi = grpo_policy_objective(traj_logps_t, advantages)
+                loss = loss_pi - ent_coef * torch.stack(ent_list).mean()
+                if ref_kl_coef > 0.0 and kl_list:
+                    loss = loss + ref_kl_coef * torch.stack(kl_list).mean()
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+
+            opt_steps += 1
+            total_loss_acc += float(loss.detach())
 
         update_count += 1
-        for k in metrics_acc:
-            metrics_acc[k] /= max(1, opt_steps)
+        if update_count % ref_sync_every == 0:
+            ref_policy.load_state_dict(uncompiled_local.state_dict())
 
         lr = utilities.from_exponential_schedule(cfg.lr_schedule, shared_steps.value)
         for pg in optimizer.param_groups:
@@ -329,24 +267,14 @@ def learner_ppo_process_fn(
             uncompiled_shared_network.load_state_dict(uncompiled_local.state_dict())
 
         loss_mean = total_loss_acc / max(1, opt_steps)
-        kl_mean = metrics_acc.get("approx_kl", 0.0)
-        cf_mean = metrics_acc.get("clipfrac", 0.0)
-        vfcf_mean = metrics_acc.get("vf_clipfrac", 0.0)
         gstep_updates = int(shared_steps.value)
-        writer.add_scalar("Training/ppo_loss", loss_mean, gstep_updates)
-        writer.add_scalar("Training/ppo_approx_kl", kl_mean, gstep_updates)
-        writer.add_scalar("Training/ppo_clipfrac", cf_mean, gstep_updates)
-        writer.add_scalar("Training/ppo_vf_clipfrac", vfcf_mean, gstep_updates)
+        writer.add_scalar("Training/grpo_loss", loss_mean, gstep_updates)
         writer.add_scalar("Training/learning_rate", lr, gstep_updates)
-        writer.add_scalar("PPO/gamma", gamma_t, gstep_updates)
-        writer.add_scalar("PPO/gae_lambda", gae_lambda_t, gstep_updates)
-        writer.add_scalar("PPO/ent_coef", ent_coef_t, gstep_updates)
-        writer.add_scalar("PPO/vf_coef", vf_coef_t, gstep_updates)
-        writer.add_scalar("PPO/rollout_size", T, gstep_updates)
-        last_ppo_loss = loss_mean
-        last_ppo_kl = kl_mean
-        last_ppo_clipfrac = cf_mean
-        last_ppo_vf_clipfrac = vfcf_mean
+        writer.add_scalar("GRPO/ent_coef", ent_coef, gstep_updates)
+        writer.add_scalar("GRPO/max_grad_norm", max_grad_norm, gstep_updates)
+        writer.add_scalar("GRPO/ref_kl_coef", ref_kl_coef, gstep_updates)
+        writer.add_scalar("GRPO/group_size", group_size, gstep_updates)
+        last_loss = loss_mean
         last_lr = lr
 
         if time.perf_counter() - time_last_save >= 300:
@@ -387,22 +315,13 @@ def learner_ppo_process_fn(
             utilities.save_ppo_checkpoint(save_dir, policy, optimizer, scaler)
             joblib.dump(dict(accumulated_stats), save_dir / "accumulated_stats.joblib")
 
-            loss_s = f"{last_ppo_loss:.4e}" if last_ppo_loss is not None else "n/a"
-            kl_s = f"{last_ppo_kl:.5f}" if last_ppo_kl is not None else "n/a"
-            cf_s = f"{last_ppo_clipfrac:.4f}" if last_ppo_clipfrac is not None else "n/a"
-            vfcf_s = f"{last_ppo_vf_clipfrac:.4f}" if last_ppo_vf_clipfrac is not None else "n/a"
+            loss_s = f"{last_loss:.4e}" if last_loss is not None else "n/a"
             lr_s = f"{last_lr:.2e}" if last_lr is not None else "n/a"
             print("\n" + "=" * 80)
-            print(f"  PPO TRAINING SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  GRPO TRAINING SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("=" * 80)
             print(f"  Frames played: {accumulated_stats['cumul_number_frames_played']:,}")
-            print(f"  Training hours: {accumulated_stats['cumul_training_hours']:.2f}h")
-            print(f"  Env frames/sec: {env_frames_per_second:.1f}")
-            print(
-                f"  PPO updates: {update_count}  |  last loss: {loss_s}  |  approx_kl: {kl_s}  |  "
-                f"clipfrac: {cf_s}  |  vf_clipfrac: {vfcf_s}"
-            )
-            print(f"  Learning rate: {lr_s}")
+            print(f"  GRPO updates: {update_count}  |  last loss: {loss_s}  |  lr: {lr_s}")
             print("-" * 80)
             print("  BEST TIMES:")
             if accumulated_stats["alltime_min_ms"]:
@@ -413,6 +332,6 @@ def learner_ppo_process_fn(
             else:
                 print("    (no finished race times yet)")
             print("=" * 80 + "\n")
-            print(f"[OK] PPO checkpoint saved (update {update_count}, frames {shared_steps.value:,})")
+            print(f"[OK] GRPO checkpoint saved (update {update_count}, frames {shared_steps.value:,})")
 
         sys.stdout.flush()

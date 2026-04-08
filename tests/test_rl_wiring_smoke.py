@@ -62,6 +62,19 @@ class TestPPOWiringSmoke(unittest.TestCase):
         self.assertIn("vf_clipfrac", metrics)
 
 
+class TestDPOGRPOWiringRegistry(unittest.TestCase):
+    """dpo/grpo keys map to the same module as ppo (no CUDA required)."""
+
+    def test_dpo_grpo_registry_uses_ppo_wiring_module(self):
+        import importlib
+
+        from trackmania_rl.agents.algorithms.registry import get_wiring
+
+        ppo_m = importlib.import_module("trackmania_rl.agents.algorithms.ppo_wiring")
+        self.assertIs(get_wiring("dpo"), ppo_m)
+        self.assertIs(get_wiring("grpo"), ppo_m)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "IQN factory places weights on CUDA")
 class TestRLWiringSmoke(unittest.TestCase):
     def test_get_wiring_iqn_make_network_state_dict(self):

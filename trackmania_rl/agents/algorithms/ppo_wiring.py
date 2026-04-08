@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from config_files.config_loader import get_config
+from trackmania_rl.utilities import is_policy_optimization_algorithm
 from trackmania_rl.agents.policy_models.ppo_actor_critic import make_ppo_network_pair
 
 
@@ -139,14 +140,15 @@ def freeze_prefixes_from_config(cfg):
 
 
 def warmup_compile(config) -> None:
-    if getattr(config, "algorithm", "iqn") != "ppo":
+    if not is_policy_optimization_algorithm(getattr(config, "algorithm", "iqn")):
         return
     if not config.use_jit or (
         config.transformers.fusion_mode == "none"
         and (config.vis.transformer is not None and config.vis.transformer.use_hf_backbone)
     ):
         return
-    print("\n[INFO] PPO: optional torch.compile warmup (backbone)...")
+    alg = getattr(config, "algorithm", "ppo")
+    print(f"\n[INFO] [{alg}] optional torch.compile warmup (backbone)...")
     c = get_config()
     net, _ = make_network(jit=True, is_inference=False)
     net.train()
@@ -154,4 +156,4 @@ def warmup_compile(config) -> None:
     fl = torch.zeros((1, c.float_input_dim), device="cuda", dtype=torch.float32)
     for _ in range(2):
         net(img, fl)
-    print("[OK] PPO warmup done.\n")
+    print(f"[OK] [{alg}] torch.compile warmup done.\n")

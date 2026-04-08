@@ -903,20 +903,22 @@ Run Identification
    **Which RL algorithm / wiring to run**
 
    - ``iqn`` — Off-policy IQN (default): replay buffer, target network, two weight files. Exploration uses ``exploration.*`` schedules.
-   - ``ppo`` — On-policy PPO with actor-critic: no replay in the learner, no ``weights2.torch``. Stochastic policy from the network; collectors skip IQN ε schedules. Hyperparameters under ``ppo:`` (flat: ``get_config().gamma`` ← ``ppo.gamma``). Network routing: ``nn.fusion_mode`` + ``nn.vis`` + ``nn.float`` + ``nn.encoder`` (see :ref:`nn-yaml-reference`); flat ``get_config().transformers`` / ``get_config().fusion`` mirror ``NnConfig.to_multimodal()`` (``fusion_mode``, ``encoder.transformer``, ``init_from_pretrained``). See :ref:`ppo-config`.
+   - ``ppo`` — On-policy PPO with actor-critic: no replay in the learner, no ``weights2.torch``. Stochastic policy from the network; collectors skip IQN ε schedules. PPO-specific loss hyperparameters under ``ppo:``; discount :math:`\gamma` for **rollout reward shaping** and **GAE** is configured under ``training.policy_rollout_gamma`` / ``training.policy_rollout_gamma_schedule`` (preferred) or legacy ``ppo.gamma`` / ``ppo.ppo_gamma_schedule``. Network routing: ``nn.fusion_mode`` + ``nn.vis`` + ``nn.float`` + ``nn.encoder`` (see :ref:`nn-yaml-reference`). See :ref:`ppo-config`. **Diagrams:** :doc:`models/ppo_architecture`.
+   - ``dpo`` — Direct preference optimization: same actor-critic stack and collector contract as PPO (stochastic policy, ``weights1.torch`` only). The learner forms preference pairs from an online buffer and/or offline JSONL (see :ref:`dpo-config`). Hyperparameters under ``dpo:`` with a ``dpo_*`` prefix. Per-step rollout rewards use the same ``training.policy_rollout_gamma*`` builder as PPO (no PPO loss). **Network / collector diagrams (shared with PPO):** :doc:`models/ppo_architecture`.
+   - ``grpo`` — Group relative policy optimization: same wiring as PPO; the learner waits for ``grpo_group_size`` rollouts, centers returns within each group as advantages, and optimizes the policy (optional KL to a periodic reference). Hyperparameters under ``grpo:`` with ``grpo_*`` prefix (see :ref:`grpo-config`). Rollout rewards use ``training.policy_rollout_gamma*`` (no PPO loss). **Diagrams:** :doc:`models/grpo_architecture` (training); actor-critic topology in :doc:`models/ppo_architecture`.
 
 .. _ppo-config:
 
 PPO configuration (``ppo:``)
 ------------------------------
 
-Used only when ``training.algorithm: ppo``. The IQN learner and replay buffer are not used; ``memory.*`` / n-step / priority settings have no effect on the PPO path.
+The **PPO clipped objective** runs only when ``training.algorithm: ppo``. **GAE** (with :math:`\lambda` from ``ppo:``) runs only for PPO; **discount :math:`\gamma` for GAE** is the same scalar/schedule as for rollout reward shaping: ``training.policy_rollout_gamma`` / ``training.policy_rollout_gamma_schedule`` when set, else legacy ``ppo.gamma`` / ``ppo.ppo_gamma_schedule``. When ``algorithm`` is ``dpo`` or ``grpo``, only the shared rollout builder uses that :math:`\gamma` (no GAE, no PPO clip). The IQN learner and replay buffer are not used for ``ppo``, ``dpo``, or ``grpo``; ``memory.*`` / n-step / priority settings have no effect on those paths.
 
-For diagrams of the actor-critic (CNN and optional HF backbone), see :doc:`models/ppo_architecture`.
+For **actor-critic topology** (CNN, optional HF backbone, multimodal fusion), see :doc:`models/ppo_architecture`. For the **GRPO** learner (grouped rollouts, advantages, loss), see :doc:`models/grpo_architecture`.
 
    Reference YAML: ``config_files/rl/config_ppo.yaml`` (general). Narrower baselines: ``config_ppo_cnn_mlp.yaml`` (CNN + float MLP only, ``nn.fusion_mode: none``), ``config_ppo_transformer.yaml`` (``post_concat`` + HF vision + HF fusion encoder), ``config_ppo_post_concat_cnn_tf.yaml`` (``post_concat`` + CNN vision + native fusion transformer). Those files trim IQN-only keys from ``training:`` (e.g. no ``batch_size``, ``gamma_schedule``, replay/pretrain paths). The shared ``nn.decoder`` / ``nn.iqn`` blocks remain in the schema for parity with IQN configs but are unused by the PPO forward path.
 
-**Flat access:** keys under ``ppo:`` are exposed on ``get_config()`` without a ``.ppo`` prefix (e.g. ``cfg.gamma`` is ``ppo.gamma`` in YAML).
+**Flat access:** keys under ``ppo:`` are exposed on ``get_config()`` without a ``.ppo`` prefix (e.g. ``cfg.clip_coef`` ← ``ppo.clip_coef``). Rollout :math:`\gamma` flat names: ``cfg.policy_rollout_gamma``, ``cfg.policy_rollout_gamma_schedule`` (from ``training:``).
 
 **Checkpoints**
 
@@ -928,7 +930,7 @@ For diagrams of the actor-critic (CNN and optional HF backbone), see :doc:`model
    Total number of **environment steps** the learner waits for (summed over all rollout queues) before running one PPO update. Collectors push variable-length rollouts; the learner concatenates them until at least this many steps are available, then trains and clears the buffer.
 
 ``gamma`` (float)
-   Discount factor :math:`\gamma` for rewards and GAE bootstrap (see ``compute_gae`` in ``trackmania_rl/agents/policy_optimization/ppo.py``).
+   **Legacy** fallback discount for on-policy rollout reward shaping and PPO GAE when ``training.policy_rollout_gamma`` / ``training.policy_rollout_gamma_schedule`` are unset. Prefer ``training.policy_rollout_gamma*`` for clarity (see ``scheduled_rollout_shaping_gamma`` in ``trackmania_rl/multiprocess/policy_rollout_batch.py``).
 
 ``gae_lambda`` (float)
    GAE :math:`\lambda` for advantage estimation (bias/variance tradeoff).
@@ -969,12 +971,12 @@ For diagrams of the actor-critic (CNN and optional HF backbone), see :doc:`model
 
    If a schedule key is **omitted**, the scalar above is used for all time (equivalent to a single knot ``[[0, scalar]]``).
 
-   - ``ppo_gamma_schedule`` — discount :math:`\gamma` for **dense reward potential folding** and **GAE**. For IQN, the analogous schedule is ``training.gamma_schedule`` (different semantics); do not confuse the two.
+   - ``ppo_gamma_schedule`` — **legacy** piecewise :math:`\gamma` for rollout shaping + GAE when ``training.policy_rollout_gamma_schedule`` is omitted. Prefer ``training.policy_rollout_gamma_schedule``.
    - ``gae_lambda_schedule`` — GAE :math:`\lambda` per frame index.
    - ``ent_coef_schedule`` — entropy bonus coefficient in the PPO loss.
    - ``vf_coef_schedule`` — value-loss coefficient.
 
-   Flat access: ``get_config().ppo_gamma_schedule``, ``get_config().ent_coef_schedule``, etc. (YAML still under ``ppo:``).
+   Flat access: ``get_config().gae_lambda_schedule``, ``get_config().ent_coef_schedule``, etc. (YAML under ``ppo:``). Rollout :math:`\gamma` schedules: ``get_config().policy_rollout_gamma_schedule`` (``training:``).
 
 **``nn.vis`` (image branch)**
 
@@ -1007,9 +1009,67 @@ For diagrams of the actor-critic (CNN and optional HF backbone), see :doc:`model
 
 **Pretrain / IQN-only scripts**
 
-   Encoder injection and BC-to-IQN helpers under ``scripts/`` apply to IQN. With ``algorithm: ppo``, ``train.py`` warns if IQN-only pretrain paths are set.
+   Encoder injection and BC-to-IQN helpers under ``scripts/`` apply to IQN. With ``algorithm`` in ``ppo``, ``dpo``, or ``grpo``, ``train.py`` warns if IQN-only pretrain paths are set.
 
    **Freezing** after loading pretrained weights is configured under ``nn`` (``vis.freeze``, ``decoder.advantage.freeze``, …), not under top-level ``training:``; see :ref:`nn-rl-parameter-freeze`.
+
+.. _dpo-config:
+
+DPO configuration (``dpo:``)
+----------------------------
+
+Used when ``training.algorithm: dpo``. Same policy network and checkpoint layout as PPO (see :doc:`models/ppo_architecture` for Variants A/B/C, process stack, and rollout-queue payload shared with DPO). A frozen **reference** policy :math:`\pi_{\mathrm{ref}}` is kept in memory; the DPO loss uses trajectory-level log-probability gaps :math:`\log\pi_\theta - \log\pi_{\mathrm{ref}}` for the chosen vs rejected trajectory. Class ``DPOConfig`` lives in ``config_files/config_schema.py``.
+
+**Flat access:** keys under ``dpo:`` are exposed on ``get_config()`` with the ``dpo_*`` prefix (e.g. ``cfg.dpo_beta``), so they do not collide with ``ppo:`` scalars.
+
+**Data**
+
+- ``dpo_data_mode`` — ``online`` | ``offline`` | ``both``. **Online:** each valid on-policy rollout (tensorized like PPO) may be appended to a FIFO buffer of size ``dpo_pair_buffer_max``. When the buffer has at least two entries, the learner picks the rollout with **largest** and **smallest** scalar score, where the score is the **sum of per-step shaped rewards** in that rollout’s tensor batch (same ``rewards`` used in the learner). Those two trajectories become win/lose for one optimization round, then **both are removed** from the buffer. If the best and worst index coincide (e.g. all scores equal), no pair is formed until more rollouts arrive. **Offline:** pairs are read from ``dpo_offline_pairs_jsonl``. **Both:** uses an offline pair when ``len(pair_buffer) < 2`` **or** when ``update_count % 2 == 1`` (odd pair-update index), else tries online pairing from the buffer. Rollouts need not be full track finishes; length is whatever the environment/collector produced, subject to the usual minimum steps for valid tensors.
+- ``dpo_pair_buffer_max`` — maximum **online** rollouts retained in the FIFO buffer for pairing (each slot is one full episode rollout, once successfully converted to policy tensors).
+- ``dpo_offline_pairs_jsonl`` — path to **JSONL**; each line is ``{"chosen": "<path>", "rejected": "<path>"}`` where each path loads a joblib ``tuple`` ``(rollout_results, end_race_stats)`` (same objects as the multiprocess queue). Append lines with ``scripts/dpo_append_offline_pair.py``.
+
+**Loss / optimization**
+
+- ``dpo_beta`` — temperature :math:`\beta` in the DPO preference loss. Optional ``dpo_beta_schedule`` — piecewise-linear vs cumulative env frames (same axis as ``training.lr_schedule``; scaled by ``training.global_schedule_speed``). If omitted, the scalar applies at all times (implicit ``[0, scalar]``).
+- ``dpo_vf_coef`` — weight on auxiliary **MSE** value-head regression to the values stored at collection time (``old_values`` in the rollout tensors). Optional ``dpo_vf_coef_schedule`` (same schedule semantics as ``dpo_beta_schedule``).
+- ``dpo_update_epochs`` — optimizer steps **per trajectory pair**: the learner runs this many forward/backward passes on the **same** win/lose pair before moving on (each pass uses the current policy weights).
+- ``dpo_max_grad_norm`` — argument to ``torch.nn.utils.clip_grad_norm_`` after each backward within that inner loop. Optional ``dpo_max_grad_norm_schedule`` (same linear frame axis).
+- ``dpo_num_minibatches`` — reserved for future within-pair minibatching; the current DPO learner does **not** use it (mirrors PPO/GRPO naming).
+
+**Reference policy**
+
+- ``dpo_ref_sync_every_updates`` — **reference sync period** in **pair updates**: after each successful optimization on one trajectory pair (after all ``dpo_update_epochs`` steps for that pair), the learner increments a counter; every N-th such increment copies the live training weights into ``ref_policy`` (``load_state_dict`` from ``uncompiled_local``), where N is this setting. Smaller N keeps :math:`\pi_{\mathrm{ref}}` closer to :math:`\pi_\theta`; larger N uses a slower-moving reference.
+
+**Reference YAML:** ``config_files/rl/config_dpo.yaml``. Rollout per-step rewards: ``training.policy_rollout_gamma*`` (see ``policy_rollout_gamma`` above).
+
+.. _grpo-config:
+
+GRPO configuration (``grpo:``)
+------------------------------
+
+Used when ``training.algorithm: grpo``. Same network and checkpoints as PPO. The learner waits until it has ``grpo_group_size`` successful tensorized rollouts, forms **group-relative** advantages from each trajectory’s total return, and applies a policy-gradient-style objective plus an entropy bonus. Class ``GRPOConfig`` lives in ``config_files/config_schema.py``. Narrative diagrams and comparison to PPO: :doc:`models/grpo_architecture`.
+
+**Flat access:** ``grpo_*`` on ``get_config()`` (e.g. ``cfg.grpo_group_size``).
+
+**Group / returns**
+
+- ``grpo_group_size`` — number of full rollouts aggregated before one learner update (all must yield valid on-policy tensors).
+- ``grpo_normalize_group`` — ``mean`` subtracts the group mean return from each trajectory; ``mean_std`` additionally divides by the group standard deviation (with a small stabilizer in code).
+
+**Loss / optimization**
+
+- ``grpo_ent_coef`` — entropy bonus coefficient in the GRPO loss. Optional ``grpo_ent_coef_schedule`` — piecewise-linear vs cumulative env frames (same axis as ``training.lr_schedule``; scaled by ``training.global_schedule_speed``). If the schedule is omitted, the scalar applies at all times (implicit ``[0, scalar]``).
+- ``grpo_max_grad_norm`` — argument to ``torch.nn.utils.clip_grad_norm_`` after each backward. Optional ``grpo_max_grad_norm_schedule`` (same schedule semantics).
+- ``grpo_update_epochs`` — passes over the grouped batch per update.
+- ``grpo_num_minibatches`` — reserved for future within-group minibatching; the current GRPO learner does not use it (mirrors PPO/DPO naming).
+
+**Reference policy / KL**
+
+- ``grpo_ref_kl_coef`` — weight on the mean :math:`\log \pi(a|s) - \log \pi_{\mathrm{ref}}(a|s)` term vs frozen ``ref_policy``. Set to ``0`` to disable the KL term entirely (no reference forward passes in the loss).
+- ``grpo_ref_sync_every_updates`` — **reference sync period** in **group updates**: after each group optimization, the learner increments a counter and every N-th update copies the live policy into ``ref_policy`` (``load_state_dict``), where N is this setting. Smaller N keeps the KL reference fresher; larger N uses a slower-moving reference. When ``grpo_ref_kl_coef`` is ``0``, the KL term is disabled; syncs may still run but do not affect the loss.
+- Optional ``grpo_ref_kl_coef_schedule`` — same linear frame axis as the other ``grpo_*_schedule`` fields.
+
+**Reference YAML:** ``config_files/rl/config_grpo.yaml``. Rollout per-step rewards: ``training.policy_rollout_gamma*``.
 
 Schedules
 ---------
@@ -1018,8 +1078,7 @@ All schedules are lists of ``(cumulative_frames, value)`` tuples.
 Values are linearly interpolated between schedule points unless noted otherwise
 (``training.lr_schedule`` uses exponential interpolation in ``from_exponential_schedule``).
 
-**PPO-only schedules** under ``ppo:`` (``ppo_gamma_schedule``, ``gae_lambda_schedule``,
-``ent_coef_schedule``, ``vf_coef_schedule``) use **linear** interpolation; see :ref:`ppo-config`.
+**Piecewise-linear schedules:** ``training.policy_rollout_gamma_schedule`` (on-policy rollout shaping :math:`\gamma`, all of PPO/DPO/GRPO) and, under ``ppo:``, ``gae_lambda_schedule``, ``ent_coef_schedule``, ``vf_coef_schedule`` use **linear** interpolation vs frames; see :ref:`ppo-config`. Under ``dpo:``, ``dpo_beta_schedule``, ``dpo_vf_coef_schedule``, and ``dpo_max_grad_norm_schedule`` use the same linear rule; see :ref:`dpo-config`. Under ``grpo:``, ``grpo_ent_coef_schedule``, ``grpo_max_grad_norm_schedule``, and ``grpo_ref_kl_coef_schedule`` use the same linear rule; see :ref:`grpo-config`. Legacy ``ppo.ppo_gamma_schedule`` applies if ``training.policy_rollout_gamma_schedule`` is unset.
 
 .. py:data:: global_schedule_speed
    :type: float
@@ -1037,8 +1096,10 @@ Values are linearly interpolated between schedule points unless noted otherwise
 
    Useful for adjusting training duration without editing all schedules.
 
-   **Also scaled** (first coordinate of each ``[frame, value]`` pair): ``ppo.ppo_gamma_schedule``,
-   ``ppo.gae_lambda_schedule``, ``ppo.ent_coef_schedule``, ``ppo.vf_coef_schedule`` (see :ref:`ppo-config`).
+   **Also scaled** (first coordinate of each ``[frame, value]`` pair): ``training.policy_rollout_gamma_schedule``,
+   ``ppo.ppo_gamma_schedule`` (legacy), ``ppo.gae_lambda_schedule``, ``ppo.ent_coef_schedule``, ``ppo.vf_coef_schedule`` (see :ref:`ppo-config`),
+   under ``dpo:`` — ``dpo_beta_schedule``, ``dpo_vf_coef_schedule``, ``dpo_max_grad_norm_schedule`` (see :ref:`dpo-config`),
+   and under ``grpo:`` — ``grpo_ent_coef_schedule``, ``grpo_max_grad_norm_schedule``, ``grpo_ref_kl_coef_schedule`` (see :ref:`grpo-config`).
 
 Optimizer
 ---------
@@ -1142,7 +1203,23 @@ Optimizer
    
    **Rationale**: TrackMania benefits from long-term planning. Gamma=1.0 treats all future rewards equally.
 
-   **PPO:** scheduled discount for GAE and reward shaping uses ``ppo.ppo_gamma_schedule`` (see :ref:`ppo-config`). Do not confuse with this ``training.gamma_schedule``, which applies only to the IQN learner.
+   **On-policy algorithms:** rollout reward shaping :math:`\gamma` uses ``training.policy_rollout_gamma_schedule`` (preferred) or legacy ``ppo.ppo_gamma_schedule`` (see :ref:`ppo-config`). **IQN only:** this ``training.gamma_schedule`` is n-step discount — different semantics; do not mix with policy-rollout :math:`\gamma`.
+
+.. py:data:: policy_rollout_gamma
+   :type: float | None
+   :value: None
+
+   **On-policy rollout reward shaping (PPO / DPO / GRPO)**
+
+   Scalar :math:`\gamma` in potential-based folding when building per-step rewards from env rollouts, when ``policy_rollout_gamma_schedule`` is unset and ``ppo.ppo_gamma_schedule`` is unset. If this field is ``null``/omitted, the code uses ``ppo.gamma``. Set explicitly (e.g. ``0.99``) together with ``policy_rollout_gamma_schedule`` for the step-0 anchor when using a schedule.
+
+.. py:data:: policy_rollout_gamma_schedule
+   :type: list | None
+   :value: None
+
+   **Scheduled :math:`\gamma` for on-policy rollout tensors**
+
+   Same ``[[frame, value], ...]`` shape as ``lr_schedule`` knot list; **linear** interpolation; frame counts multiplied by ``global_schedule_speed`` at load. Takes precedence over ``ppo.ppo_gamma_schedule``. Used by ``build_policy_rollout_tensors`` and by PPO GAE (same :math:`\gamma` as shaping).
 
 N-Step Learning
 ---------------

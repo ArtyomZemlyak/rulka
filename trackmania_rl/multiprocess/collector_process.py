@@ -14,7 +14,7 @@ from torch import multiprocessing as mp
 from config_files.config_loader import load_config, set_config, get_config
 from trackmania_rl import utilities
 from trackmania_rl.agents.algorithms import get_wiring
-from trackmania_rl.utilities import set_random_seed
+from trackmania_rl.utilities import is_policy_optimization_algorithm, set_random_seed
 
 
 def collector_process_fn(
@@ -58,7 +58,7 @@ def collector_process_fn(
         w1_path = save_dir / "weights1.torch"
         if w1_path.exists():
             sd = torch.load(f=w1_path, weights_only=False)
-            if config.algorithm == "ppo":
+            if is_policy_optimization_algorithm(config.algorithm):
                 _slice = bool(getattr(config, "pretrain_ppo_policy_slice_head_to_model", False))
                 sd = utilities.prepare_ppo_policy_state_dict_for_load(
                     sd, inference_network, slice_policy_head_to_model=_slice
@@ -89,7 +89,7 @@ def collector_process_fn(
     # ========================================================
     # Training loop
     # ========================================================
-    if config.algorithm == "ppo":
+    if is_policy_optimization_algorithm(config.algorithm):
         inference_network.eval()
     else:
         inference_network.train()
@@ -121,7 +121,7 @@ def collector_process_fn(
     with game_spawning_lock:
         print(f"[Collector {process_number}] Benchmarking/Warmup...")
         for _ in range(5):
-            if config.algorithm == "ppo":
+            if is_policy_optimization_algorithm(config.algorithm):
                 inferer.get_exploration_action(
                     np.random.randint(low=0, high=255, size=(1, config.H_downsized, config.W_downsized), dtype=np.uint8),
                     np.random.rand(config.float_input_dim).astype(np.float32),
@@ -171,7 +171,7 @@ def collector_process_fn(
         map_name, map_path, zone_centers_filename, is_explo, fill_buffer = next_map_tuple
         map_status = "trained" if map_name in set_maps_trained else "blind"
 
-        if config.algorithm != "ppo":
+        if not is_policy_optimization_algorithm(config.algorithm):
             inferer.epsilon = utilities.from_exponential_schedule(config.epsilon_schedule, shared_steps.value)
             inferer.epsilon_boltzmann = utilities.from_exponential_schedule(config.epsilon_boltzmann_schedule, shared_steps.value)
             inferer.tau_epsilon_boltzmann = config.tau_epsilon_boltzmann
@@ -183,7 +183,7 @@ def collector_process_fn(
 
         rollout_start_time = time.perf_counter()
 
-        if config.algorithm != "ppo":
+        if not is_policy_optimization_algorithm(config.algorithm):
             if inference_network.training and not is_explo:
                 inference_network.eval()
             elif is_explo and not inference_network.training:

@@ -6,12 +6,12 @@ Welcome to the TrackMania RL project documentation!
 
 This is a fork and extension of the original `Linesight <https://github.com/pb4git/linesight>`_ project, adapted for reinforcement learning experiments in *Trackmania Nations Forever*.
 
-The project trains an AI agent to drive in *Trackmania Nations Forever* using reinforcement learning. The default stack is **IQN** (Implicit Quantile Networks, distributional off-policy RL). A second stack is **PPO** (on-policy actor-critic). Both can use a **CNN** image head, **Hugging Face** vision, or a shared **native multimodal fusion** graph (``nn.fusion_mode``); see :doc:`models/index` and :doc:`configuration_guide`.
+The project trains an AI agent to drive in *Trackmania Nations Forever* using reinforcement learning. The default stack is **IQN** (Implicit Quantile Networks, distributional off-policy RL). **Policy optimization** alternatives are **PPO** (on-policy clipped actor-critic), **DPO** (preference-based, same network as PPO), and **GRPO** (group-relative returns; see :doc:`models/grpo_architecture`). All can use a **CNN** image head, **Hugging Face** vision, or a shared **native multimodal fusion** graph (``nn.fusion_mode``); see :doc:`models/index` and :doc:`configuration_guide`.
 
 **Key Features:**
 
 - Distributional RL with IQN (Implicit Quantile Network), default
-- Optional on-policy **PPO** with shared TM rollout pipeline (see :ref:`ppo-config` in :doc:`configuration_guide`)
+- Optional on-policy **PPO**, **DPO**, and **GRPO** with the shared TM rollout pipeline and PPO-style actor-critic (see :ref:`ppo-config`, :ref:`dpo-config`, :ref:`grpo-config` in :doc:`configuration_guide`; architecture diagrams under :doc:`models/index`)
 - Modular configuration system for easy experimentation
 - Support for multiple parallel game instances
 - Hot-reloadable training parameters
