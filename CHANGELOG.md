@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.8.0] - 2026-04-08
+
+### DPO / GRPO training
+- Added `training.algorithm` values `dpo` and `grpo` with the same actor-critic wiring as PPO (`ppo_wiring`), shared rollout contract, and `weights1.torch` checkpoints.
+- New modules: `trackmania_rl/agents/policy_optimization/dpo.py`, `grpo.py`; learners `learner_dpo.py`, `learner_grpo.py`; shared `policy_rollout_batch.py` for PPO/DPO/GRPO tensor builds.
+- Config: `DPOConfig` / `GRPOConfig` on `RulkaConfig`, flat `ConfigView` access, example YAML `config_files/rl/config_dpo.yaml` and `config_grpo.yaml`.
+- Utilities: `POLICY_OPTIMIZATION_ALGORITHMS` / `is_policy_optimization_algorithm` for collector, `train.py`, HF save skip, BC inject into `save/` for the whole policy family.
+- Helper script `scripts/dpo_append_offline_pair.py` for offline DPO JSONL lines.
+- Docs: README, `config_files/README.md`, Sphinx `configuration_guide` / `project_structure` updated for algorithms and new sections.
+
 ## [1.7.0] - 2026-03-31
 
 ### RL architecture and training pipeline

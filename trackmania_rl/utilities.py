@@ -18,6 +18,14 @@ from prettytable import PrettyTable
 
 from trackmania_rl import run_to_video
 
+POLICY_OPTIMIZATION_ALGORITHMS = frozenset({"ppo", "dpo", "grpo"})
+
+
+def is_policy_optimization_algorithm(algorithm: str | None) -> bool:
+    """PPO family: same actor-critic wiring, checkpoint layout, and collector rollout contract."""
+    return (algorithm or "") in POLICY_OPTIMIZATION_ALGORITHMS
+
+
 _transformers_load_report_quiet: bool = False
 
 _log = logging.getLogger(__name__)
@@ -106,7 +114,7 @@ def skip_multimodal_fusion_hub_init_from_pretrained(cfg) -> bool:
 
     Avoids loading a second Rulka ``save_pretrained`` tree on top of ``weights1.torch`` / BC inject.
     """
-    if getattr(cfg, "algorithm", "") != "ppo":
+    if not is_policy_optimization_algorithm(getattr(cfg, "algorithm", "")):
         return False
     tr = getattr(cfg, "transformers", None)
     if tr is None or not str(getattr(tr, "init_from_pretrained", "") or "").strip():
@@ -265,6 +273,44 @@ def from_staircase_schedule(schedule, current_step):
     schedule = sorted(schedule, key=lambda p: p[0])  # Sort by step in case it was not defined in sorted order
     assert schedule[0][0] == 0
     return next((p for p in reversed(schedule) if p[0] <= current_step))[1]
+
+
+def tensorboard_suffixes_from_schedule(schedule) -> list[str]:
+    """Suffix strings (2nd column) from ``tensorboard_suffix_schedule`` → log subdir names ``run_name + suffix``."""
+    if not schedule:
+        return [""]
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in schedule:
+        if len(row) >= 2:
+            s = row[1]
+            if not isinstance(s, str):
+                s = str(s)
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out if out else [""]
+
+
+def clear_tensorboard_run_directories(tensorboard_base_dir: Path, run_name: str, suffix_schedule) -> None:
+    """
+    Remove TensorBoard event directories for this logical run (all suffix segments).
+
+    PyTorch SummaryWriter appends to existing ``events.out.tfevents.*`` in the folder; deleting only
+    ``save/<run_name>`` leaves stale logs, so scalars show two y-values at the same step.
+    Call only when starting training without a weight checkpoint (not when resuming).
+    """
+    base = Path(tensorboard_base_dir)
+    if not base.is_dir():
+        return
+    removed: list[str] = []
+    for suf in tensorboard_suffixes_from_schedule(suffix_schedule):
+        d = base / (run_name + suf)
+        if d.is_dir():
+            shutil.rmtree(d)
+            removed.append(d.name)
+    if removed:
+        print(f"[INFO] Fresh run: removed stale TensorBoard dirs: {', '.join(removed)}")
 
 
 def count_parameters(model):
@@ -503,7 +549,7 @@ def prepare_ppo_policy_state_dict_for_load(
 
 def _save_ppo_hf_transformer_artifacts(checkpoint_dir: Path, policy: torch.nn.Module, cfg) -> None:
     """Write Hugging Face-style dirs beside weights (vision backbone + fusion policy)."""
-    if getattr(cfg, "algorithm", "") != "ppo":
+    if not is_policy_optimization_algorithm(getattr(cfg, "algorithm", "")):
         return
     inner = _ppo_policy_inner(policy)
     if (

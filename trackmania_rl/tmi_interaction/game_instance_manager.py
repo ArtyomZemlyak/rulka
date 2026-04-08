@@ -38,6 +38,7 @@ import psutil
 
 from config_files.config_loader import get_config
 from trackmania_rl import map_loader
+from trackmania_rl.utilities import is_policy_optimization_algorithm
 
 _log = logging.getLogger(__name__)
 from trackmania_rl.float_inputs import (
@@ -633,7 +634,7 @@ class GameInstanceManager:
             "state_float": [],
             "furthest_zone_idx": 0,
         }
-        if get_config().algorithm == "ppo":
+        if is_policy_optimization_algorithm(get_config().algorithm):
             rollout_results["ppo_log_probs"] = []
             rollout_results["ppo_values"] = []
 

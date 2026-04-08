@@ -39,4 +39,5 @@ Nadeo.ini
 
 # Documentation build artifacts
 /docs/build/
+/docs/_build/
 /docs/source/_build/

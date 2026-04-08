@@ -11,8 +11,10 @@ import yaml
 
 from config_files.config_schema import (
     BTRConfig,
+    DPOConfig,
     EnvironmentConfig,
     ExplorationConfig,
+    GRPOConfig,
     InputAction,
     InputsConfig,
     MapCycleConfig,
@@ -246,6 +248,11 @@ class ConfigView:
         # PPO (flat: clip_coef, gamma, … — unique names vs other sections; multimodal stack is YAML ``nn`` / cfg.transformers)
         if hasattr(m.ppo, name):
             return getattr(m.ppo, name)
+        # DPO / GRPO (YAML ``dpo:`` / ``grpo:``; avoid field names that shadow ``training`` / ``memory`` / …)
+        if hasattr(m.dpo, name):
+            return getattr(m.dpo, name)
+        if hasattr(m.grpo, name):
+            return getattr(m.grpo, name)
         # BTR
         if hasattr(m.btr, name):
             return getattr(m.btr, name)
@@ -265,7 +272,7 @@ def load_config(config_path: Path | str) -> ConfigView:
     speed = data.get("training", {}).get("global_schedule_speed", 1)
 
     # Apply global_schedule_speed to schedules
-    for key in ("lr_schedule", "tensorboard_suffix_schedule"):
+    for key in ("lr_schedule", "tensorboard_suffix_schedule", "policy_rollout_gamma_schedule"):
         if key in data.get("training", {}):
             data["training"][key] = _apply_schedule_speed(
                 data["training"][key], speed
@@ -297,6 +304,20 @@ def load_config(config_path: Path | str) -> ConfigView:
     ):
         if key in data.get("ppo", {}):
             data["ppo"][key] = _apply_schedule_speed(data["ppo"][key], speed)
+    for key in (
+        "grpo_ent_coef_schedule",
+        "grpo_max_grad_norm_schedule",
+        "grpo_ref_kl_coef_schedule",
+    ):
+        if key in data.get("grpo", {}):
+            data["grpo"][key] = _apply_schedule_speed(data["grpo"][key], speed)
+    for key in (
+        "dpo_beta_schedule",
+        "dpo_vf_coef_schedule",
+        "dpo_max_grad_norm_schedule",
+    ):
+        if key in data.get("dpo", {}):
+            data["dpo"][key] = _apply_schedule_speed(data["dpo"][key], speed)
     if "memory_size_schedule" in data.get("memory", {}):
         data["memory"]["memory_size_schedule"] = _apply_schedule_speed(
             data["memory"]["memory_size_schedule"], speed
@@ -358,9 +379,9 @@ def load_config(config_path: Path | str) -> ConfigView:
 
     btr = BTRConfig.model_validate(data.get("btr", {}))
     ppo = PPOConfig.model_validate(data.get("ppo", {}))
+    dpo = DPOConfig.model_validate(data.get("dpo", {}))
+    grpo = GRPOConfig.model_validate(data.get("grpo", {}))
     user = UserConfig()
-
-    from config_files.config_schema import RulkaConfig
 
     cfg = RulkaConfig(
         environment=env,
@@ -376,6 +397,8 @@ def load_config(config_path: Path | str) -> ConfigView:
         user=user,
         btr=btr,
         ppo=ppo,
+        dpo=dpo,
+        grpo=grpo,
     )
     return ConfigView(cfg)
 

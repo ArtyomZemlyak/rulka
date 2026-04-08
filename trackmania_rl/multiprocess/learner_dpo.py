@@ -1,41 +1,53 @@
-"""PPO learner: on-policy rollout aggregation, GAE, clipped objective (no IQN replay)."""
+"""DPO learner: trajectory preferences vs reference policy; online pairing + optional offline JSONL."""
 
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import time
 from collections import defaultdict
 from datetime import datetime
 from multiprocessing.connection import wait
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import joblib
-import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
 from config_files.config_loader import get_config
 from trackmania_rl import utilities
 from trackmania_rl.agents.algorithms import get_wiring
-from trackmania_rl.agents.policy_optimization.ppo import compute_gae, ppo_loss_components
-from trackmania_rl.multiprocess.policy_rollout_batch import (
-    build_policy_rollout_tensors,
-    ppo_scheduled_float,
-    scheduled_rollout_shaping_gamma,
-)
+from trackmania_rl.agents.policy_optimization.dpo import dpo_preference_loss, sum_log_probs_evaluate
+from trackmania_rl.multiprocess.policy_rollout_batch import build_policy_rollout_tensors, dpo_scheduled_float
 
 
-def _concat_batches(parts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    out: dict[str, torch.Tensor] = {}
-    for k in parts[0]:
-        out[k] = torch.cat([p[k] for p in parts], dim=0)
-    return out
+def _align_trajectory_batches(
+    bw: dict[str, torch.Tensor], bl: dict[str, torch.Tensor]
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    n = min(bw["actions"].shape[0], bl["actions"].shape[0])
+    return {k: v[:n] for k, v in bw.items()}, {k: v[:n] for k, v in bl.items()}
 
 
-def learner_ppo_process_fn(
+def _offline_pair_paths_iterator(jsonl_path: Path) -> Iterator[tuple[Path, Path]]:
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            yield Path(rec["chosen"]), Path(rec["rejected"])
+
+
+def _resolve_path(p: Path, base_dir: Path) -> Path:
+    return p if p.is_absolute() else (base_dir / p)
+
+
+def learner_dpo_process_fn(
     rollout_queues,
     uncompiled_shared_network,
     shared_network_lock,
@@ -48,6 +60,12 @@ def learner_ppo_process_fn(
     wiring = get_wiring()
     device = torch.device("cuda")
 
+    ref_sync_every = max(1, int(cfg.dpo_ref_sync_every_updates))
+    pair_buffer_max = max(2, int(cfg.dpo_pair_buffer_max))
+    data_mode = str(cfg.dpo_data_mode)
+    offline_jsonl = getattr(cfg, "dpo_offline_pairs_jsonl", None) or None
+    update_epochs = max(1, int(cfg.dpo_update_epochs))
+
     policy, uncompiled_local = wiring.make_network(cfg.use_jit, is_inference=False)
 
     w1_path = save_dir / "weights1.torch"
@@ -57,30 +75,28 @@ def learner_ppo_process_fn(
             sd = torch.load(f=w1_path, weights_only=False)
             _slice = bool(getattr(cfg, "pretrain_ppo_policy_slice_head_to_model", False))
             policy.load_state_dict(
-                utilities.prepare_ppo_policy_state_dict_for_load(
-                    sd, policy, slice_policy_head_to_model=_slice
-                ),
+                utilities.prepare_ppo_policy_state_dict_for_load(sd, policy, slice_policy_head_to_model=_slice),
                 strict=True,
             )
             uncompiled_local.load_state_dict(
-                utilities.prepare_ppo_policy_state_dict_for_load(
-                    sd, uncompiled_local, slice_policy_head_to_model=_slice
-                ),
+                utilities.prepare_ppo_policy_state_dict_for_load(sd, uncompiled_local, slice_policy_head_to_model=_slice),
                 strict=True,
             )
             loaded_from_file = True
-            print("[OK] PPO: loaded weights1.torch")
+            print("[OK] DPO: loaded weights1.torch")
     except Exception as e:
-        print(f"[INFO] PPO: no usable checkpoint ({e}); will align to shared init from train.py")
+        print(f"[INFO] DPO: no usable checkpoint ({e}); will align to shared init from train.py")
 
-    # Collectors read `shared_state_dict` from the parent-built network before learner starts.
-    # Without this, learner would use a new random init and overwrite shared → on-policy mismatch.
     if not loaded_from_file:
         with shared_network_lock:
             uncompiled_local.load_state_dict(uncompiled_shared_network.state_dict())
 
     with shared_network_lock:
         uncompiled_shared_network.load_state_dict(uncompiled_local.state_dict())
+
+    ref_policy = copy.deepcopy(uncompiled_local).eval()
+    for p in ref_policy.parameters():
+        p.requires_grad = False
 
     accumulated_stats: defaultdict[str, Any] = defaultdict(int)
     accumulated_stats["alltime_min_ms"] = {}
@@ -91,9 +107,9 @@ def learner_ppo_process_fn(
         loaded = joblib.load(save_dir / "accumulated_stats.joblib")
         accumulated_stats.update(loaded)
         shared_steps.value = int(accumulated_stats.get("cumul_number_frames_played", 0))
-        print(f"[OK] PPO: resumed stats frames={shared_steps.value:,}")
+        print(f"[OK] DPO: resumed stats frames={shared_steps.value:,}")
     except Exception:
-        print("[INFO] PPO: fresh accumulated_stats")
+        print("[INFO] DPO: fresh accumulated_stats")
 
     if "cumul_training_hours" not in accumulated_stats:
         accumulated_stats["cumul_training_hours"] = 0.0
@@ -104,7 +120,6 @@ def learner_ppo_process_fn(
 
     frames_at_last_periodic_save = int(accumulated_stats.get("cumul_number_frames_played", 0))
 
-    # Fusion: start from full trainability, then apply ``nn.*.freeze``.
     if cfg.transformers.fusion_mode != "none":
         utilities.enable_all_parameters_trainable(uncompiled_local)
 
@@ -115,10 +130,7 @@ def learner_ppo_process_fn(
     n_p = apply_frozen_prefixes(policy, freeze_pfx)
     if freeze_pfx and (n_u or n_p):
         active = prefixes_that_match_module(uncompiled_local, freeze_pfx)
-        print(
-            f"[OK] PPO parameter freeze: {n_u} (uncompiled) / {n_p} (policy) tensors "
-            f"— active prefixes: {active}"
-        )
+        print(f"[OK] DPO parameter freeze: {n_u} / {n_p} tensors — prefixes: {active}")
 
     optimizer = torch.optim.RAdam(
         [p for p in policy.parameters() if p.requires_grad],
@@ -131,7 +143,7 @@ def learner_ppo_process_fn(
     try:
         optimizer.load_state_dict(torch.load(save_dir / "optimizer1.torch", weights_only=False))
         scaler.load_state_dict(torch.load(save_dir / "scaler.torch", weights_only=False))
-        print("[OK] PPO: loaded optimizer/scaler")
+        print("[OK] DPO: loaded optimizer/scaler")
     except Exception:
         pass
 
@@ -141,18 +153,28 @@ def learner_ppo_process_fn(
     rollout_queue_readers = [q._reader for q in rollout_queues]
     queue_order = list(range(len(rollout_queues)))
 
-    pending: list[dict[str, torch.Tensor]] = []
-    pending_steps = 0
-    # One schedule anchor for the whole mega-batch: cumul frames *before* the first rollout
-    # in this batch. Keeps γ in reward potential folding aligned with GAE γ for this update.
-    pending_sched_step: int | None = None
+    pair_buffer: list[dict[str, Any]] = []
+    sched_step_anchor: int | None = None
     update_count = 0
     previous_alltime_min: dict[str, float] | None = None
-    last_ppo_loss: float | None = None
-    last_ppo_kl: float | None = None
-    last_ppo_clipfrac: float | None = None
-    last_ppo_vf_clipfrac: float | None = None
+    last_loss: float | None = None
     last_lr: float | None = None
+    offline_cycle: list[tuple[Path, Path]] = []
+
+    if offline_jsonl and data_mode in ("offline", "both"):
+        jp = Path(offline_jsonl)
+        if not jp.is_absolute():
+            jp = base_dir / jp
+        if jp.is_file():
+            offline_cycle = list(_offline_pair_paths_iterator(jp))
+            print(f"[OK] DPO: loaded {len(offline_cycle)} offline pair paths from {jp}")
+        else:
+            print(f"[WARN] DPO: offline JSONL not found: {jp}")
+    if data_mode == "offline" and not offline_cycle:
+        print(
+            "[ERROR] DPO: dpo_data_mode=offline but no offline pairs loaded "
+            "(missing/empty dpo_offline_pairs_jsonl). Learner will idle."
+        )
 
     policy.train()
     while True:
@@ -178,21 +200,18 @@ def learner_ppo_process_fn(
             queue_order.append(idx)
 
             n_frames = len(rollout_results.get("frames", []))
-            if pending_steps == 0:
-                pending_sched_step = int(shared_steps.value)
+            if sched_step_anchor is None:
+                sched_step_anchor = int(shared_steps.value)
             accumulated_stats["cumul_number_frames_played"] += n_frames
             shared_steps.value = int(accumulated_stats["cumul_number_frames_played"])
 
-            batch = build_policy_rollout_tensors(
-                rollout_results,
-                end_race_stats,
-                cfg,
-                device,
-                pending_sched_step if pending_sched_step is not None else int(shared_steps.value),
-            )
-            if batch is not None:
-                pending.append(batch)
-                pending_steps += batch["actions"].shape[0]
+            step_s = sched_step_anchor
+            batch = build_policy_rollout_tensors(rollout_results, end_race_stats, cfg, device, step_s)
+            if batch is not None and data_mode in ("online", "both"):
+                score = float(batch["rewards"].sum().item())
+                pair_buffer.append({"batch": batch, "score": score})
+                while len(pair_buffer) > pair_buffer_max:
+                    pair_buffer.pop(0)
 
             if end_race_stats.get("race_time") is not None:
                 rt_ms = float(end_race_stats["race_time"])
@@ -219,107 +238,84 @@ def learner_ppo_process_fn(
                 old_best = accumulated_stats["alltime_min_ms"].get(map_name, 99999999999)
                 if rt_ms < old_best:
                     accumulated_stats["alltime_min_ms"][map_name] = rt_ms
-                    race_time_s = rt_ms / 1000.0
-                    race_finished_str = "FINISH" if race_finished else "DNF"
-                    explo_str = "EXPLO" if is_explo else "EVAL"
-                    if old_best < 99999999:
-                        improvement = (old_best - rt_ms) / 1000.0
-                        print(
-                            f"\n>>> NEW RECORD! [{explo_str}] [{race_finished_str}] {map_name:15} "
-                            f"{race_time_s:6.2f}s (improved by {improvement:.3f}s) <<<\n"
-                        )
-                    else:
-                        print(f"\n>>> FIRST FINISH! [{explo_str}] {map_name:15} {race_time_s:6.2f}s <<<\n")
 
-        need = cfg.rollout_steps_per_update
-        if pending_steps < need:
+        bw: dict[str, torch.Tensor] | None = None
+        bl: dict[str, torch.Tensor] | None = None
+        use_offline = False
+
+        if data_mode == "offline" and offline_cycle:
+            use_offline = True
+        elif data_mode == "both" and offline_cycle and (update_count % 2 == 1 or len(pair_buffer) < 2):
+            use_offline = True
+        elif data_mode == "online" or not offline_cycle:
+            use_offline = False
+
+        if use_offline and offline_cycle:
+            pair_idx = update_count % len(offline_cycle)
+            cp, rp = offline_cycle[pair_idx]
+            cp = _resolve_path(cp, base_dir)
+            rp = _resolve_path(rp, base_dir)
+            try:
+                rw, ew = joblib.load(cp)
+                rl, el = joblib.load(rp)
+                bw = build_policy_rollout_tensors(rw, ew, cfg, device, int(shared_steps.value))
+                bl = build_policy_rollout_tensors(rl, el, cfg, device, int(shared_steps.value))
+            except Exception as e:
+                print(f"[WARN] DPO offline pair load failed: {e}")
+                bw, bl = None, None
+        elif len(pair_buffer) >= 2:
+            scores = [x["score"] for x in pair_buffer]
+            i_best = max(range(len(pair_buffer)), key=lambda i: scores[i])
+            i_worst = min(range(len(pair_buffer)), key=lambda i: scores[i])
+            if i_best != i_worst:
+                b_best = pair_buffer[i_best]["batch"]
+                b_worst = pair_buffer[i_worst]["batch"]
+                for ix in sorted([i_best, i_worst], reverse=True):
+                    pair_buffer.pop(ix)
+                bw, bl = b_best, b_worst
+
+        if bw is None or bl is None:
             time.sleep(0.02)
             continue
 
-        mega = _concat_batches(pending)
-        pending.clear()
-        pending_steps = 0
-        sched_step = pending_sched_step if pending_sched_step is not None else int(shared_steps.value)
-        pending_sched_step = None
+        sched_step = sched_step_anchor if sched_step_anchor is not None else int(shared_steps.value)
+        sched_step_anchor = None
 
-        rewards = mega["rewards"]
-        dones = mega["dones"]
-        old_vals = mega["old_values"]
-        old_logp = mega["old_logp"]
-        obs_img = mega["obs_img"]
-        obs_fl = mega["obs_float"]
-        actions = mega["actions"]
+        beta = dpo_scheduled_float(cfg, "dpo_beta", "dpo_beta_schedule", sched_step)
+        vf_coef = dpo_scheduled_float(cfg, "dpo_vf_coef", "dpo_vf_coef_schedule", sched_step)
+        max_grad_norm = dpo_scheduled_float(cfg, "dpo_max_grad_norm", "dpo_max_grad_norm_schedule", sched_step)
 
-        gamma_t = scheduled_rollout_shaping_gamma(cfg, sched_step)
-        gae_lambda_t = ppo_scheduled_float(cfg, "gae_lambda", "gae_lambda_schedule", sched_step)
-        ent_coef_t = ppo_scheduled_float(cfg, "ent_coef", "ent_coef_schedule", sched_step)
-        vf_coef_t = ppo_scheduled_float(cfg, "vf_coef", "vf_coef_schedule", sched_step)
-
-        T = rewards.shape[0]
-        next_value = torch.zeros((), device=device, dtype=rewards.dtype)
-        advantages, returns = compute_gae(
-            rewards,
-            old_vals,
-            dones,
-            next_value,
-            gamma_t,
-            gae_lambda_t,
-        )
-        if cfg.normalize_advantages:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        n_mb = max(1, cfg.num_minibatches)
-        mb = max(1, T // n_mb)
-        update_epochs = cfg.update_epochs
+        bw, bl = _align_trajectory_batches(bw, bl)
+        if bw["actions"].shape[0] < 2:
+            continue
 
         total_loss_acc = 0.0
-        metrics_acc: dict[str, float] = defaultdict(float)
         opt_steps = 0
-
         for _ in range(update_epochs):
-            idx = torch.randperm(T, device=device)
-            for start in range(0, T, mb):
-                sel = idx[start : start + mb]
-                ob_i = obs_img[sel]
-                of_i = obs_fl[sel]
-                act_i = actions[sel]
-                ol_i = old_logp[sel]
-                adv_i = advantages[sel]
-                ret_i = returns[sel]
-                ov_i = old_vals[sel]
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                logp_pi_w, _ent_w, vals_w = sum_log_probs_evaluate(policy, bw["obs_img"], bw["obs_float"], bw["actions"])
+                logp_pi_l, _ent_l, vals_l = sum_log_probs_evaluate(policy, bl["obs_img"], bl["obs_float"], bl["actions"])
+                with torch.no_grad():
+                    logp_ref_w, _, _ = sum_log_probs_evaluate(ref_policy, bw["obs_img"], bw["obs_float"], bw["actions"])
+                    logp_ref_l, _, _ = sum_log_probs_evaluate(ref_policy, bl["obs_img"], bl["obs_float"], bl["actions"])
+                loss_dpo = dpo_preference_loss(logp_pi_w, logp_ref_w, logp_pi_l, logp_ref_l, beta)
+                ov_w = bw["old_values"].reshape(-1)
+                ov_l = bl["old_values"].reshape(-1)
+                loss_v = F.mse_loss(vals_w.reshape(-1), ov_w) + F.mse_loss(vals_l.reshape(-1), ov_l)
+                loss = loss_dpo + vf_coef * loss_v
 
-                optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                    if not hasattr(policy, "evaluate_actions"):
-                        raise RuntimeError("PPO policy must implement evaluate_actions")
-                    logp, ent, vals, _ = policy.evaluate_actions(ob_i, of_i, act_i)
-                    loss, m = ppo_loss_components(
-                        logp,
-                        ol_i,
-                        adv_i,
-                        vals,
-                        ret_i,
-                        ent,
-                        cfg.clip_coef,
-                        vf_coef_t,
-                        ent_coef_t,
-                        old_values=ov_i,
-                        clip_coef_vf=getattr(cfg, "clip_coef_vf", None),
-                    )
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
-
-                opt_steps += 1
-                total_loss_acc += float(loss.detach())
-                for k, v in m.items():
-                    metrics_acc[k] += float(v.detach())
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+            opt_steps += 1
+            total_loss_acc += float(loss.detach())
 
         update_count += 1
-        for k in metrics_acc:
-            metrics_acc[k] /= max(1, opt_steps)
+        if update_count % ref_sync_every == 0:
+            ref_policy.load_state_dict(uncompiled_local.state_dict())
 
         lr = utilities.from_exponential_schedule(cfg.lr_schedule, shared_steps.value)
         for pg in optimizer.param_groups:
@@ -329,24 +325,13 @@ def learner_ppo_process_fn(
             uncompiled_shared_network.load_state_dict(uncompiled_local.state_dict())
 
         loss_mean = total_loss_acc / max(1, opt_steps)
-        kl_mean = metrics_acc.get("approx_kl", 0.0)
-        cf_mean = metrics_acc.get("clipfrac", 0.0)
-        vfcf_mean = metrics_acc.get("vf_clipfrac", 0.0)
         gstep_updates = int(shared_steps.value)
-        writer.add_scalar("Training/ppo_loss", loss_mean, gstep_updates)
-        writer.add_scalar("Training/ppo_approx_kl", kl_mean, gstep_updates)
-        writer.add_scalar("Training/ppo_clipfrac", cf_mean, gstep_updates)
-        writer.add_scalar("Training/ppo_vf_clipfrac", vfcf_mean, gstep_updates)
+        writer.add_scalar("Training/dpo_loss", loss_mean, gstep_updates)
         writer.add_scalar("Training/learning_rate", lr, gstep_updates)
-        writer.add_scalar("PPO/gamma", gamma_t, gstep_updates)
-        writer.add_scalar("PPO/gae_lambda", gae_lambda_t, gstep_updates)
-        writer.add_scalar("PPO/ent_coef", ent_coef_t, gstep_updates)
-        writer.add_scalar("PPO/vf_coef", vf_coef_t, gstep_updates)
-        writer.add_scalar("PPO/rollout_size", T, gstep_updates)
-        last_ppo_loss = loss_mean
-        last_ppo_kl = kl_mean
-        last_ppo_clipfrac = cf_mean
-        last_ppo_vf_clipfrac = vfcf_mean
+        writer.add_scalar("DPO/beta", beta, gstep_updates)
+        writer.add_scalar("DPO/vf_coef", vf_coef, gstep_updates)
+        writer.add_scalar("DPO/max_grad_norm", max_grad_norm, gstep_updates)
+        last_loss = loss_mean
         last_lr = lr
 
         if time.perf_counter() - time_last_save >= 300:
@@ -387,22 +372,13 @@ def learner_ppo_process_fn(
             utilities.save_ppo_checkpoint(save_dir, policy, optimizer, scaler)
             joblib.dump(dict(accumulated_stats), save_dir / "accumulated_stats.joblib")
 
-            loss_s = f"{last_ppo_loss:.4e}" if last_ppo_loss is not None else "n/a"
-            kl_s = f"{last_ppo_kl:.5f}" if last_ppo_kl is not None else "n/a"
-            cf_s = f"{last_ppo_clipfrac:.4f}" if last_ppo_clipfrac is not None else "n/a"
-            vfcf_s = f"{last_ppo_vf_clipfrac:.4f}" if last_ppo_vf_clipfrac is not None else "n/a"
+            loss_s = f"{last_loss:.4e}" if last_loss is not None else "n/a"
             lr_s = f"{last_lr:.2e}" if last_lr is not None else "n/a"
             print("\n" + "=" * 80)
-            print(f"  PPO TRAINING SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  DPO TRAINING SUMMARY - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("=" * 80)
             print(f"  Frames played: {accumulated_stats['cumul_number_frames_played']:,}")
-            print(f"  Training hours: {accumulated_stats['cumul_training_hours']:.2f}h")
-            print(f"  Env frames/sec: {env_frames_per_second:.1f}")
-            print(
-                f"  PPO updates: {update_count}  |  last loss: {loss_s}  |  approx_kl: {kl_s}  |  "
-                f"clipfrac: {cf_s}  |  vf_clipfrac: {vfcf_s}"
-            )
-            print(f"  Learning rate: {lr_s}")
+            print(f"  DPO updates: {update_count}  |  last loss: {loss_s}  |  lr: {lr_s}")
             print("-" * 80)
             print("  BEST TIMES:")
             if accumulated_stats["alltime_min_ms"]:
@@ -413,6 +389,6 @@ def learner_ppo_process_fn(
             else:
                 print("    (no finished race times yet)")
             print("=" * 80 + "\n")
-            print(f"[OK] PPO checkpoint saved (update {update_count}, frames {shared_steps.value:,})")
+            print(f"[OK] DPO checkpoint saved (update {update_count}, frames {shared_steps.value:,})")
 
         sys.stdout.flush()

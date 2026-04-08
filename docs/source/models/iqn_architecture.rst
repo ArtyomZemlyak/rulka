@@ -148,6 +148,7 @@ See also
 
 - :doc:`nn_topology_catalog` — full matrix of supported ``nn`` topologies.
 - :doc:`ppo_architecture` — same multimodal / HF bodies with policy heads.
+- :doc:`grpo_architecture` — same bodies under ``ppo_wiring``; GRPO-specific training.
 - :doc:`btr_architecture` — IQN extras under ``btr:``.
 - :doc:`../experiments/models/iqn` — experiments.
 - :doc:`../configuration_guide` — full ``nn`` reference.

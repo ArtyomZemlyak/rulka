@@ -3,9 +3,16 @@
 PPO actor-critic architecture
 =============================
 
-This page documents the policy and value network used when
-``training.algorithm`` is ``ppo``: a **shared-trunk actor-critic** with
-**discrete** actions. Implementation lives under
+This page documents the policy and value network used for **on-policy policy
+optimization** with a **discrete** shared-trunk actor-critic. The **same** stacks
+and ``ppo_wiring`` factory are used when ``training.algorithm`` is ``ppo``,
+``dpo``, or ``grpo``; **this page** details the **network** (Variants A/B/C) and
+the **PPO** training loop (GAE, clipped surrogate, value loss). **DPO** keeps the
+same bodies but trains from preference pairs; **GRPO** uses group-relative
+trajectory returns — see :doc:`grpo_architecture`.
+
+When ``training.algorithm`` is ``ppo`` specifically, you get a **shared-trunk
+actor-critic** as described below. Implementation lives under
 ``trackmania_rl.agents.policy_models`` and is wired via
 ``trackmania_rl.agents.algorithms.ppo_wiring``.
 
@@ -19,6 +26,45 @@ single source as IQN and Variant A PPO (``trackmania_rl/nn_build/vis_cnn_head.py
 
 YAML knobs for PPO routing and vision (``nn.fusion_mode``, ``nn.vis``, ``nn.float``, ``nn.encoder``): :ref:`nn-yaml-reference` in :doc:`../configuration_guide`. Optional :ref:`nn-rl-parameter-freeze` (e.g. ``nn.vis.freeze``, ``nn.encoder.freeze``, ``nn.decoder.shared_trunk_freeze``) applies to PPO the same way as to IQN where documented.
 
+Why this stack is shaped this way
+---------------------------------
+
+**Image + float inputs.** TrackMania gives both rendered frames and a normalized
+float vector (geometry, speed, gear, …). Vision learns what the road *looks* like;
+the float path carries signals that are tedious to infer from pixels alone.
+**Why both feed one trunk:** a single representation is used for action logits and
+for the value baseline, so both tasks co-adapt the same features.
+
+**Shared trunk, two heads (policy + value).** The **policy head** defines a
+categorical over discrete actions (including multi-offset layouts). The **value
+head** predicts expected return from each state. **Why actor-critic:** the critic
+feeds GAE and the value loss, which reduces variance of policy gradients compared
+to pure Monte Carlo returns.
+
+**On-policy PPO loop.** Data are generated with the *current* policy, then
+discarded after a few epochs of updates. **Why not replay (here):** keeps the
+off-policy correction simple; PPO’s clipped ratio explicitly limits change w.r.t.
+the policy that collected the batch, which stabilizes training when rewards are
+dense and correlated.
+
+**Collectors vs learner.** Environments run in parallel processes; inference must
+be fast. Collectors only **forward + sample** and enqueue lists; the learner does
+**backward + optimizer** on aggregated GPU batches. **Why store ``ppo_log_probs``:**
+PPO’s ratio compares :math:`\pi_\theta` to :math:`\pi_{\mathrm{old}}` — the policy
+that actually produced the actions on the rollout.
+
+**GAE (:math:`\gamma`, :math:`\lambda`).** Trade off bias vs variance of advantage
+estimates using the value function and n-step structure. **Why:** raw one-step
+TD is noisy; full Monte Carlo is high-variance; GAE interpolates.
+
+**Clipped surrogate.** Penalty if the new policy assigns much more probability to
+the taken actions than the behavior policy did. **Why:** approximate trust region
+— large policy jumps on one minibatch tend to break the on-policy assumption.
+
+**Value loss + entropy bonus.** The critic is trained toward return targets; the
+entropy term discourages premature collapse to deterministic actions. **Why:** without
+entropy, exploration from stochastic sampling fades as logits sharpen.
+
 Routing: which network is built?
 --------------------------------
 
@@ -30,8 +76,58 @@ routing is implemented by ``ppo_wiring.build_ppo_policy_uncompiled`` (no ``torch
 2. Else if ``nn.vis.transformer`` is set **and** ``use_hf_backbone`` is true → **Variant B** — ``HfActorCritic`` (Hugging Face ``AutoModel`` CLS + float MLP + shared trunk).
 3. Else → **Variant A** — ``PpoActorCritic`` (``nn.vis.cnn`` image head via the same ``_build_img_head`` kwargs as IQN, or float-only if ``no_image`` / no CNN).
 
+**Why three variants.** **A** is the default conv + MLP path (fast, full control of
+CNN flags). **B** plugs in a **pretrained HF** vision backbone when you want
+transfer from large-scale image pretraining. **C** uses **fusion transformers** so
+image and float features interact through attention (and optional hub round-trip),
+instead of a single early concat — useful when alignment between modalities is
+subtle.
+
 .. note::
    If ``fusion_mode: none`` but YAML declares **only** ``nn.vis.transformer`` with ``use_hf_backbone: false`` (no ``cnn``), the CNN branch sees no image stem → **float-only** PPO (zeros image tensor at inference). For CNN PPO, keep ``nn.vis.cnn``.
+
+Training stack (processes and modules)
+--------------------------------------
+
+``scripts/train.py`` starts a **learner** process and several **collector** processes.
+For ``training.algorithm: ppo``, the learner runs ``learner_ppo``; collectors attach
+``PPOInferer`` and push rollouts into multiprocessing queues. The **same** policy
+weights exist as a compiled CUDA module in collectors and as trainable parameters
+in the learner; after each PPO update the learner copies state dict into the
+shared ``uncompiled`` copy under ``shared_network_lock`` (collectors refresh their
+view from that copy — same pattern as IQN’s weight sync).
+
+.. graphviz::
+
+   digraph ppo_process_stack {
+      rankdir=TB;
+      node [shape=box, fontname="Helvetica", fontsize=10];
+      train [label="scripts/train.py", style="rounded,filled", fillcolor=lightcyan];
+      lp [label="learner_process.py\nif algorithm == ppo → learner_ppo", style="filled", fillcolor=lightyellow];
+      cp [label="collector_process.py × N\nis_policy_optimization_algorithm()", style="filled", fillcolor=lightyellow];
+      inf [label="PPOInferer\n(forward + sample + log p, V)"];
+      lppo [label="learner_ppo.py\nrollout batch → GAE → PPO loss → Adam"];
+      pol [label="policy network\n(make_network)", style="filled", fillcolor=lightgreen];
+      sh [label="uncompiled_shared_network\n+ shared_network_lock", style="filled", fillcolor=lightpink];
+      q [label="rollout_queues\n(multiprocessing)"];
+      train -> lp;
+      train -> cp;
+      lp -> lppo;
+      cp -> inf;
+      inf -> pol;
+      lppo -> pol;
+      inf -> q [label="put"];
+      q -> lppo [label="get"];
+      lppo -> sh [label="load_state_dict"];
+      inf -> sh [style=dashed, label="weights for inference"];
+   }
+
+**Registry:** ``training.algorithm: ppo`` resolves to ``trackmania_rl.agents.algorithms.ppo_wiring`` via ``registry.get_wiring()`` (same module also serves DPO/GRPO for **network** build only).
+
+**``uncompiled_shared_network`` and the lock.** After each update the learner
+writes weights into a shared module; collectors read that snapshot for inference.
+**Why:** one authoritative weight tensor for many parallel games without training
+inside env processes.
 
 Overview
 --------
@@ -50,6 +146,10 @@ Outputs:
   than one offset): ``(B, n_actions_per_block * n_actions)`` reshaped to
   ``(B, N, n_actions)`` inside ``evaluate_actions``.
 - **Value:** scalar ``V(s)`` per sample, ``(B, 1)`` before squeeze.
+
+**Float normalization** :math:`(x-\mu)/\sigma` (running buffers) matches IQN so BC /
+IQN / PPO can share statistics. **Why:** stable MLP inputs when raw speeds and
+distances have different scales.
 
 .. graphviz::
 
@@ -220,8 +320,13 @@ IQN vs PPO (same inputs, different heads)
      - ε-greedy / Boltzmann / NoisyNet (config)
      - Stochastic policy sample from **Categorical**
 
-Training flow (high level)
---------------------------
+Training flow (high level) — ``training.algorithm: ppo`` only
+--------------------------------------------------------------
+
+The following loop runs in ``trackmania_rl.multiprocess.learner_ppo`` when the
+algorithm is **PPO**. It does **not** apply to DPO or GRPO (those learners reuse
+collectors and often the same rollout tensor builder, but substitute their own
+losses).
 
 .. graphviz::
 
@@ -235,6 +340,90 @@ Training flow (high level)
       loss [label="PPO loss:\nclip + c_v·L_V − c_e·H"];
       col -> q -> rew -> gae -> loss;
    }
+
+**Per-step training objective (schematic):** the learner minimizes a sum of **clipped
+policy surrogate**, **value error** (often with clipping vs old values), and
+**negative entropy** (i.e. entropy bonus). ``ppo_loss_components`` in
+``trackmania_rl/agents/policy_optimization/ppo.py`` implements the algebra; exact
+coefficients and schedules come from ``ppo:`` in YAML (:ref:`ppo-config` in
+:doc:`../configuration_guide`).
+
+.. graphviz::
+
+   digraph ppo_loss_schematic {
+      rankdir=TB;
+      node [shape=box, fontname="Helvetica", fontsize=10];
+      inp [label="batch:\nlog π_old, V_old, a, r, done\n+ forward: log π_θ, V_θ", style="filled", fillcolor=lightblue];
+      rat [label="ratio r = exp(log π_θ − log π_old)"];
+      clip [label="L_clip = min(r·Â, clip(r)·Â)"];
+      lv [label="L_V: MSE or clipped value vs returns R"];
+      ent [label="entropy H[π_θ]\n−c_e · mean(H)"];
+      sum [label="loss = −L_clip + c_v·L_V − c_e·H\n(minimize)", style="filled", fillcolor=lightgreen];
+      inp -> rat -> clip -> sum;
+      inp -> lv -> sum;
+      inp -> ent -> sum;
+   }
+
+Reading the loss diagram:
+
+- **Clipped policy branch:** if the ratio :math:`r` moves outside
+  :math:`[1-\varepsilon, 1+\varepsilon]`, the objective flattens — **so the
+  update does not over-reward** actions that the new policy already exploits much
+  more than the old one.
+- **Value branch:** pulls :math:`V_\theta` toward returns (optionally clipped to
+  old values) — **so the critic tracks** what will happen from each state, which
+  in turn makes GAE’s advantages more accurate.
+- **Entropy branch:** subtracts mean entropy from the loss (i.e. **maximize**
+  entropy) — **so sampling stays diverse** early in training.
+
+**Advantage flow:** ``compute_gae`` consumes step rewards, ``V(s_t)`` at collection
+time, dones, and a bootstrap value at the rollout tail; it outputs per-step
+advantages :math:`\hat{A}_t` and returns :math:`R_t` for the value target.
+
+.. graphviz::
+
+   digraph ppo_gae_flow {
+      rankdir=LR;
+      node [shape=box, fontname="Helvetica", fontsize=10];
+      r [label="rewards r_t", style="filled", fillcolor=lightblue];
+      v [label="values V(s_t)", style="filled", fillcolor=lightblue];
+      d [label="dones", style="filled", fillcolor=lightblue];
+      gae [label="compute_gae\n(γ, λ)"];
+      out [label="Â_t , R_t", style="filled", fillcolor=lightgreen];
+      r -> gae;
+      v -> gae;
+      d -> gae;
+      gae -> out;
+   }
+
+**Rollout payload (per episode chunk):** collectors enqueue Python lists the learner
+turns into GPU tensors. DPO/GRPO reuse the same keys for the shared builder
+(``policy_rollout_batch``).
+
+.. graphviz::
+
+   digraph ppo_rollout_payload {
+      rankdir=LR;
+      node [shape=box, fontname="Helvetica", fontsize=10];
+      col [label="collector\nPPOInferer step", style="filled", fillcolor=lightyellow];
+      f [label="frames[]"];
+      sf [label="state_float[]"];
+      a [label="actions[]"];
+      lp [label="ppo_log_probs[]"];
+      pv [label="ppo_values[]"];
+      q [label="rollout_queue\n+ end_race_stats", style="filled", fillcolor=lightpink];
+      col -> f -> q;
+      col -> sf -> q;
+      col -> a -> q;
+      col -> lp -> q;
+      col -> pv -> q;
+   }
+
+**Why every queue field matters:** ``frames`` / ``state_float`` reconstruct
+:math:`s_t`; ``actions`` are the labels for :math:`\log\pi(a|s)`;
+``ppo_log_probs`` are :math:`\log\pi_{\mathrm{old}}` at collection time;
+``ppo_values`` bootstrap GAE and the value loss. ``end_race_stats`` drives logging
+and some reward edge cases (e.g. finish flags).
 
 1. **Collectors** run the compiled (or eager) actor-critic on CUDA; append
    ``ppo_log_probs``, ``ppo_values``, frames, ``state_float``, actions.
@@ -271,12 +460,14 @@ Implementation references
   rewards for PPO.
 - ``trackmania_rl/reward_vectorized.py`` — shared dense reward + potentials.
 - ``trackmania_rl/multiprocess/learner_ppo.py`` — PPO learner loop.
-- ``trackmania_rl/multiprocess/collector_process.py`` — attaches PPO inferer when
-  ``algorithm == ppo``.
+- ``trackmania_rl/multiprocess/collector_process.py`` — attaches ``PPOInferer`` for
+  any policy-optimization algorithm (``ppo``, ``dpo``, ``grpo``).
 
 See also
 --------
 
+- :doc:`grpo_architecture` — same policy network; group-relative trajectory training.
+- DPO (preference learning, same network): :ref:`dpo-config` in :doc:`../configuration_guide`.
 - :doc:`nn_topology_catalog` — full matrix of supported ``nn`` topologies.
 - :doc:`iqn_architecture` — baseline value-based architecture.
 - :doc:`btr_architecture` — IQN-only extras (not applied to PPO CNN factory).

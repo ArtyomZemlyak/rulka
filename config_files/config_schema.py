@@ -118,7 +118,7 @@ class TrainingConfig(BaseModel):
     run_name: str = "uni_18"
     # RL stack key for get_wiring (train / learner / collector). Network shape comes from nn (flat neural_network) + btr + environment, not from this field.
     # Checkpoints under save/<run_name>/ must match the same algorithm + architecture as the run that wrote them.
-    algorithm: Literal["iqn", "ppo"] = "iqn"
+    algorithm: Literal["iqn", "ppo", "dpo", "grpo"] = "iqn"
     pretrain_encoder_path: Optional[str] = None
     # Optional: path to BC run dir or to iqn_bc.pt to load full IQN state into checkpoints.
     # All matching parts are loaded: img_head, float_feature_extractor, iqn_fc, A_head, V_head.
@@ -153,6 +153,18 @@ class TrainingConfig(BaseModel):
     )
     gamma_schedule: list[ScheduleStepFloat] = Field(
         default_factory=lambda: [[0, 0.999], [1_500_000, 0.999], [2_500_000, 1]]
+    )
+    # On-policy rollout reward shaping (PPO / DPO / GRPO): discount in potential-based folding when
+    # building per-step rewards from env rollouts. Same γ PPO uses for GAE on those rewards.
+    # Not IQN ``gamma_schedule`` above (n-step return). Prefer these over legacy ``ppo.gamma`` /
+    # ``ppo.ppo_gamma_schedule`` for clarity; if unset, code falls back to ``ppo:``.
+    policy_rollout_gamma: Optional[float] = Field(
+        default=None,
+        description="Scalar γ when no policy_rollout_gamma_schedule. If None, uses ppo.gamma.",
+    )
+    policy_rollout_gamma_schedule: Optional[list[ScheduleStepFloat]] = Field(
+        default=None,
+        description="Piecewise-linear γ vs cumul frames for on-policy rollout shaping; overrides ppo.ppo_gamma_schedule when set.",
     )
     n_steps: int = 3
     discard_non_greedy_actions_in_nsteps: bool = True
@@ -341,8 +353,9 @@ class UserConfig(BaseSettings):
         return platform in ["linux", "linux2"]
 
 
-# --- PPO (used when training.algorithm == "ppo"; IQN ignores this block) ---
+# --- PPO (algorithm == "ppo" for loss hyperparams; DPO/GRPO may omit this block if rollout γ is under training) ---
 class PPOConfig(BaseModel):
+    # Legacy fallback for on-policy rollout shaping + GAE γ when training.policy_rollout_* is unset.
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
@@ -357,11 +370,51 @@ class PPOConfig(BaseModel):
     rollout_steps_per_update: int = 2048
     # Optional [[frame, value], ...] schedules; linear interpolation vs cumul_number_frames_played
     # (same step axis as training.lr_schedule). If omitted, the scalar above is used (implicit [[0, scalar]]).
-    # Named ppo_gamma_schedule: training.gamma_schedule is IQN n-step discount, flat cfg resolves training first.
+    # Legacy: prefer ``training.policy_rollout_gamma_schedule`` for rollout shaping + PPO GAE γ.
     ppo_gamma_schedule: Optional[list[ScheduleStepFloat]] = None
     gae_lambda_schedule: Optional[list[ScheduleStepFloat]] = None
     ent_coef_schedule: Optional[list[ScheduleStepFloat]] = None
     vf_coef_schedule: Optional[list[ScheduleStepFloat]] = None
+
+
+# --- DPO (training.algorithm == "dpo"; same actor-critic wiring as PPO) ---
+# Field names prefixed where needed so ConfigView flat access does not shadow ``ppo:`` / ``training:``.
+class DPOConfig(BaseModel):
+    dpo_beta: float = 0.1
+    dpo_ref_sync_every_updates: int = 1
+    dpo_pair_buffer_max: int = 64
+    dpo_data_mode: Literal["online", "offline", "both"] = "online"
+    # Repo-relative or absolute path to JSONL; each line: {"chosen": "<joblib path>", "rejected": "<joblib path>"}
+    # Each joblib file: tuple (rollout_results_dict, end_race_stats_dict).
+    dpo_offline_pairs_jsonl: Optional[str] = None
+    dpo_vf_coef: float = 0.1
+    dpo_update_epochs: int = 4
+    # Reserved for future variable-length pair minibatching (currently unused by learner_dpo).
+    dpo_num_minibatches: int = 4
+    dpo_max_grad_norm: float = 0.5
+    # Optional [[frame, value], ...]; linear interpolation vs cumul_number_frames_played
+    # (same axis as training.lr_schedule). If omitted, the scalar above is used (implicit [[0, scalar]]).
+    dpo_beta_schedule: Optional[list[ScheduleStepFloat]] = None
+    dpo_vf_coef_schedule: Optional[list[ScheduleStepFloat]] = None
+    dpo_max_grad_norm_schedule: Optional[list[ScheduleStepFloat]] = None
+
+
+# --- GRPO (training.algorithm == "grpo"; group-relative policy optimization) ---
+class GRPOConfig(BaseModel):
+    grpo_group_size: int = 4
+    grpo_normalize_group: Literal["mean", "mean_std"] = "mean"
+    grpo_ent_coef: float = 0.01
+    grpo_max_grad_norm: float = 0.5
+    grpo_update_epochs: int = 4
+    # Reserved for future within-group minibatching (currently unused by learner_grpo).
+    grpo_num_minibatches: int = 4
+    grpo_ref_sync_every_updates: int = 50
+    grpo_ref_kl_coef: float = 0.0  # 0 = disabled; else KL(ref) regularizer
+    # Optional [[frame, value], ...]; linear interpolation vs cumul_number_frames_played
+    # (same axis as training.lr_schedule). If omitted, the scalar above is used (implicit [[0, scalar]]).
+    grpo_ent_coef_schedule: Optional[list[ScheduleStepFloat]] = None
+    grpo_max_grad_norm_schedule: Optional[list[ScheduleStepFloat]] = None
+    grpo_ref_kl_coef_schedule: Optional[list[ScheduleStepFloat]] = None
 
 
 # --- BTR (Beyond The Rainbow) ---
@@ -419,5 +472,7 @@ class RulkaConfig(BaseModel):
     user: UserConfig = Field(default_factory=UserConfig)
     btr: BTRConfig = Field(default_factory=BTRConfig)
     ppo: PPOConfig = Field(default_factory=PPOConfig)
+    dpo: DPOConfig = Field(default_factory=DPOConfig)
+    grpo: GRPOConfig = Field(default_factory=GRPOConfig)
 
     model_config = {"arbitrary_types_allowed": True}

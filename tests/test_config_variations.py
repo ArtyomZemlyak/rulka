@@ -24,7 +24,7 @@ class TestAllRlYamlLoad(unittest.TestCase):
                 cfg = load_config(path)
                 self.assertGreater(cfg.w_downsized, 0)
                 self.assertGreater(cfg.h_downsized, 0)
-                self.assertIn(cfg.algorithm, ("iqn", "ppo"))
+                self.assertIn(cfg.algorithm, ("iqn", "ppo", "dpo", "grpo"))
                 self.assertTrue(hasattr(cfg, "vis"), "ConfigView must expose nn.vis")
                 v = cfg.vis
                 self.assertTrue(v.no_image or v.cnn is not None or v.transformer is not None)

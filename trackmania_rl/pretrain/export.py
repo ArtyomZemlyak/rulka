@@ -634,8 +634,11 @@ def inject_ppo_bc_policy_into_save_dir(
         raise FileNotFoundError(f"PPO BC checkpoint not found (expected ppo_policy_bc.pt): {p}")
 
     cfg = get_config()
-    if getattr(cfg, "algorithm", "") != "ppo":
-        raise ValueError("inject_ppo_bc_policy_into_save_dir requires training.algorithm: ppo")
+    if not utilities.is_policy_optimization_algorithm(getattr(cfg, "algorithm", "")):
+        raise ValueError(
+            "inject_ppo_bc_policy_into_save_dir requires training.algorithm in "
+            f"{sorted(utilities.POLICY_OPTIMIZATION_ALGORITHMS)}"
+        )
 
     if uncompiled is None:
         wiring = get_wiring()

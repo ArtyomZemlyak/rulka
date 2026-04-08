@@ -1,7 +1,8 @@
-# PPO (on-policy actor-critic). Image: nn.vis.cnn XOR nn.vis.transformer (HF ViT = transformer only).
-# Run: python scripts/train.py --config config_files/rl/config_ppo.yaml
+# GRPO (group-relative policy optimization). Same actor-critic and collector contract as PPO; learner groups K rollouts.
+# Run: python scripts/train.py --config config_files/rl/config_grpo.yaml
+# Needs K successful tensorized rollouts per update (grpo_group_size). Rollout step rewards use ``training.policy_rollout_gamma*`` (same builder as PPO; not PPO loss).
 # HF: nn.fusion_mode none + vis.transformer.use_hf_backbone true + model_name_or_path (pip install -e ".[policy]"; use_jit false unless compile verified).
-# CNN stem output width: schema default nn.iqn.embedding_dimension (128). Set nn.iqn.embedding_dimension in YAML only if you need a non-default size.
+# CNN stem width: default nn.iqn.embedding_dimension (128) from schema unless you add nn.iqn to YAML.
 
 environment:
   tm_engine_step_per_action: 5
@@ -49,11 +50,10 @@ nn:
   training:
     use_jit: true
 
-# Optimizer, LR, TB. IQN-only training.* / replay / n-step / batch_size omitted (schema defaults for unused fields).
-# policy_rollout_gamma*: shared by rollout tensor builder and PPO GAE (not IQN training.gamma_schedule).
+# Optimizer / LR / TB (same entry points as PPO/DPO).
 training:
-  run_name: "ppo_smoke_run"
-  algorithm: ppo
+  run_name: "grpo_smoke_run"
+  algorithm: grpo
   adam_epsilon: 0.0001
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -77,27 +77,23 @@ training:
     - [12000000, 0.995]
     - [30000000, 0.997]
 
-ppo:
-  clip_coef: 0.2
-  # Value head: clip V to V_old ± ε (PPO2); omit or null for plain MSE to returns.
-  clip_coef_vf: 0.2
-  max_grad_norm: 0.5
-  update_epochs: 4
-  num_minibatches: 4
-  normalize_advantages: true
-  rollout_steps_per_update: 2048
-  gae_lambda_schedule:
-    - [0, 0.95]
-    - [15000000, 0.97]
-  # Discrete actions: entropy coef often ~1e-3–1e-2; decay as policy sharpens (SB3-style constant small coef, here explicit decay).
-  ent_coef_schedule:
+grpo:
+  grpo_group_size: 128
+  grpo_update_epochs: 10
+  grpo_normalize_group: mean
+  # grpo_ent_coef: 0.5
+  # Optional piecewise-linear vs cumul frames (× training.global_schedule_speed), like ppo.ent_coef_schedule.
+  grpo_ent_coef_schedule:
     - [0, 0.5]
-    - [30000, 0.01]
-    - [120000, 0.002]
-    - [15000000, 0.0005]
-  vf_coef_schedule:
-    - [0, 0.5]
-    - [15000000, 0.35]
+    - [10000000, 0.01]
+    - [100000000, 0.001]
+  grpo_max_grad_norm: 0.5
+  # grpo_max_grad_norm_schedule:
+  #   - [0, 0.5]
+  grpo_ref_kl_coef: 0.0
+  # grpo_ref_kl_coef_schedule:
+  #   - [0, 0.0]
+  grpo_ref_sync_every_updates: 50
 
 rewards:
   constant_reward_per_ms: -0.0012
@@ -116,11 +112,11 @@ rewards:
 
 map_cycle:
   entries:
-    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 64}
+    - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: true, fill_buffer: true, repeat: 1}
     - {short_name: A01, map_path: '"A01-Race.Challenge.Gbx"', reference_line_path: "A01_0.5m_cl.npy", is_exploration: false, fill_buffer: true, repeat: 1}
 
 performance:
-  gpu_collectors_count: 8
+  gpu_collectors_count: 4
   max_rollout_queue_size: 4
   update_inference_network_every_n_actions: 128
   running_speed: 32

@@ -64,7 +64,11 @@ from torch.multiprocessing import Lock
 from trackmania_rl.agents.algorithms import get_wiring
 from trackmania_rl.multiprocess.collector_process import collector_process_fn
 from trackmania_rl.multiprocess.learner_process import learner_process_fn
-from trackmania_rl.utilities import set_random_seed
+from trackmania_rl.utilities import (
+    clear_tensorboard_run_directories,
+    is_policy_optimization_algorithm,
+    set_random_seed,
+)
 
 # noinspection PyUnresolvedReferences
 torch.backends.cudnn.benchmark = True
@@ -177,13 +181,15 @@ if __name__ == "__main__":
                 print("[OK] Pretrain A_head (actions_head.pt) injected.")
 
     # PPO BC: if ppo_policy_bc.pt exists, we inject after the first make_network (see skip_multimodal_fusion_hub_init_from_pretrained).
-    if config.algorithm == "ppo" and config.pretrain_ppo_policy_path and not weights_existed:
+    if is_policy_optimization_algorithm(config.algorithm) and config.pretrain_ppo_policy_path and not weights_existed:
         _bc_raw = Path(base_dir) / config.pretrain_ppo_policy_path
         _bc_pt = _bc_raw / "ppo_policy_bc.pt" if _bc_raw.is_dir() else _bc_raw
         if _bc_pt.is_file():
             ppo_bc_inject_candidate = True
 
     tensorboard_base_dir = Path(base_dir) / "tensorboard"
+    if not weights_existed:
+        clear_tensorboard_run_directories(tensorboard_base_dir, config.run_name, config.tensorboard_suffix_schedule)
 
     # Copy Angelscript plugin to TMInterface dir
     shutil.copyfile(
@@ -231,7 +237,7 @@ if __name__ == "__main__":
     # Collectors start before the learner runs; their first ``update_network`` copies ``shared_state_dict``
     # into local policy. That dict aliases parent parameters only if they already match the checkpoint.
     # On resume, ``make_network`` above used fresh HF init — load ``weights1.torch`` here so shared sync is correct.
-    if config.algorithm == "ppo":
+    if is_policy_optimization_algorithm(config.algorithm):
         w1_align = save_dir / "weights1.torch"
         if w1_align.is_file():
             from trackmania_rl import utilities as _trl_utilities
@@ -244,7 +250,7 @@ if __name__ == "__main__":
             uncompiled_shared_network.load_state_dict(_prep0, strict=True)
             if weights_existed:
                 print(
-                    "[OK] PPO: parent policy synced from weights1.torch before collectors (resume / shared_state_dict)."
+                    "[OK] Policy (PPO/DPO/GRPO): parent synced from weights1.torch before collectors (resume / shared_state_dict)."
                 )
 
     with shared_network_lock:
